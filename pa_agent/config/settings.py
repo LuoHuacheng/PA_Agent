@@ -62,12 +62,12 @@ class GeneralSettings(BaseModel):
     analysis_bar_count: int = Field(default=100, ge=2, le=5000)
     refresh_interval_ms: int = 1000
     context_warning_threshold_pct: float = 80.0
-    last_data_source: DataSourceKind = "mt5"
+    last_data_source: DataSourceKind = "tradingview"
     #: A-share K-line adjust for East Money / Baostock (qfq=前复权)
     kline_adjust: Literal["qfq", "hfq", "none"] = "qfq"
     #: TradingView 交易所；空字符串 =（自动）依次探测预设列表
     last_tradingview_exchange: str = ""
-    last_symbol: str = "XAUUSDm"
+    last_symbol: str = "XAUUSD"
     last_timeframe: str = "15m"
     decision_flow_auto_play: bool = True
     decision_flow_play_seconds: int = 50

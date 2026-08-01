@@ -16,8 +16,8 @@ from pa_agent.data.tradingview import TradingViewSource
 
 
 def test_normalize_data_source_kind_defaults_unknown():
-    assert normalize_data_source_kind("invalid") == "mt5"
-    assert normalize_data_source_kind(None) == "mt5"
+    assert normalize_data_source_kind("invalid") == "tradingview"
+    assert normalize_data_source_kind(None) == "tradingview"
 
 
 def test_normalize_data_source_kind_hidden_sources():
@@ -58,4 +58,4 @@ def test_default_tradingview_exchange_is_auto():
 
 def test_general_settings_last_data_source_default():
     g = GeneralSettings()
-    assert g.last_data_source == "mt5"
+    assert g.last_data_source == "tradingview"

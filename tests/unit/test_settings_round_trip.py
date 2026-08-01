@@ -18,7 +18,7 @@ def test_defaults(tmp_path):
     assert s.provider.reasoning_effort == "high"
     assert s.provider.context_window == 2_000_000
     assert s.general.analysis_bar_count == 100
-    assert s.general.last_symbol == "XAUUSDm"
+    assert s.general.last_symbol == "XAUUSD"
     assert s.general.last_timeframe == "15m"
     assert s.general.decision_stance == "balanced"
     assert s.general.decision_flow_auto_play is True
@@ -36,7 +36,7 @@ def test_round_trip(tmp_path):
     loaded = load_settings(p)
     assert loaded.provider.api_key == "sk-test-1234"
     # Crypto symbols migrate to gold defaults on load
-    assert loaded.general.last_symbol == "XAUUSDm"
+    assert loaded.general.last_symbol == "XAUUSD"
     assert loaded.provider.model == original.provider.model
 
 
