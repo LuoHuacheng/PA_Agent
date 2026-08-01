@@ -1,6 +1,8 @@
 """Tests for data source factory and settings."""
 from __future__ import annotations
 
+import pa_agent.data.factory as factory
+
 from pa_agent.config.settings import GeneralSettings
 from pa_agent.data.factory import (
     DATA_SOURCE_CHOICES,
@@ -18,6 +20,16 @@ from pa_agent.data.tradingview import TradingViewSource
 def test_normalize_data_source_kind_defaults_unknown():
     assert normalize_data_source_kind("invalid") == "tradingview"
     assert normalize_data_source_kind(None) == "tradingview"
+
+
+def test_mt5_falls_back_to_tradingview_on_non_windows(monkeypatch):
+    monkeypatch.setattr(factory.sys, "platform", "darwin")
+    assert factory.normalize_data_source_kind("mt5") == "tradingview"
+
+
+def test_mt5_is_not_a_ui_choice_on_non_windows():
+    if factory.sys.platform != "win32":
+        assert "mt5" not in {kind for kind, _ in DATA_SOURCE_CHOICES}
 
 
 def test_normalize_data_source_kind_hidden_sources():
@@ -39,14 +51,16 @@ def test_tushare_not_in_ui_choices():
 
 
 def test_create_data_source_returns_expected_types():
-    assert isinstance(create_data_source("mt5"), MT5Source)
+    expected_mt5_type = MT5Source if factory.sys.platform == "win32" else TradingViewSource
+    assert isinstance(create_data_source("mt5"), expected_mt5_type)
     assert isinstance(create_data_source("tradingview"), TradingViewSource)
     assert isinstance(create_data_source("eastmoney"), EastMoneySource)
     assert isinstance(create_data_source("tushare"), TushareSource)
 
 
 def test_default_symbols_per_kind():
-    assert default_symbol_for_kind("mt5") == "XAUUSDm"
+    expected_mt5_symbol = "XAUUSDm" if factory.sys.platform == "win32" else "XAUUSD"
+    assert default_symbol_for_kind("mt5") == expected_mt5_symbol
     assert default_symbol_for_kind("tradingview") == "XAUUSD"
     assert default_symbol_for_kind("eastmoney") == "000001"
     assert default_symbol_for_kind("tushare") == "000001"

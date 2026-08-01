@@ -1,6 +1,7 @@
 """Construct :class:`DataSource` implementations by kind id."""
 from __future__ import annotations
 
+import sys
 from typing import Literal
 
 from pa_agent.data.base import DataSource
@@ -21,9 +22,11 @@ DataSourceKind = Literal[
 ]
 
 # UI-visible sources — 可在界面下拉框直接选择。
+# MetaTrader5's Python package and terminal integration are Windows-only.
 DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
-    ("tradingview", "TradingView"),
-    ("mt5", "MT5"),
+    (("tradingview", "TradingView"), ("mt5", "MT5"))
+    if sys.platform == "win32"
+    else (("tradingview", "TradingView"),)
 )
 
 _HIDDEN_KINDS: frozenset[DataSourceKind] = frozenset(
@@ -48,6 +51,8 @@ def default_tradingview_exchange() -> str:
 
 def normalize_data_source_kind(kind: str | None) -> DataSourceKind:
     """Return a supported data-source kind, defaulting to TradingView."""
+    if kind == "mt5" and sys.platform != "win32":
+        return "tradingview"
     supported = {k for k, _ in DATA_SOURCE_CHOICES} | _HIDDEN_KINDS
     if kind in supported:
         return kind  # type: ignore[return-value]

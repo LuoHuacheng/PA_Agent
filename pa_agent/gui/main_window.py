@@ -395,24 +395,24 @@ class MainWindow(QMainWindow):
         ctrl_layout.setSpacing(8)
 
         _settings = getattr(self._ctx, "settings", None)
-        _last_symbol = "XAUUSDm"
+        _last_symbol = "XAUUSD"
         _last_tf = "15m"
         if _settings is not None:
-            _last_symbol = getattr(_settings.general, "last_symbol", "XAUUSDm") or "XAUUSDm"
+            _last_symbol = getattr(_settings.general, "last_symbol", "XAUUSD") or "XAUUSD"
             _last_tf = getattr(_settings.general, "last_timeframe", "15m") or "15m"
 
         # Data source
         from pa_agent.data.factory import DATA_SOURCE_CHOICES, normalize_data_source_kind
 
-        _last_ds = "mt5"
+        _last_ds = "tradingview"
         if _settings is not None:
             _last_ds = normalize_data_source_kind(
-                getattr(_settings.general, "last_data_source", "mt5")
+                getattr(_settings.general, "last_data_source", "tradingview")
             )
-        # 如果上次保存的数据源不在 UI 可选列表中, 强制回退 MT5
+        # 如果上次保存的数据源不在 UI 可选列表中, 回退到默认数据源。
         _ui_kinds = {k for k, _ in DATA_SOURCE_CHOICES}
         if _last_ds not in _ui_kinds:
-            _last_ds = "mt5"
+            _last_ds = "tradingview"
         self._active_data_source_kind = _last_ds
 
         ctrl_layout.addWidget(QLabel("数据来源:"))
@@ -424,8 +424,8 @@ class MainWindow(QMainWindow):
             self._data_source_combo.setCurrentIndex(ds_index)
         self._data_source_combo.setMinimumWidth(108)
         self._data_source_combo.setToolTip(
-            "K 线数据来源：MT5（需终端登录）、TradingView（tvDatafeed）、"
-            "本地仅支持 MT5 与 TradingView"
+            "K 线数据来源：TradingView（tvDatafeed）"
+            + ("、MT5（需终端登录）" if sys.platform == "win32" else "")
         )
         self._data_source_combo.currentIndexChanged.connect(
             self._on_data_source_combo_changed
