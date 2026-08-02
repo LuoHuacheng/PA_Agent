@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -18,6 +19,7 @@ from PyQt6.QtWidgets import (
     QMenuBar,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -391,7 +393,10 @@ class MainWindow(QMainWindow):
         outer_layout.setSpacing(6)
 
         # ── Control bar ───────────────────────────────────────────────────────
-        ctrl_layout = QHBoxLayout()
+        ctrl_content = QWidget()
+        ctrl_content.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
+        ctrl_layout = QHBoxLayout(ctrl_content)
+        ctrl_layout.setContentsMargins(0, 0, 0, 0)
         ctrl_layout.setSpacing(8)
 
         _settings = getattr(self._ctx, "settings", None)
@@ -618,7 +623,18 @@ class MainWindow(QMainWindow):
         self._ai_mode_label.setObjectName("mutedLabel")
         ctrl_layout.addWidget(self._ai_mode_label)
 
-        outer_layout.addLayout(ctrl_layout)
+        # Fixed-minimum toolbar controls must not widen the entire window.
+        # Keep this single row horizontally scrollable on smaller displays.
+        self._control_scroll = QScrollArea()
+        self._control_scroll.setObjectName("controlScroll")
+        self._control_scroll.setWidget(ctrl_content)
+        self._control_scroll.setWidgetResizable(False)
+        self._control_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._control_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._control_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._control_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self._control_scroll.setMinimumWidth(0)
+        outer_layout.addWidget(self._control_scroll)
 
         self._api_key_alert_label = QLabel(
             "未配置 API Key：请点击左上角「AI 模型」按钮，在设置中填写 API Key 后才能进行 AI 分析。"
