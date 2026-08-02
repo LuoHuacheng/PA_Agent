@@ -26,7 +26,7 @@
 
 ## `settings.json` 字段说明
 
-配置分为四个顶层组：`provider`、`general`、`prompt`、`validation`。
+配置包括 `provider`、`general`、`prompt`、`validation`，以及可选的 `binance_usdm_testnet`。
 
 ### provider — AI 提供商
 
@@ -88,6 +88,24 @@
 | `validation.retry_stage2` | bool | `true` | 阶段二校验失败时是否重试 |
 
 ## 安全提醒
+
+### binance_usdm_testnet — Binance U 本位 Testnet 自动执行
+
+不含 API Key。密钥只能通过环境变量 `BINANCE_USDM_TESTNET_API_KEY` 与 `BINANCE_USDM_TESTNET_API_SECRET` 提供。
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | `false` | 自动执行总开关 |
+| `dry_run` | `true` | 为 `true` 时不发送任何 Binance 请求 |
+| `emergency_stop` | `true` | 熔断开关，必须设为 `false` 才可能执行 |
+| `require_analysis_symbol_match` | `true` | 分析品种必须和交易品种完全一致 |
+| `symbol` | `"BTCUSDT"` | 仅允许交易的 U 本位 Testnet 品种 |
+| `symbol_whitelist` | `["BTCUSDT"]` | 允许交易品种白名单 |
+| `leverage` | `1` | 逐品种设定杠杆，范围 1–5 |
+| `max_notional_usdt` | `20.0` | 单笔最大名义价值，范围 0–1000 USDT |
+| `cooldown_minutes` | `30` | 相同计划的去重冷却期 |
+
+当前仅自动处理带完整 TP/SL 的 `市价单`，限价单和突破单只保留原有提醒。执行前校验 Testnet 品种规则、数量步长、最小名义价值、单向持仓模式和保护价方向；入场后任一保护单创建失败，立即尝试市价平仓。无实盘 URL 或实盘开关。
 
 - **不要**将 `config/settings.json`、`config/exception_state.json`、`config/tv_symbol_aliases.json` 提交到 Git。
 - 若曾误提交 API Key，请立即在服务商处**作废并轮换**密钥。

@@ -154,6 +154,26 @@ class PushPlusSettings(BaseModel):
     token: str = ""
 
 
+class BinanceUSDMTestnetSettings(BaseModel):
+    """Binance U本位合约 Testnet automatic-execution safety controls.
+
+    API credentials are intentionally excluded. Set them through environment
+    variables so ``settings.json`` cannot persist trading secrets.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    dry_run: bool = True
+    emergency_stop: bool = True
+    require_analysis_symbol_match: bool = True
+    symbol: str = "BTCUSDT"
+    symbol_whitelist: list[str] = Field(default_factory=lambda: ["BTCUSDT"])
+    leverage: int = Field(default=1, ge=1, le=5)
+    max_notional_usdt: float = Field(default=20.0, gt=0, le=1000.0)
+    cooldown_minutes: int = Field(default=30, ge=1, le=1440)
+
+
 class Settings(BaseModel):
     """Root settings object persisted to config/settings.json."""
     model_config = ConfigDict(extra="ignore")
@@ -165,6 +185,9 @@ class Settings(BaseModel):
     feishu: FeishuSettings = Field(default_factory=FeishuSettings)
     pushplus: PushPlusSettings = Field(default_factory=PushPlusSettings)
     tushare: TushareSettings = Field(default_factory=TushareSettings)
+    binance_usdm_testnet: BinanceUSDMTestnetSettings = Field(
+        default_factory=BinanceUSDMTestnetSettings
+    )
 
 
 def provider_api_key_configured(settings: Settings | None) -> bool:

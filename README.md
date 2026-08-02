@@ -4,7 +4,7 @@
 
 ---
 
-面向主观交易者的 **价格行为（Price Action）** AI 辅助决策工具。从 **MT5 / TradingView / yfinance / AkShare** 读取 K 线，将结构化 K 线数据与预计算特征送入大模型做**两阶段分析**（市场诊断 → 交易决策），**不是**截图识图，**不连接券商、不执行下单**。
+面向主观交易者的 **价格行为（Price Action）** AI 辅助决策工具。从 **MT5 / TradingView / yfinance / AkShare** 读取 K 线，将结构化 K 线数据与预计算特征送入大模型做**两阶段分析**（市场诊断 → 交易决策），不是截图识图。默认不连接交易所、不执行下单；可显式开启受限的 Binance U 本位 Futures Testnet 市价自动执行。
 
 ---
 
@@ -20,6 +20,7 @@
 - 📝 **完整落盘**：Prompt、原始响应、诊断/决策 JSON、Token 用量、追问记录
 - 🛡️ **可配置校验体系**：JSON 校验、一致性检查、语义校验、截断修复、失败自动重试
 - 🔒 **API Key** 本地加密存储
+- 🧪 **可选 Testnet 自动交易**：仅 Binance U 本位 Testnet、仅市价信号，默认熔断和 dry-run；入场成功后强制创建止损与止盈保护单
 
 ---
 
@@ -75,6 +76,16 @@ make uv-run
 ## 详细说明
 
 完整操作界面说明见 [`PA_Agent使用文档.md`](PA_Agent使用文档.md)，配置字段说明见 [`config/README.md`](config/README.md)。
+
+### Binance U 本位 Futures Testnet 自动交易
+
+默认关闭。此功能不支持实盘 URL，且只处理 `市价单`。在 `config/settings.json` 的 `binance_usdm_testnet` 中，确认：
+
+1. `enabled: true`，`emergency_stop: false`，先保持 `dry_run: true` 验证流程。
+2. 分析品种与 `symbol` 完全一致，且在 `symbol_whitelist` 内。
+3. 仅完成 dry-run 验证后，才将 `dry_run` 改为 `false`。
+
+密钥仅从环境变量读取，绝不写入配置或日志：`BINANCE_USDM_TESTNET_API_KEY`、`BINANCE_USDM_TESTNET_API_SECRET`。API Key 应只启用交易权限，禁止提现，并设置 IP 白名单。自动执行使用单向持仓模式；单笔名义价值受 `max_notional_usdt` 限制，杠杆最大 5 倍。
 
 ---
 

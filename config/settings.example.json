@@ -52,5 +52,16 @@
   },
   "tushare": {
     "token": ""
+  },
+  "binance_usdm_testnet": {
+    "enabled": false,
+    "dry_run": true,
+    "emergency_stop": true,
+    "require_analysis_symbol_match": true,
+    "symbol": "BTCUSDT",
+    "symbol_whitelist": ["BTCUSDT"],
+    "leverage": 1,
+    "max_notional_usdt": 20.0,
+    "cooldown_minutes": 30
   }
 }

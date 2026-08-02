@@ -3998,6 +3998,20 @@ class MainWindow(QMainWindow):
                 logger.warning("Trade record logging failed: %s", exc)
 
             try:
+                from pa_agent.trading.binance_usdm_testnet import execute_market_signal
+
+                result = execute_market_signal(inner, settings, analysis_symbol=meta_symbol)
+                logger.info(
+                    "Binance U本位 Testnet 自动执行: status=%s symbol=%s reason=%s",
+                    result.status,
+                    result.symbol,
+                    result.reason,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Execution must never disrupt analysis, records, or notifications.
+                logger.exception("Binance U本位 Testnet 自动执行异常: %s", exc)
+
+            try:
                 from pa_agent.notify.feishu_notifier import send_order_signal as send_feishu_order
                 from pa_agent.notify.pushplus_notifier import send_order_signal as send_pushplus_order
                 from pa_agent.records.trade_logger import _TRADE_RECORDS_DIR
