@@ -50,6 +50,17 @@
     "enabled": false,
     "token": ""
   },
+  "monitoring": {
+    "enabled": false,
+    "targets": [
+      {"symbol": "XAUUSD", "timeframe": "15m", "enabled": true},
+      {"symbol": "BTCUSDT", "timeframe": "30m", "enabled": true}
+    ],
+    "max_concurrent_analyses": 1,
+    "poll_lead_seconds": 5,
+    "poll_retry_attempts": 3,
+    "poll_retry_seconds": 5
+  },
   "tushare": {
     "token": ""
   }

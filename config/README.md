@@ -26,7 +26,7 @@
 
 ## `settings.json` 字段说明
 
-配置分为四个顶层组：`provider`、`general`、`prompt`、`validation`。
+配置分为五个顶层组：`provider`、`general`、`prompt`、`validation`、`monitoring`。
 
 ### provider — AI 提供商
 
@@ -62,6 +62,21 @@
 | `general.decision_flow_default_zoom_pct` | int | `600` | 决策树可视化默认缩放百分比（≥10） |
 | `general.stream_pane_font_pt` | int | `11` | 「实时」页等宽字体字号（pt，8–28） |
 | `general.chart_seq_label_font_pt` | int | `11` | K 线图上序号标签的字号（pt，6–24） |
+
+### monitoring — 多品种周期预警
+
+不提供 GUI 管理。直接编辑 `settings.json` 后重启程序生效。每个目标在自身 K 线自然收盘、再等待短暂数据延迟后拉取一次行情，不会按秒轮询。目标共用当前 `general.last_data_source` 和 `general.last_tradingview_exchange`，但使用独立订阅，互不覆盖。
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `monitoring.enabled` | `false` | 总开关。关闭时不创建后台监控任务 |
+| `monitoring.targets` | `[]` | 监控列表。每项为 `symbol`、`timeframe`、`enabled`，如 `{"symbol":"XAUUSD","timeframe":"15m","enabled":true}` |
+| `monitoring.max_concurrent_analyses` | `1` | 同时执行的 AI 分析上限（1–8）。提高会增加 API 并发与 token 消耗 |
+| `monitoring.poll_lead_seconds` | `5` | K 线收盘后等待数据源落库的秒数（0–120） |
+| `monitoring.poll_retry_attempts` | `3` | 数据未更新或临时失败时的重试次数（0–10） |
+| `monitoring.poll_retry_seconds` | `5` | 重试之间的等待秒数（1–120） |
+
+后台分析沿用当前交易机会和 `general.decision_confidence_threshold` 判定。同一品种、周期、已收盘 K 线只会处理一次，状态存于本地忽略文件 `config/monitoring_state.json`。监控只发送飞书/PushPlus 通知，不会触发 Binance Testnet 自动执行。
 
 ### prompt — Prompt 组装调优
 

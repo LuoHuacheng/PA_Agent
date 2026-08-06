@@ -33,10 +33,22 @@ def main(argv: list[str] | None = None) -> int:
 
     # Update logging with the real API key now that settings are loaded
     if ctx.settings is not None:
-        from pa_agent.util.logging import configure_logging, update_api_key
+        from pa_agent.util.logging import configure_logging
         configure_logging(api_key=ctx.settings.provider.api_key)
         from pa_agent.util.crash_diagnostics import log_startup_diagnostics
         log_startup_diagnostics()
+
+    monitor = None
+    if ctx.settings is not None and ctx.settings.monitoring.enabled:
+        from pa_agent.config.paths import MONITORING_STATE_PATH
+        from pa_agent.monitoring import MultiSymbolMonitor
+
+        monitor = MultiSymbolMonitor(
+            ctx=ctx,
+            settings=ctx.settings,
+            state_path=MONITORING_STATE_PATH,
+        )
+        monitor.start()
 
     # Build and show the main window
     from pa_agent.gui.main_window import MainWindow
@@ -44,7 +56,11 @@ def main(argv: list[str] | None = None) -> int:
     window.show()
 
     logger.info("Main window shown")
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        if monitor is not None:
+            monitor.stop()
 
 
 if __name__ == "__main__":  # pragma: no cover
