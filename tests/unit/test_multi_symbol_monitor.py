@@ -273,3 +273,34 @@ def test_monitor_respects_configured_analysis_concurrency(tmp_path: Path) -> Non
     assert max_active == 1
     release.set()
     monitor._executor.shutdown(wait=True)
+
+
+def test_monitor_stop_disconnects_source_before_waiting_for_running_analysis(tmp_path: Path) -> None:
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
+    source = FakeSource(_bars(1_800))
+    started = threading.Event()
+    released = threading.Event()
+
+    def analyze(_frame: object) -> None:
+        started.set()
+        released.wait(timeout=2)
+
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: source,
+        clock=lambda: 1_805,
+        analyze=analyze,
+    )
+    monitor._executor = ThreadPoolExecutor(max_workers=1)
+    state = next(iter(monitor._states.values()))
+    state.next_poll_at = 0
+    assert monitor.run_due_once(now=1_805) == 1
+    assert started.wait(timeout=1)
+
+    threading.Timer(0.05, released.set).start()
+    monitor.stop(timeout=1)
+
+    assert ("disconnect",) in source.calls
+    assert not monitor._futures

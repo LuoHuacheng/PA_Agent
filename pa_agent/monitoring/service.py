@@ -149,8 +149,8 @@ class MultiSymbolMonitor:
 
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=timeout)
+        # Disconnect before waiting for executor threads. TradingView's blocking
+        # socket read is released by disconnect(), allowing the worker to finish.
         for state in self._states.values():
             if state.source is not None:
                 try:
@@ -158,7 +158,9 @@ class MultiSymbolMonitor:
                 except Exception:
                     logger.debug("Monitor source disconnect failed", exc_info=True)
         if self._executor is not None:
-            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor.shutdown(wait=True, cancel_futures=True)
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
         self._save_state()
 
     def run_due_once(self, now: float | None = None) -> int:
@@ -264,14 +266,22 @@ class MultiSymbolMonitor:
             source = create_data_source(self._settings.general.last_data_source)
         else:
             source = self._source_factory(self._settings.general.last_data_source)
-        source.connect()
-        if self._settings.general.last_data_source == "tradingview":
-            set_exchange = getattr(source, "set_exchange", None)
-            if callable(set_exchange):
-                set_exchange(self._settings.general.last_tradingview_exchange)
-        source.subscribe(state.target.symbol, state.target.timeframe)
         state.source = source
-        return source
+        try:
+            source.connect()
+            if self._settings.general.last_data_source == "tradingview":
+                set_exchange = getattr(source, "set_exchange", None)
+                if callable(set_exchange):
+                    set_exchange(self._settings.general.last_tradingview_exchange)
+            source.subscribe(state.target.symbol, state.target.timeframe)
+            return source
+        except Exception:
+            state.source = None
+            try:
+                source.disconnect()
+            except Exception:
+                logger.debug("Monitor source cleanup failed", exc_info=True)
+            raise
 
     def _schedule_next(self, state: _TargetState, now: float) -> None:
         state.next_poll_at = next_poll_at(

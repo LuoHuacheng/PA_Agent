@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import signal
 import time
 from typing import Any
 
@@ -81,6 +82,9 @@ def run_monitor() -> int:
             time.sleep(0.5)
     except KeyboardInterrupt:
         logger.info("[监控停止] 正在保存状态并关闭数据连接…")
+        # A second Ctrl+C during ThreadPoolExecutor cleanup otherwise interrupts
+        # Python's atexit join and prints a misleading traceback.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
     finally:
         monitor.stop()
     return 0
