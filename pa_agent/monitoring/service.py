@@ -35,6 +35,7 @@ _TIMEFRAME_SECONDS: dict[str, int] = {
     "1d": 86400,
     "1w": 604800,
 }
+_ORDER_OPPORTUNITY_TYPES = frozenset({"限价单", "突破单", "市价单"})
 
 
 def timeframe_seconds(timeframe: str) -> int:
@@ -50,6 +51,17 @@ def next_poll_at(timeframe: str, *, now: float, lead_seconds: int) -> float:
     period = timeframe_seconds(timeframe)
     close_at = (int(now) // period + 1) * period
     return float(close_at + lead_seconds)
+
+
+def _has_order_opportunity(decision: dict[str, Any], confidence_threshold: int) -> bool:
+    """Return whether a decision is eligible for alert-only notification."""
+    if str(decision.get("order_type") or "") not in _ORDER_OPPORTUNITY_TYPES:
+        return False
+    try:
+        confidence = int(float(str(decision.get("trade_confidence") or "")))
+    except (TypeError, ValueError):
+        return False
+    return confidence >= confidence_threshold
 
 
 @dataclass
@@ -79,6 +91,7 @@ class MultiSymbolMonitor:
         source_factory: Callable[[str], DataSource] | None = None,
         clock: Callable[[], float] = time.time,
         analyze: Callable[[Any], dict | None] | None = None,
+        on_result: Callable[[Any, dict | None], None] | None = None,
     ) -> None:
         self._ctx = ctx
         self._settings = settings
@@ -87,6 +100,7 @@ class MultiSymbolMonitor:
         self._source_factory = source_factory
         self._clock = clock
         self._analyze = analyze or self._analyze_and_notify
+        self._on_result = on_result
         self._states: dict[tuple[str, str], _TargetState] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -178,6 +192,7 @@ class MultiSymbolMonitor:
         now = self._clock()
         target = state.target
         try:
+            logger.info("Monitor analysis started for %s %s", target.symbol, target.timeframe)
             source = self._ensure_source(state)
             bar_count = int(self._settings.general.analysis_bar_count)
             bars = source.latest_snapshot(bar_count + INDICATOR_WARMUP_BARS + 5)
@@ -192,13 +207,23 @@ class MultiSymbolMonitor:
             if state.last_processed_closed_ts is not None and closed_ts < state.last_processed_closed_ts:
                 raise ValueError("data source returned an older closed bar")
 
-            self._analyze(frame)
+            decision = self._analyze(frame)
+            if self._on_result is not None:
+                try:
+                    self._on_result(frame, decision)
+                except Exception:
+                    logger.exception(
+                        "Monitor result callback failed for %s %s",
+                        target.symbol,
+                        target.timeframe,
+                    )
             state.last_processed_closed_ts = closed_ts
             self._persisted_closed_ts[self._key_text((target.symbol, target.timeframe))] = closed_ts
             self._save_state()
             state.retry_count = 0
             state.last_error = ""
             self._schedule_next(state, now)
+            logger.info("Monitor analysis completed for %s %s", target.symbol, target.timeframe)
         except Exception as exc:
             state.last_error = str(exc)
             state.retry_count += 1
@@ -250,28 +275,33 @@ class MultiSymbolMonitor:
         if not isinstance(decision, dict):
             return None
         inner = decision.get("decision") or {}
-        from pa_agent.gui.order_opportunity import has_order_opportunity
-
         threshold = int(self._settings.general.decision_confidence_threshold)
-        if not has_order_opportunity(inner, confidence_threshold=threshold):
+        if not _has_order_opportunity(inner, threshold):
             return decision
         # Do not call Binance execution here. Monitoring is alert-only by design.
         from pa_agent.notify.feishu_notifier import send_order_signal as send_feishu
         from pa_agent.notify.pushplus_notifier import send_order_signal as send_pushplus
 
-        send_feishu(
+        feishu_sent = send_feishu(
             decision_inner=inner,
             stage2_full=decision,
             symbol=frame.symbol,
             timeframe=frame.timeframe,
             settings=self._settings,
         )
-        send_pushplus(
+        pushplus_sent = send_pushplus(
             decision_inner=inner,
             stage2_full=decision,
             symbol=frame.symbol,
             timeframe=frame.timeframe,
             settings=self._settings,
+        )
+        logger.info(
+            "Monitor notification outcomes for %s %s: feishu=%s pushplus=%s",
+            frame.symbol,
+            frame.timeframe,
+            feishu_sent,
+            pushplus_sent,
         )
         return decision
 

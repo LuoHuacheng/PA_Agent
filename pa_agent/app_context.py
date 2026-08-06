@@ -27,7 +27,7 @@ class AppContext:
     ledger: Any = None            # SessionTokenLedger
 
     @classmethod
-    def bootstrap(cls) -> "AppContext":
+    def bootstrap(cls, *, connect_data_source: bool = True) -> AppContext:
         """Wire all real components and return a fully initialised AppContext."""
         from pa_agent.config.paths import (
             SETTINGS_JSON_PATH,
@@ -75,28 +75,29 @@ class AppContext:
         )
         data_source = create_data_source(ds_kind)
 
-        # Subscribe to the last-used symbol/timeframe from settings
-        try:
-            data_source.connect()
-            if ds_kind == "tradingview":
-                from pa_agent.data.tradingview import TradingViewSource
+        if connect_data_source:
+            # Subscribe to the last-used symbol/timeframe from settings.
+            try:
+                data_source.connect()
+                if ds_kind == "tradingview":
+                    from pa_agent.data.tradingview import TradingViewSource
 
-                if isinstance(data_source, TradingViewSource):
-                    # Use saved exchange setting, default to auto (empty).
-                    saved_exchange = getattr(settings.general, 'last_tradingview_exchange', '') or ''
-                    data_source.set_exchange(saved_exchange)
-            data_source.subscribe(
-                settings.general.last_symbol,
-                settings.general.last_timeframe,
-            )
-            app_logger.info(
-                "Data source %s subscribed to %s %s",
-                ds_kind,
-                settings.general.last_symbol,
-                settings.general.last_timeframe,
-            )
-        except Exception as exc:  # noqa: BLE001
-            app_logger.warning("Initial data source subscription failed: %s", exc)
+                    if isinstance(data_source, TradingViewSource):
+                        # Use saved exchange setting, default to auto (empty).
+                        saved_exchange = getattr(settings.general, "last_tradingview_exchange", "") or ""
+                        data_source.set_exchange(saved_exchange)
+                data_source.subscribe(
+                    settings.general.last_symbol,
+                    settings.general.last_timeframe,
+                )
+                app_logger.info(
+                    "Data source %s subscribed to %s %s",
+                    ds_kind,
+                    settings.general.last_symbol,
+                    settings.general.last_timeframe,
+                )
+            except Exception as exc:  # noqa: BLE001
+                app_logger.warning("Initial data source subscription failed: %s", exc)
 
         # ── AI client ─────────────────────────────────────────────────────────
         from pa_agent.ai.client_factory import create_ai_client

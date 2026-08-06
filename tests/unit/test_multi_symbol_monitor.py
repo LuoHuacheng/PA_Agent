@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pa_agent.config.settings import MonitorTarget, Settings
 from pa_agent.data.base import DataSource, KlineBar
+from pa_agent.monitoring.cli import format_decision_result
 from pa_agent.monitoring.service import MultiSymbolMonitor, next_poll_at, timeframe_seconds
 
 
@@ -116,6 +117,61 @@ def test_monitor_processes_a_closed_bar_once_and_persists_state(tmp_path: Path) 
     assert len(analyzed) == 1
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["last_processed_closed_ts"]["XAUUSD::15m"] == 1_800_000_000
+
+
+def test_monitor_reports_each_completed_decision_to_callback(tmp_path: Path) -> None:
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
+    results: list[tuple[str, dict | None]] = []
+    decision = {"decision": {"order_type": "观望"}}
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        clock=lambda: 1_805,
+        analyze=lambda _frame: decision,
+        on_result=lambda frame, value: results.append((frame.symbol, value)),
+    )
+
+    monitor._poll_and_analyze(next(iter(monitor._states.values())))
+
+    assert results == [("XAUUSD", decision)]
+
+
+def test_monitor_persists_completed_analysis_when_result_callback_fails(tmp_path: Path) -> None:
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        clock=lambda: 1_805,
+        analyze=lambda _frame: {"decision": {"order_type": "观望"}},
+        on_result=lambda _frame, _value: (_ for _ in ()).throw(RuntimeError("output failed")),
+    )
+    state = next(iter(monitor._states.values()))
+
+    monitor._poll_and_analyze(state)
+
+    assert state.last_processed_closed_ts == 1_800_000_000
+    assert state.retry_count == 0
+
+
+def test_terminal_decision_output_includes_summary_and_full_payload() -> None:
+    frame = type("Frame", (), {"symbol": "BTCUSDT", "timeframe": "15m"})()
+    decision = {
+        "decision": {
+            "order_type": "限价单",
+            "order_direction": "做多",
+            "trade_confidence": 90,
+        }
+    }
+
+    result = format_decision_result(frame, decision)
+
+    assert "[决策] BTCUSDT 15m" in result
+    assert "[完整决策]" in result
+    assert '"trade_confidence": 90' in result
 
 
 def test_monitor_failure_retries_without_blocking_other_target(tmp_path: Path) -> None:

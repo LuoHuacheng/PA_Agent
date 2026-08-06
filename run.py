@@ -2,6 +2,7 @@
 
 用法：
     python run.py
+    python run.py --monitor
 
 或者双击 run.py（如果系统关联了 Python）。
 
@@ -68,11 +69,15 @@ def _print_embedded_console_help() -> None:
     print(msg, flush=True)
 
 
-from pa_agent.main import main
-
 if __name__ == "__main__":
+    if "--monitor" in sys.argv:
+        from pa_agent.monitoring.cli import run_monitor
+
+        raise SystemExit(run_monitor())
     if _inside_ipython_kernel():
         _print_embedded_console_help()
         _launch_detached_subprocess()
         raise SystemExit(0)
+    from pa_agent.main import main
+
     raise SystemExit(main())
