@@ -121,7 +121,17 @@ class MultiSymbolMonitor:
         )
         self._thread = threading.Thread(target=self._run, name="symbol-monitor-scheduler", daemon=True)
         self._thread.start()
-        logger.info("Started multi-symbol monitor for %d target(s)", len(self._states))
+        targets = ", ".join(
+            f"{state.target.symbol} {state.target.timeframe}"
+            f" (next poll {time.strftime('%H:%M:%S', time.localtime(state.next_poll_at))})"
+            for state in self._states.values()
+        )
+        logger.info(
+            "Started multi-symbol monitor for %d target(s), max_concurrent_analyses=%d: %s",
+            len(self._states),
+            self._cfg.max_concurrent_analyses,
+            targets,
+        )
 
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()

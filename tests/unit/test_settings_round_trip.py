@@ -34,8 +34,8 @@ def test_round_trip(tmp_path):
     save_settings(original, p)
     loaded = load_settings(p)
     assert loaded.provider.api_key == "sk-test-1234"
-    # Crypto symbols migrate to gold defaults on load
-    assert loaded.general.last_symbol == "XAUUSD"
+    # Native TradingView crypto pairs remain usable after a settings reload.
+    assert loaded.general.last_symbol == "BTCUSDT"
     assert loaded.provider.model == original.provider.model
 
 
