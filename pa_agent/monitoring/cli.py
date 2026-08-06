@@ -42,20 +42,19 @@ def run_monitor() -> int:
     ctx = AppContext.bootstrap(connect_data_source=False, create_event_bus=False)
     settings = ctx.settings
     if settings is None or not settings.monitoring.enabled:
-        print("[错误] monitoring.enabled=false。请在 config/settings.json 中开启后重试。", flush=True)
+        logger.error("monitoring.enabled=false。请在 config/settings.json 中开启后重试。")
         return 2
     enabled_targets = [target for target in settings.monitoring.targets if target.enabled]
     if not enabled_targets:
-        print("[错误] monitoring.targets 中没有启用的品种。", flush=True)
+        logger.error("monitoring.targets 中没有启用的品种。")
         return 2
 
     def on_result(frame: Any, decision: dict | None) -> None:
-        message = format_decision_result(frame, decision)
-        logger.info(message)
-        print(message, flush=True)
+        logger.info(format_decision_result(frame, decision))
 
-    def on_status(message: str) -> None:
-        print(f"[监控状态] {message}", flush=True)
+    def on_status(_message: str) -> None:
+        # MultiSymbolMonitor has already logged this status. Avoid duplicate lines.
+        return
 
     monitor = MultiSymbolMonitor(
         ctx=ctx,
@@ -65,13 +64,17 @@ def run_monitor() -> int:
         on_status=on_status,
     )
     targets = ", ".join(f"{target.symbol} {target.timeframe}" for target in enabled_targets)
-    print(f"[监控已启动] 目标: {targets}, 分析并发: {settings.monitoring.max_concurrent_analyses}.", flush=True)
+    logger.info(
+        "[监控已启动] 目标: %s, 分析并发: %d.",
+        targets,
+        settings.monitoring.max_concurrent_analyses,
+    )
     monitor.start()
     try:
         while monitor.is_running:
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\n[监控停止] 正在保存状态并关闭数据连接…", flush=True)
+        logger.info("[监控停止] 正在保存状态并关闭数据连接…")
     finally:
         monitor.stop()
     return 0
