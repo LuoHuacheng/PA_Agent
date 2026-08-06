@@ -39,7 +39,7 @@ def run_monitor() -> int:
     enable_crash_diagnostics()
     configure_logging()
     log_startup_diagnostics()
-    ctx = AppContext.bootstrap(connect_data_source=False)
+    ctx = AppContext.bootstrap(connect_data_source=False, create_event_bus=False)
     settings = ctx.settings
     if settings is None or not settings.monitoring.enabled:
         print("[错误] monitoring.enabled=false。请在 config/settings.json 中开启后重试。", flush=True)
@@ -54,18 +54,18 @@ def run_monitor() -> int:
         logger.info(message)
         print(message, flush=True)
 
+    def on_status(message: str) -> None:
+        print(f"[监控状态] {message}", flush=True)
+
     monitor = MultiSymbolMonitor(
         ctx=ctx,
         settings=settings,
         state_path=MONITORING_STATE_PATH,
         on_result=on_result,
+        on_status=on_status,
     )
     targets = ", ".join(f"{target.symbol} {target.timeframe}" for target in enabled_targets)
-    print(
-        f"[监控已启动] 目标: {targets}, 分析并发: {settings.monitoring.max_concurrent_analyses}. "
-        "等待 K 线收盘，按 Ctrl+C 停止。",  # noqa: RUF001
-        flush=True,
-    )
+    print(f"[监控已启动] 目标: {targets}, 分析并发: {settings.monitoring.max_concurrent_analyses}.", flush=True)
     monitor.start()
     try:
         while monitor.is_running:

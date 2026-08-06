@@ -27,7 +27,12 @@ class AppContext:
     ledger: Any = None            # SessionTokenLedger
 
     @classmethod
-    def bootstrap(cls, *, connect_data_source: bool = True) -> AppContext:
+    def bootstrap(
+        cls,
+        *,
+        connect_data_source: bool = True,
+        create_event_bus: bool = True,
+    ) -> AppContext:
         """Wire all real components and return a fully initialised AppContext."""
         from pa_agent.config.paths import (
             SETTINGS_JSON_PATH,
@@ -37,7 +42,6 @@ class AppContext:
         )
         from pa_agent.config.settings import load_settings
         from pa_agent.util.logging import configure_logging, update_api_key
-        from pa_agent.util.event_bus import EventBus
         from pa_agent.util.mask_secret import mask_secret
         from pa_agent.data.factory import create_data_source, normalize_data_source_kind
         from pa_agent.ai.client_factory import create_ai_client
@@ -64,7 +68,11 @@ class AppContext:
         app_logger = logging.getLogger("pa_agent")
 
         # ── Event bus ─────────────────────────────────────────────────────────
-        event_bus = EventBus()
+        event_bus = None
+        if create_event_bus:
+            from pa_agent.util.event_bus import EventBus
+
+            event_bus = EventBus()
 
         # ── Data layer ────────────────────────────────────────────────────────
         from pa_agent.data.kline_adjust import apply_kline_adjust_from_settings
@@ -73,7 +81,7 @@ class AppContext:
         ds_kind = normalize_data_source_kind(
             getattr(settings.general, "last_data_source", "mt5")
         )
-        data_source = create_data_source(ds_kind)
+        data_source = create_data_source(ds_kind) if connect_data_source else None
 
         if connect_data_source:
             # Subscribe to the last-used symbol/timeframe from settings.

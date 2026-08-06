@@ -92,6 +92,7 @@ class MultiSymbolMonitor:
         clock: Callable[[], float] = time.time,
         analyze: Callable[[Any], dict | None] | None = None,
         on_result: Callable[[Any, dict | None], None] | None = None,
+        on_status: Callable[[str], None] | None = None,
     ) -> None:
         self._ctx = ctx
         self._settings = settings
@@ -101,6 +102,7 @@ class MultiSymbolMonitor:
         self._clock = clock
         self._analyze = analyze or self._analyze_and_notify
         self._on_result = on_result
+        self._on_status = on_status
         self._states: dict[tuple[str, str], _TargetState] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -140,11 +142,9 @@ class MultiSymbolMonitor:
             f" (next poll {time.strftime('%H:%M:%S', time.localtime(state.next_poll_at))})"
             for state in self._states.values()
         )
-        logger.info(
-            "Started multi-symbol monitor for %d target(s), max_concurrent_analyses=%d: %s",
-            len(self._states),
-            self._cfg.max_concurrent_analyses,
-            targets,
+        self._report(
+            f"Started multi-symbol monitor for {len(self._states)} target(s), "
+            f"max_concurrent_analyses={self._cfg.max_concurrent_analyses}: {targets}"
         )
 
     def stop(self, timeout: float = 10.0) -> None:
@@ -192,7 +192,10 @@ class MultiSymbolMonitor:
         now = self._clock()
         target = state.target
         try:
-            logger.info("Monitor analysis started for %s %s", target.symbol, target.timeframe)
+            self._report(
+                f"Monitor analysis started for {target.symbol} {target.timeframe}; "
+                "fetching closed K-line data"
+            )
             source = self._ensure_source(state)
             bar_count = int(self._settings.general.analysis_bar_count)
             bars = source.latest_snapshot(bar_count + INDICATOR_WARMUP_BARS + 5)
@@ -223,16 +226,34 @@ class MultiSymbolMonitor:
             state.retry_count = 0
             state.last_error = ""
             self._schedule_next(state, now)
-            logger.info("Monitor analysis completed for %s %s", target.symbol, target.timeframe)
+            self._report(
+                f"Monitor analysis completed for {target.symbol} {target.timeframe}; next poll "
+                f"{time.strftime('%H:%M:%S', time.localtime(state.next_poll_at))}"
+            )
         except Exception as exc:
             state.last_error = str(exc)
             state.retry_count += 1
-            logger.warning("Monitor poll failed for %s %s: %s", target.symbol, target.timeframe, exc)
+            self._report(
+                f"Monitor poll failed for {target.symbol} {target.timeframe}: {exc}",
+                level=logging.WARNING,
+            )
             if state.retry_count <= self._cfg.poll_retry_attempts:
                 state.next_poll_at = now + self._cfg.poll_retry_seconds
+                self._report(
+                    f"Monitor retry {state.retry_count}/{self._cfg.poll_retry_attempts} for "
+                    f"{target.symbol} {target.timeframe} at "
+                    f"{time.strftime('%H:%M:%S', time.localtime(state.next_poll_at))}",
+                    level=logging.WARNING,
+                )
             else:
                 state.retry_count = 0
                 self._schedule_next(state, now)
+                self._report(
+                    f"Monitor retries exhausted for {target.symbol} {target.timeframe}; "
+                    f"next natural poll "
+                    f"{time.strftime('%H:%M:%S', time.localtime(state.next_poll_at))}",
+                    level=logging.WARNING,
+                )
 
     def _ensure_source(self, state: _TargetState) -> DataSource:
         if state.source is not None:
@@ -256,6 +277,15 @@ class MultiSymbolMonitor:
         state.next_poll_at = next_poll_at(
             state.target.timeframe, now=now, lead_seconds=self._cfg.poll_lead_seconds
         )
+
+    def _report(self, message: str, *, level: int = logging.INFO) -> None:
+        logger.log(level, message)
+        if self._on_status is None:
+            return
+        try:
+            self._on_status(message)
+        except Exception:
+            logger.exception("Monitor status callback failed")
 
     def _analyze_and_notify(self, frame: Any) -> dict | None:
         from pa_agent.orchestrator.two_stage import TwoStageOrchestrator

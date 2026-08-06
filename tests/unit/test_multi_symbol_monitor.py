@@ -201,6 +201,25 @@ def test_monitor_failure_retries_without_blocking_other_target(tmp_path: Path) -
     assert analyzed == ["GOOD"]
 
 
+def test_monitor_reports_fetch_failure_and_retry_status(tmp_path: Path) -> None:
+    settings = _settings(MonitorTarget(symbol="BAD", timeframe="15m"))
+    statuses: list[str] = []
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource([]),
+        clock=lambda: 1_805,
+        on_status=statuses.append,
+    )
+
+    monitor._poll_and_analyze(next(iter(monitor._states.values())))
+
+    assert any("analysis started for BAD 15m" in status for status in statuses)
+    assert any("poll failed for BAD 15m" in status for status in statuses)
+    assert any("retry 1/3 for BAD 15m" in status for status in statuses)
+
+
 def test_monitor_respects_configured_analysis_concurrency(tmp_path: Path) -> None:
     settings = _settings(
         MonitorTarget(symbol="XAUUSD", timeframe="15m"),
