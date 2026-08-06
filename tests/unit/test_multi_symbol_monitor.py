@@ -157,21 +157,33 @@ def test_monitor_persists_completed_analysis_when_result_callback_fails(tmp_path
     assert state.retry_count == 0
 
 
-def test_terminal_decision_output_includes_summary_and_full_payload() -> None:
+def test_terminal_decision_output_includes_only_order_summary() -> None:
     frame = type("Frame", (), {"symbol": "BTCUSDT", "timeframe": "15m"})()
     decision = {
         "decision": {
             "order_type": "限价单",
             "order_direction": "做多",
             "trade_confidence": 90,
-        }
+            "entry_price": 100,
+            "stop_loss_price": 95,
+            "take_profit_price": 110,
+            "take_profit_price_2": 120,
+            "estimated_win_rate": "65%",
+            "reasoning": "价格回踩支撑后出现放量反弹。",
+        },
+        "next_cycle_prediction": {"probabilities": {"上涨": 0.7}},
+        "internal_trace": "must not be logged",
     }
 
     result = format_decision_result(frame, decision)
 
     assert "[决策] BTCUSDT 15m" in result
-    assert "[完整决策]" in result
-    assert '"trade_confidence": 90' in result
+    assert "TP1=110" in result
+    assert "TP2=120" in result
+    assert "胜率=65%" in result
+    assert "理由=价格回踩支撑后出现放量反弹。" in result
+    assert "next_cycle_prediction" not in result
+    assert "internal_trace" not in result
 
 
 def test_monitor_failure_retries_without_blocking_other_target(tmp_path: Path) -> None:

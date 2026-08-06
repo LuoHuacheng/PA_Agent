@@ -1,7 +1,6 @@
 """Headless terminal entry point for settings-driven monitoring."""
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any
@@ -10,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def format_decision_result(frame: Any, decision: dict | None) -> str:
-    """Return one terminal-safe summary for a completed monitoring analysis."""
+    """Return the order-relevant portion of a completed monitoring decision."""
     prefix = f"[决策] {frame.symbol} {frame.timeframe}"
     if not isinstance(decision, dict):
         return f"{prefix} 分析未产生有效阶段二决策"
@@ -20,12 +19,19 @@ def format_decision_result(frame: Any, decision: dict | None) -> str:
     confidence = inner.get("trade_confidence", "—")
     entry = inner.get("entry_price", "—")
     stop = inner.get("stop_loss_price", "—")
-    take_profit = inner.get("take_profit_price", "—")
-    summary = (
+    take_profit_1 = inner.get("take_profit_price", "—")
+    take_profit_2 = inner.get("take_profit_price_2", "—")
+    win_rate = inner.get("estimated_win_rate", "—")
+    reasoning = str(inner.get("reasoning") or "").strip()
+    if len(reasoning) > 180:
+        reasoning = f"{reasoning[:180]}…"
+    summary = [
         f"{prefix} 类型={order_type} 方向={direction} 置信度={confidence} "
-        f"入场={entry} 止损={stop} 止盈={take_profit}"
-    )
-    return f"{summary}\n[完整决策] {json.dumps(decision, ensure_ascii=False, sort_keys=True)}"
+        f"入场={entry} 止损={stop} TP1={take_profit_1} TP2={take_profit_2} 胜率={win_rate}"
+    ]
+    if reasoning:
+        summary.append(f"理由={reasoning}")
+    return "\n".join(summary)
 
 
 def run_monitor() -> int:
