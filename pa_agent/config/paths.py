@@ -25,5 +25,6 @@ LOGS_DIR: Path = PROJECT_ROOT / "logs"
 # ── Individual file paths ─────────────────────────────────────────────────────
 FEISHU_JSON_LEGACY_PATH: Path = CONFIG_DIR / "feishu.json"
 SETTINGS_JSON_PATH: Path = CONFIG_DIR / "settings.json"
+MONITORING_STATE_PATH: Path = CONFIG_DIR / "monitoring_state.json"
 LOG_FILE_PATH: Path = LOGS_DIR / "pa_agent.log"
 CRASH_LOG_PATH: Path = LOGS_DIR / "crash.log"

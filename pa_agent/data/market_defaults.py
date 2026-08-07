@@ -97,7 +97,7 @@ def is_likely_crypto_symbol(symbol: str) -> bool:
 
 
 def normalize_gold_symbol_for_kind(kind: str, symbol: str) -> str:
-    """Map crypto / MT5-style names to gold defaults for *kind*."""
+    """Normalize persisted symbols while preserving native TradingView crypto pairs."""
     from pa_agent.data.ashare_common import normalize_ashare_symbol
 
     sym = (symbol or "").strip()
@@ -107,6 +107,8 @@ def normalize_gold_symbol_for_kind(kind: str, symbol: str) -> str:
             return A_SHARE_DEFAULT_SYMBOL
         return code
     if kind == "tradingview":
+        if is_likely_crypto_symbol(sym):
+            return sym.upper()
         code = normalize_ashare_tv_code(sym)
         if _is_ashare_tv_code(code):
             return code

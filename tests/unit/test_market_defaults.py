@@ -20,9 +20,9 @@ from pa_agent.data.market_defaults import (
 from pa_agent.data.tradingview import TV_EXCHANGE_PRESETS
 
 
-def test_crypto_symbol_migrates_to_gold():
+def test_mt5_crypto_symbol_migrates_to_gold_but_tradingview_crypto_is_preserved():
     assert normalize_gold_symbol_for_kind("mt5", "BTCUSD") == GOLD_MT5_SYMBOL
-    assert normalize_gold_symbol_for_kind("tradingview", "BTCUSDT") == GOLD_TV_SYMBOL
+    assert normalize_gold_symbol_for_kind("tradingview", "BTCUSDT") == "BTCUSDT"
 
 
 def test_mt5_suffix_on_tv_becomes_xauusd():

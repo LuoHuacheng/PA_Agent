@@ -10,15 +10,16 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import sys
 from pathlib import Path
-from typing import List
+from typing import ClassVar
 
 from pa_agent.config.paths import LOG_FILE_PATH
 from pa_agent.util.mask_secret import mask_secret
 
 # ── Module-level state ────────────────────────────────────────────────────────
 
-_active_formatters: List["MaskingFormatter"] = []
+_active_formatters: list[MaskingFormatter] = []
 _configured: bool = False
 
 # ── MaskingFormatter ──────────────────────────────────────────────────────────
@@ -31,7 +32,7 @@ class MaskingFormatter(logging.Formatter):
         super().__init__(fmt)
         self._api_key = api_key
 
-    def format(self, record: logging.LogRecord) -> str:  # noqa: A003
+    def format(self, record: logging.LogRecord) -> str:
         message = super().format(record)
         if self._api_key:
             message = message.replace(self._api_key, mask_secret(self._api_key))
@@ -39,6 +40,35 @@ class MaskingFormatter(logging.Formatter):
 
     def set_api_key(self, new_key: str) -> None:
         self._api_key = new_key
+
+
+class ConsoleFormatter(MaskingFormatter):
+    """Compact, colorized terminal formatter that remains plain when redirected."""
+
+    _LEVEL_STYLES: ClassVar[dict[int, tuple[str, str]]] = {
+        logging.DEBUG: ("🐞", "\033[90m"),
+        logging.INFO: ("●", "\033[36m"),
+        logging.WARNING: ("▲", "\033[33m"),
+        logging.ERROR: ("✖", "\033[31m"),
+        logging.CRITICAL: ("✖", "\033[1;31m"),
+    }
+    _RESET = "\033[0m"
+
+    def __init__(self, api_key: str = "", *, use_color: bool | None = None) -> None:
+        super().__init__("%(asctime)s %(levelname)s %(name)s: %(message)s", api_key=api_key)
+        self._use_color = sys.stderr.isatty() if use_color is None else use_color
+
+    def format(self, record: logging.LogRecord) -> str:
+        timestamp = self.formatTime(record, "%H:%M:%S")
+        module = record.name.removeprefix("pa_agent.")
+        icon, color = self._LEVEL_STYLES.get(record.levelno, ("●", ""))
+        message = record.getMessage()
+        if self._api_key:
+            message = message.replace(self._api_key, mask_secret(self._api_key))
+        plain = f"{timestamp} {icon} {module:<24} {message}"
+        if not self._use_color:
+            return plain
+        return f"{color}{timestamp} {icon} {module:<24}{self._RESET} {message}"
 
 
 # ── Public functions ──────────────────────────────────────────────────────────
@@ -54,7 +84,6 @@ _QUIET_LOGGER_NAMES = (
     "httpx",
     "tvDatafeed",
     "tvDatafeed.main",
-    "root",  # tvdatafeed uses logging.getLogger("root") for websocket
     "websocket",
 )
 
@@ -78,7 +107,7 @@ def configure_logging(api_key: str = "") -> None:
 
     If handlers were removed after a prior configure_logging call, re-attaches them.
     """
-    global _configured  # noqa: PLW0603
+    global _configured
 
     if _configured:
         if api_key:
@@ -90,7 +119,7 @@ def configure_logging(api_key: str = "") -> None:
 
     # Build formatters
     file_formatter = MaskingFormatter(_LOG_FORMAT, api_key=api_key)
-    console_formatter = MaskingFormatter(_LOG_FORMAT, api_key=api_key)
+    console_formatter = ConsoleFormatter(api_key=api_key)
 
     # Track all active formatters so update_api_key can reach them
     _active_formatters.clear()

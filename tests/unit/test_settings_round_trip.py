@@ -1,11 +1,10 @@
 """Unit tests for settings load/save round-trip (task 2.4)."""
 from __future__ import annotations
+
 import json
 from unittest.mock import patch
 
-import pytest
-from pathlib import Path
-from pa_agent.config.settings import Settings, load_settings, save_settings
+from pa_agent.config.settings import MonitorTarget, Settings, load_settings, save_settings
 
 
 def test_defaults(tmp_path):
@@ -35,8 +34,8 @@ def test_round_trip(tmp_path):
     save_settings(original, p)
     loaded = load_settings(p)
     assert loaded.provider.api_key == "sk-test-1234"
-    # Crypto symbols migrate to gold defaults on load
-    assert loaded.general.last_symbol == "XAUUSD"
+    # Native TradingView crypto pairs remain usable after a settings reload.
+    assert loaded.general.last_symbol == "BTCUSDT"
     assert loaded.provider.model == original.provider.model
 
 
@@ -94,6 +93,28 @@ def test_pushplus_round_trip(tmp_path):
     loaded = load_settings(p)
     assert loaded.pushplus.token == "pp-test-token"
     assert loaded.pushplus.enabled is False
+
+
+def test_monitoring_round_trip(tmp_path):
+    """save → load preserves settings.json-defined monitoring targets."""
+    p = tmp_path / "settings.json"
+    original = Settings()
+    original.monitoring.enabled = True
+    original.monitoring.max_concurrent_analyses = 2
+    original.monitoring.targets = [
+        MonitorTarget(symbol="XAUUSD", timeframe="15m"),
+        MonitorTarget(symbol="BTCUSDT", timeframe="30m", enabled=False),
+    ]
+    save_settings(original, p)
+
+    loaded = load_settings(p)
+
+    assert loaded.monitoring.enabled is True
+    assert loaded.monitoring.max_concurrent_analyses == 2
+    assert [(target.symbol, target.timeframe, target.enabled) for target in loaded.monitoring.targets] == [
+        ("XAUUSD", "15m", True),
+        ("BTCUSDT", "30m", False),
+    ]
 
 
 def test_tushare_round_trip(tmp_path):

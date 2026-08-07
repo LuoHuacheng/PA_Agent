@@ -174,6 +174,39 @@ class BinanceUSDMTestnetSettings(BaseModel):
     cooldown_minutes: int = Field(default=30, ge=1, le=1440)
 
 
+class MonitorTarget(BaseModel):
+    """One settings.json-defined background K-line monitoring target."""
+    model_config = ConfigDict(extra="ignore")
+
+    symbol: str = Field(min_length=1)
+    timeframe: str = Field(min_length=2)
+    enabled: bool = True
+
+    @field_validator("symbol", "timeframe")
+    @classmethod
+    def _strip_required_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class MonitoringSettings(BaseModel):
+    """Settings for close-of-bar multi-symbol analysis and alerts.
+
+    The monitor sends notifications only. Background signals intentionally never
+    invoke any automated trading executor.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    targets: list[MonitorTarget] = Field(default_factory=list)
+    max_concurrent_analyses: int = Field(default=1, ge=1, le=8)
+    poll_lead_seconds: int = Field(default=5, ge=0, le=120)
+    poll_retry_attempts: int = Field(default=3, ge=0, le=10)
+    poll_retry_seconds: int = Field(default=5, ge=1, le=120)
+
+
 class Settings(BaseModel):
     """Root settings object persisted to config/settings.json."""
     model_config = ConfigDict(extra="ignore")
@@ -188,6 +221,7 @@ class Settings(BaseModel):
     binance_usdm_testnet: BinanceUSDMTestnetSettings = Field(
         default_factory=BinanceUSDMTestnetSettings
     )
+    monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
 
 
 def provider_api_key_configured(settings: Settings | None) -> bool:
