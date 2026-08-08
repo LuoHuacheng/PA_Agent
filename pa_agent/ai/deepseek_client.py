@@ -179,7 +179,7 @@ def _is_kkai_openai_proxy(base_url: str) -> bool:
 
 
 def _is_packyapi(base_url: str) -> bool:
-    return "packyapi.com" in (base_url or "").lower()
+    return "packyapi" in (base_url or "").lower()
 
 
 def _is_minimax(base_url: str) -> bool:
@@ -290,8 +290,13 @@ def _prepare_api_messages(
 def _provider_max_output_tokens(settings: AIProviderSettings) -> int:
     """Per-gateway completion cap (max_tokens); avoids 400 from provider limits."""
     model = (settings.model or "").lower()
-    if _is_packyapi(settings.base_url) and "claude" in model:
-        return _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
+    if _is_packyapi(settings.base_url):
+        # Packy enforces max_tokens ∈ [1, 393216] for its DeepSeek models
+        # (and 128_000 for claude-officially). Clamp any Packy route to the
+        # DeepSeek cap so `deepseek-v4-flash` no longer 400s at 524288.
+        if "claude" in model:
+            return _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
+        return _DEEPSEEK_MAX_OUTPUT_TOKENS
     if _is_deepseek_native(settings.base_url):
         return _DEEPSEEK_MAX_OUTPUT_TOKENS
     if _is_mimo(settings):
