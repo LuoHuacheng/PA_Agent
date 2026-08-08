@@ -318,7 +318,22 @@ class MultiSymbolMonitor:
         threshold = int(self._settings.general.decision_confidence_threshold)
         if not _has_order_opportunity(inner, threshold):
             return decision
-        # Do not call Binance execution here. Monitoring is alert-only by design.
+
+        # Persist a trade record and (when configured) auto-execute the Testnet
+        # market order. Both are best-effort: a failure never disrupts analysis
+        # or notifications. The default settings keep automated execution
+        # disabled (binance_usdm_testnet.enabled=False), so this is a no-op
+        # unless the operator explicitly enables it.
+        try:
+            self._save_order_opportunity(frame, decision, inner, record)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Monitor trade-record/execution failed for %s %s: %s",
+                frame.symbol,
+                frame.timeframe,
+                exc,
+            )
+
         from pa_agent.notify.feishu_notifier import send_order_signal as send_feishu
         from pa_agent.notify.pushplus_notifier import send_order_signal as send_pushplus
 
@@ -344,6 +359,44 @@ class MultiSymbolMonitor:
             pushplus_sent,
         )
         return decision
+
+    def _save_order_opportunity(
+        self, frame: Any, decision: dict, inner: dict, record: Any
+    ) -> None:
+        """Persist the trade record and auto-execute the Testnet market signal."""
+        from pa_agent.records.trade_logger import save_trade_record
+        from pa_agent.trading.binance_usdm_testnet import execute_market_signal
+
+        meta = getattr(record, "meta", None)
+        decision_stance = ""
+        model_name = ""
+        if meta is not None:
+            decision_stance = getattr(meta, "decision_stance", "") or ""
+            provider = getattr(meta, "ai_provider", None) or {}
+            if isinstance(provider, dict):
+                model_name = str(provider.get("model") or "")
+        flip_cooldown = int(
+            getattr(self._settings.general, "structure_flip_cooldown_bars", 3) or 3
+        )
+        save_trade_record(
+            decision_inner=inner,
+            stage2_full=decision,
+            stage1_diagnosis=getattr(record, "stage1_diagnosis", None),
+            frame=frame,
+            meta_symbol=frame.symbol,
+            meta_timeframe=frame.timeframe,
+            decision_stance=decision_stance,
+            model_name=model_name,
+            structure_flip_cooldown_bars=flip_cooldown,
+        )
+
+        result = execute_market_signal(inner, self._settings, analysis_symbol=frame.symbol)
+        logger.info(
+            "Binance U本位 Testnet 自动执行: status=%s symbol=%s reason=%s",
+            result.status,
+            result.symbol,
+            result.reason,
+        )
 
     @staticmethod
     def _key_text(key: tuple[str, str]) -> str:

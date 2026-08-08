@@ -304,3 +304,95 @@ def test_monitor_stop_disconnects_source_before_waiting_for_running_analysis(tmp
 
     assert ("disconnect",) in source.calls
     assert not monitor._futures
+
+
+def _order_frame() -> object:
+    return type("Frame", (), {"symbol": "BTCUSDT", "timeframe": "15m"})()
+
+
+def _order_decision() -> dict:
+    return {
+        "decision": {
+            "order_type": "市价单",
+            "order_direction": "做多",
+            "trade_confidence": 90,
+            "entry_price": 100,
+            "stop_loss_price": 95,
+            "take_profit_price": 110,
+        }
+    }
+
+
+def _record_double() -> object:
+    meta = type(
+        "Meta",
+        (),
+        {"decision_stance": "balanced", "ai_provider": {"model": "test-model"}},
+    )()
+    return type("Record", (), {"meta": meta, "stage1_diagnosis": {"direction": "up"}})()
+
+
+def test_monitor_auto_execution_calls_executor_and_logger(tmp_path: Path, monkeypatch) -> None:
+    """When enabled, _save_order_opportunity wires through to the executor."""
+    settings = _settings(MonitorTarget(symbol="BTCUSDT", timeframe="15m"))
+    settings.binance_usdm_testnet.enabled = True
+    settings.binance_usdm_testnet.dry_run = True
+
+    calls: list[dict] = []
+    recorded: list[dict] = []
+
+    def fake_execute(inner, cfg, *, analysis_symbol=""):
+        calls.append({"inner": inner, "analysis_symbol": analysis_symbol})
+        return type("Result", (), {"status": "dry_run", "symbol": "BTCUSDT", "reason": "test"})()
+
+    monkeypatch.setattr(
+        "pa_agent.trading.binance_usdm_testnet.execute_market_signal", fake_execute
+    )
+    monkeypatch.setattr(
+        "pa_agent.records.trade_logger.save_trade_record",
+        lambda **kw: recorded.append(kw),
+    )
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        clock=lambda: 1_805,
+        analyze=lambda _frame: _order_decision(),
+    )
+
+    monitor._save_order_opportunity(_order_frame(), _order_decision(), _order_decision()["decision"], _record_double())
+
+    assert calls and calls[0]["analysis_symbol"] == "BTCUSDT"
+    assert calls[0]["inner"]["order_type"] == "市价单"
+    assert recorded and recorded[0]["meta_symbol"] == "BTCUSDT"
+    assert recorded[0]["decision_stance"] == "balanced"
+    assert recorded[0]["model_name"] == "test-model"
+
+
+def test_monitor_auto_execution_disabled_by_default_returns_skipped(tmp_path: Path, monkeypatch) -> None:
+    """With binance_usdm_testnet.enabled=False (default), execution is a no-op."""
+    settings = _settings(MonitorTarget(symbol="BTCUSDT", timeframe="15m"))
+    from pa_agent.trading.binance_usdm_testnet import execute_market_signal
+
+    monkeypatch.setattr(
+        "pa_agent.records.trade_logger.save_trade_record",
+        lambda **kw: None,
+    )
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        clock=lambda: 1_805,
+        analyze=lambda _frame: _order_decision(),
+    )
+
+    result = execute_market_signal(_order_decision()["decision"], settings, analysis_symbol="BTCUSDT")
+
+    assert result.status == "skipped"
+    assert result.reason == "Binance Testnet automation disabled"
+    # The monitor helper itself must not raise when pointing at the real executor.
+    monitor._save_order_opportunity(
+        _order_frame(), _order_decision(), _order_decision()["decision"], _record_double()
+    )

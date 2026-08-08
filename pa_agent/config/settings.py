@@ -172,6 +172,9 @@ class BinanceUSDMTestnetSettings(BaseModel):
     leverage: int = Field(default=1, ge=1, le=5)
     max_notional_usdt: float = Field(default=20.0, gt=0, le=1000.0)
     cooldown_minutes: int = Field(default=30, ge=1, le=1440)
+    # Enforce the §10.3 trader's equation (win_rate×reward > (1-win_rate)×risk)
+    # before automating a market order. Default on for safety.
+    require_trader_equation: bool = True
 
 
 class MonitorTarget(BaseModel):
@@ -192,11 +195,13 @@ class MonitorTarget(BaseModel):
 
 
 class MonitoringSettings(BaseModel):
-    """Settings for close-of-bar multi-symbol analysis and alerts.
+    """Settings for close-of-bar multi-symbol analysis, alerts, and (when
+    binance_usdm_testnet.enabled) Testnet auto-execution.
 
-    The monitor sends notifications only. Background signals intentionally never
-    invoke any automated trading executor.
+    The monitor sends notifications and, if Binance Testnet automation is
+    enabled, also invokes the guarded auto-executor for market signals.
     """
+
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = False

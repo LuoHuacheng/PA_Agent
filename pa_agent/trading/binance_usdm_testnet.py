@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -21,6 +22,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
+from pa_agent.util.trade_metrics import compute_risk_reward, passes_trader_equation
 
 logger = logging.getLogger(__name__)
 
@@ -200,12 +202,20 @@ def execute_market_signal(
         )
 
     symbol = str(config.symbol or "").upper().strip()
-    if not symbol or symbol not in {item.upper().strip() for item in config.symbol_whitelist}:
-        return ExecutionResult("rejected", f"Symbol {symbol or 'unset'} is not whitelisted")
-    if config.require_analysis_symbol_match and analysis_symbol.upper().strip() != symbol:
-        return ExecutionResult(
-            "rejected", "Analysis symbol does not match configured Testnet symbol"
-        )
+    whitelist = {item.upper().strip() for item in config.symbol_whitelist}
+    if not whitelist:
+        return ExecutionResult("rejected", "No whitelisted symbols configured")
+    analysis = (analysis_symbol or "").upper().strip()
+    if config.require_analysis_symbol_match:
+        # Multi-symbol monitoring: when the analyzed symbol is whitelisted it is
+        # the trade target; otherwise fall back to the configured default.
+        if analysis and analysis in whitelist:
+            symbol = analysis
+        elif not symbol or symbol not in whitelist:
+            return ExecutionResult("rejected", f"Symbol {symbol or 'unset'} is not whitelisted")
+    else:
+        if not symbol or symbol not in whitelist:
+            return ExecutionResult("rejected", f"Symbol {symbol or 'unset'} is not whitelisted")
     side = _side_from_decision(decision.get("order_direction"))
     if side is None:
         return ExecutionResult("rejected", "Unsupported order direction")
@@ -213,6 +223,22 @@ def execute_market_signal(
     target = _positive_decimal(decision.get("take_profit_price"))
     if stop is None or target is None:
         return ExecutionResult("rejected", "Stop loss and take profit are required")
+    if config.require_trader_equation:
+        win_rate = _parse_win_rate(decision.get("estimated_win_rate"))
+        if win_rate is None:
+            return ExecutionResult(
+                "rejected", "estimated_win_rate missing; cannot verify trader's equation"
+            )
+        entry = _positive_decimal(decision.get("entry_price"))
+        # Risk/reward measured from entry (not stop↔target): Brooks equation is
+        # win_rate×reward > (1−win_rate)×risk with risk=entry→SL, reward=entry→TP.
+        rr = compute_risk_reward(entry, target, stop, decision.get("order_direction"))
+        if rr is None or not passes_trader_equation(
+            win_rate, float(rr["risk"]), float(rr["reward"])
+        ):
+            return ExecutionResult(
+                "rejected", "Trader's equation not satisfied (§10.3), refusing auto-order"
+            )
     signal_id = _signal_id(symbol, decision)
     if _is_recent_signal(signal_id, config.cooldown_minutes):
         return ExecutionResult("skipped", "Duplicate signal is within cooldown period", symbol)
@@ -349,6 +375,24 @@ def _side_from_decision(value: object) -> str | None:
     if any(token in text for token in ("空", "short", "sell", "bear")):
         return "SELL"
     return None
+
+
+def _parse_win_rate(value: object) -> float | None:
+    """Parse estimated_win_rate (number, '61%', or '0.61') into 0-100, or None."""
+    if value is None or value == "":
+        return None
+    text = str(value).strip()
+    if text.endswith("%"):
+        text = text[:-1]
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    if 0.0 <= number <= 1.0:
+        return number * 100.0
+    return number
 
 
 def _positive_decimal(value: object) -> Decimal | None:

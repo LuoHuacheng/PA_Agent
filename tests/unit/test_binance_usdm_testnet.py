@@ -79,8 +79,10 @@ def _long_decision() -> dict:
     return {
         "order_type": "市价单",
         "order_direction": "做多",
+        "entry_price": 100,
         "stop_loss_price": 90,
         "take_profit_price": 120,
+        "estimated_win_rate": 70,
     }
 
 
@@ -94,6 +96,32 @@ def test_dry_run_never_calls_client() -> None:
     result = execute_market_signal(_long_decision(), _settings(dry_run=True), client=client)
     assert result.status == "dry_run"
     assert not client.calls
+
+
+def test_trader_equation_risk_is_entry_to_stop() -> None:
+    """Risk in the §10.3 equation is entry→SL distance, not stop↔target span.
+
+    entry=100, sl=90, tp=120 → risk=10, reward=20. At 55% win rate the trade
+    passes (0.55×20 > 0.45×10); treating the stop↔target span (30) as risk
+    would wrongly reject it (0.55×20 < 0.45×30).
+    """
+    decision = _long_decision()
+    decision["estimated_win_rate"] = 55
+    result = execute_market_signal(
+        decision, _settings(), analysis_symbol="BTCUSDT", client=FakeClient()
+    )
+    assert result.status == "submitted", result.reason
+
+
+def test_missing_entry_price_rejected_cleanly() -> None:
+    """A decision without entry_price must reject, never raise TypeError."""
+    decision = _long_decision()
+    decision.pop("entry_price")
+    result = execute_market_signal(
+        decision, _settings(), analysis_symbol="BTCUSDT", client=FakeClient()
+    )
+    assert result.status == "rejected"
+    assert "Trader's equation" in result.reason
 
 
 def test_market_signal_submits_entry_and_both_protections() -> None:
@@ -120,7 +148,9 @@ def test_rejects_invalid_long_protection_prices_before_entry() -> None:
     decision = _long_decision() | {"stop_loss_price": 110}
     result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
     assert result.status == "rejected"
-    assert "Long requires" in result.reason
+    # Invalid geometry (sl above entry) is now caught by the trader's-equation
+    # gate (compute_risk_reward returns None) before any client call.
+    assert "Long requires" in result.reason or "Trader's equation" in result.reason, result.reason
     assert "entry" not in [call[0] for call in client.calls]
 
 
