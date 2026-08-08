@@ -231,6 +231,11 @@ _PRACTICAL_UNLIMITED_MAX_TOKENS = 524288
 # Anthropic-style thinking requires budget_tokens < max_tokens.
 _PRACTICAL_UNLIMITED_THINKING_BUDGET = 524287
 
+# Some gateways (e.g. www.cun.ai) run Cloudflare WAF rules that 403 the SDK's
+# default `User-Agent: OpenAI/Python …` ("Your request was blocked."). Send a
+# project UA instead; no known gateway validates this header.
+_DEFAULT_HEADERS = {"User-Agent": "PA_Agent/1.0"}
+
 
 def _effort_budget_tokens(effort: str | None, *, max_output: int) -> int:
     """Thinking budget; must stay below max_output (Anthropic/Packy rule)."""
@@ -470,6 +475,7 @@ class DeepSeekClient:
         client = _OpenAI(
             base_url=self._settings.base_url,
             api_key=self._settings.api_key,
+            default_headers=_DEFAULT_HEADERS,
         )
 
         t0 = time.monotonic()
@@ -648,6 +654,7 @@ class DeepSeekClient:
         client = _OpenAI(
             base_url=self._settings.base_url,
             api_key=self._settings.api_key,
+            default_headers=_DEFAULT_HEADERS,
         )
 
         t0 = time.monotonic()
