@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -29,6 +30,8 @@ logger = logging.getLogger(__name__)
 _TESTNET_BASE_URL = "https://testnet.binancefuture.com"
 _TIMEOUT_SECONDS = 12
 _RUNTIME_STATE_PATH = "trade_records/binance_usdm_testnet_state.json"
+_STATE_LOCK = threading.Lock()
+_ENTRY_CLIENT_PREFIX = "pa-entry-"
 
 
 class BinanceAPIError(RuntimeError):
@@ -133,6 +136,44 @@ class BinanceUSDMTestnetClient:
         )
         return _dict_response(result)
 
+    def place_limit_order(
+        self, *, symbol: str, side: str, quantity: Decimal, price: Decimal, client_id: str
+    ) -> dict[str, Any]:
+        result = self._request(
+            "POST",
+            "/fapi/v1/order",
+            {
+                "symbol": symbol,
+                "side": side,
+                "type": "LIMIT",
+                "quantity": _decimal_text(quantity),
+                "price": _decimal_text(price),
+                "timeInForce": "GTC",
+                "newClientOrderId": client_id,
+                "newOrderRespType": "RESULT",
+            },
+            signed=True,
+        )
+        return _dict_response(result)
+
+    def order_status(self, *, symbol: str, client_id: str) -> str:
+        """Return the exchange status of an order placed with ``client_id``."""
+        result = self._request(
+            "GET",
+            "/fapi/v1/order",
+            {"symbol": symbol, "origClientOrderId": client_id},
+            signed=True,
+        )
+        return str(_dict_response(result).get("status") or "")
+
+    def cancel_order(self, *, symbol: str, client_id: str) -> None:
+        self._request(
+            "DELETE",
+            "/fapi/v1/order",
+            {"symbol": symbol, "origClientOrderId": client_id},
+            signed=True,
+        )
+
     def place_close_algo_order(
         self, *, symbol: str, side: str, order_type: str, stop_price: Decimal, client_algo_id: str
     ) -> None:
@@ -196,10 +237,13 @@ def execute_market_signal(
         return ExecutionResult("dry_run", "Dry-run enabled, no API request sent")
     if not isinstance(decision, dict):
         return ExecutionResult("rejected", "Invalid decision")
-    if str(decision.get("order_type") or "") != "市价单":
+    order_type = str(decision.get("order_type") or "")
+    if order_type not in {"市价单", "限价单"}:
         return ExecutionResult(
-            "rejected", "Only 市价单 is automated; limit and breakout plans require manual review"
+            "rejected", "Only 市价单/限价单 is automated; breakout plans require manual review"
         )
+    if order_type == "限价单" and not config.limit_order_enabled:
+        return ExecutionResult("skipped", "Limit order automation disabled")
 
     symbol = str(config.symbol or "").upper().strip()
     whitelist = {item.upper().strip() for item in config.symbol_whitelist}
@@ -259,6 +303,19 @@ def execute_market_signal(
             return ExecutionResult(
                 "rejected", "Configured notional is below symbol minimum or invalid"
             )
+        if order_type == "限价单":
+            return _execute_limit_signal(
+                active_client,
+                decision,
+                config,
+                symbol,
+                side,
+                stop,
+                target,
+                quantity,
+                price,
+                signal_id,
+            )
         if side == "BUY" and not (stop < price < target):
             return ExecutionResult("rejected", "Long requires stop < mark price < target")
         if side == "SELL" and not (target < price < stop):
@@ -268,37 +325,15 @@ def execute_market_signal(
             symbol=symbol,
             side=side,
             quantity=quantity,
-            client_id=f"pa-entry-{uuid.uuid4().hex[:22]}",
+            client_id=f"{_ENTRY_CLIENT_PREFIX}{uuid.uuid4().hex[:22]}",
         )
-        exit_side = "SELL" if side == "BUY" else "BUY"
-        protected_algo_ids: list[str] = []
         try:
-            stop_algo_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
-            active_client.place_close_algo_order(
-                symbol=symbol,
-                side=exit_side,
-                order_type="STOP_MARKET",
-                stop_price=stop,
-                client_algo_id=stop_algo_id,
-            )
-            protected_algo_ids.append(stop_algo_id)
-            target_algo_id = f"pa-tp-{uuid.uuid4().hex[:24]}"
-            active_client.place_close_algo_order(
-                symbol=symbol,
-                side=exit_side,
-                order_type="TAKE_PROFIT_MARKET",
-                stop_price=target,
-                client_algo_id=target_algo_id,
-            )
+            _attach_protection(active_client, symbol, side, stop, target)
         except BinanceAPIError:
-            # Avoid leaving a close-all trigger that could affect a later position.
-            for client_algo_id in protected_algo_ids:
-                try:
-                    active_client.cancel_algo_order(client_algo_id=client_algo_id)
-                except BinanceAPIError:
-                    logger.exception("Failed to cancel orphaned Testnet protective order")
             # Never leave an unprotected automatically-created position.
-            active_client.close_market_position(symbol=symbol, side=exit_side, quantity=quantity)
+            active_client.close_market_position(
+                symbol=symbol, side="SELL" if side == "BUY" else "BUY", quantity=quantity
+            )
             raise
         _remember_signal(signal_id)
         return ExecutionResult(
@@ -311,6 +346,255 @@ def execute_market_signal(
     except (BinanceAPIError, ValueError) as exc:
         logger.warning("Binance Testnet automatic order rejected: %s", exc)
         return ExecutionResult("failed", str(exc), symbol)
+
+
+def _execute_limit_signal(
+    client: BinanceUSDMTestnetClient,
+    decision: dict[str, Any],
+    config: BinanceUSDMTestnetSettings,
+    symbol: str,
+    side: str,
+    stop: Decimal,
+    target: Decimal,
+    quantity: Decimal,
+    mark_price: Decimal,
+    signal_id: str,
+) -> ExecutionResult:
+    if not config.limit_order_enabled:
+        return ExecutionResult("skipped", "Limit order automation disabled", symbol)
+    entry_price = _positive_decimal(decision.get("entry_price"))
+    if entry_price is None:
+        return ExecutionResult("rejected", "Limit order entry price required")
+    if side == "BUY" and not (stop < entry_price < mark_price):
+        return ExecutionResult("rejected", "Long limit requires stop < limit price < mark price")
+    if side == "SELL" and not (mark_price < entry_price < stop):
+        return ExecutionResult("rejected", "Short limit requires mark price < limit price < stop")
+    replacement = _replace_pending_limit(client, symbol)
+    if replacement is not None:
+        return replacement
+    client.set_leverage(symbol, config.leverage)
+    entry_client_id = f"{_ENTRY_CLIENT_PREFIX}{uuid.uuid4().hex[:22]}"
+    pending_record = {
+        "client_id": entry_client_id,
+        "signal_id": signal_id,
+        "side": side,
+        "quantity": _decimal_text(quantity),
+        "stop": _decimal_text(stop),
+        "target": _decimal_text(target),
+        "placed_at": time.time(),
+    }
+    _persist_pending(symbol, pending_record)
+    try:
+        order = client.place_limit_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=entry_price,
+            client_id=entry_client_id,
+        )
+    except (BinanceAPIError, ValueError):
+        _drop_pending(symbol, entry_client_id)
+        raise
+    watcher = threading.Thread(
+        target=_watch_limit_entry,
+        kwargs={
+            "client": client,
+            "symbol": symbol,
+            "client_id": entry_client_id,
+            "side": side,
+            "stop": stop,
+            "target": target,
+            "quantity": quantity,
+            "signal_id": signal_id,
+            "timeout_seconds": config.limit_fill_timeout_minutes * 60,
+            "poll_interval": config.limit_poll_interval_seconds,
+        },
+        daemon=True,
+    )
+    watcher.start()
+    logger.info(
+        "Testnet limit entry placed for %s: order=%s entry=%s qty=%s",
+        symbol,
+        entry_client_id,
+        _decimal_text(entry_price),
+        _decimal_text(quantity),
+    )
+    return ExecutionResult(
+        "pending",
+        "Testnet limit entry placed; awaiting fill",
+        symbol,
+        _decimal_text(quantity),
+        str(order.get("orderId", "")),
+    )
+
+
+def _replace_pending_limit(client: BinanceUSDMTestnetClient, symbol: str) -> ExecutionResult | None:
+    """Cancel any resting limit entry for ``symbol``; protect a filled one.
+
+    Returns an ExecutionResult when the previous entry already filled (the
+    position is now protected and no new entry is placed), else ``None`` so the
+    caller proceeds with a fresh entry.
+    """
+    with _STATE_LOCK:
+        pending = _load_state().get("pending")
+        old = pending.get(symbol) if isinstance(pending, dict) else None
+    if not isinstance(old, dict):
+        return None
+    old_client_id = str(old.get("client_id") or "")
+    old_signal_id = str(old.get("signal_id") or "")
+    side = str(old.get("side") or "")
+    stop = _positive_decimal(old.get("stop"))
+    target = _positive_decimal(old.get("target"))
+    if not old_client_id or side not in ("BUY", "SELL") or stop is None or target is None:
+        _drop_pending(symbol, old_client_id)
+        return None
+    try:
+        status = client.order_status(symbol=symbol, client_id=old_client_id)
+    except BinanceAPIError as exc:
+        if _is_missing_order_error(exc):
+            logger.info("Removing stale Testnet pending entry for %s: %s", symbol, exc)
+            _drop_pending(symbol, old_client_id)
+            return None
+        logger.warning("Cannot inspect previous limit entry for %s: %s", symbol, exc)
+        return ExecutionResult("failed", f"Cannot inspect previous limit entry: {exc}", symbol)
+    if status == "FILLED":
+        # The watcher died (process restart) before attaching protection: repair.
+        try:
+            _attach_protection(client, symbol, side, stop, target)
+        except BinanceAPIError as exc:
+            logger.error("Filled limit entry for %s left unprotected: %s", symbol, exc)
+            return ExecutionResult(
+                "failed", f"Filled limit entry needs manual protection: {exc}", symbol
+            )
+        if old_signal_id:
+            _remember_signal(old_signal_id)
+        _drop_pending(symbol, old_client_id)
+        return ExecutionResult("skipped", "Previously filled limit entry now protected", symbol)
+    if status in ("NEW", "PARTIALLY_FILLED"):
+        try:
+            client.cancel_order(symbol=symbol, client_id=old_client_id)
+        except BinanceAPIError as exc:
+            return ExecutionResult("failed", f"Cannot replace pending limit entry: {exc}", symbol)
+        logger.info("Replaced stale Testnet limit entry %s for %s", old_client_id, symbol)
+    _drop_pending(symbol, old_client_id)
+    return None
+
+
+def _attach_protection(
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    side: str,
+    stop: Decimal,
+    target: Decimal,
+) -> None:
+    """Attach close-position STOP_MARKET and TAKE_PROFIT_MARKET orders.
+
+    On failure, cancels any orders already placed and re-raises so the caller
+    can roll back the position.
+    """
+    exit_side = "SELL" if side == "BUY" else "BUY"
+    protected_algo_ids: list[str] = []
+    try:
+        stop_algo_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
+        client.place_close_algo_order(
+            symbol=symbol,
+            side=exit_side,
+            order_type="STOP_MARKET",
+            stop_price=stop,
+            client_algo_id=stop_algo_id,
+        )
+        protected_algo_ids.append(stop_algo_id)
+        target_algo_id = f"pa-tp-{uuid.uuid4().hex[:24]}"
+        client.place_close_algo_order(
+            symbol=symbol,
+            side=exit_side,
+            order_type="TAKE_PROFIT_MARKET",
+            stop_price=target,
+            client_algo_id=target_algo_id,
+        )
+        protected_algo_ids.append(target_algo_id)
+    except BinanceAPIError:
+        # Avoid leaving a close-all trigger that could affect a later position.
+        for client_algo_id in protected_algo_ids:
+            try:
+                client.cancel_algo_order(client_algo_id=client_algo_id)
+            except BinanceAPIError:
+                logger.exception("Failed to cancel orphaned Testnet protective order")
+        raise
+
+
+def _watch_limit_entry(
+    *,
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    client_id: str,
+    side: str,
+    stop: Decimal,
+    target: Decimal,
+    quantity: Decimal,
+    signal_id: str,
+    timeout_seconds: float,
+    poll_interval: float,
+) -> None:
+    """Poll a resting limit entry; attach TP/SL on fill, cancel on timeout."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            status = client.order_status(symbol=symbol, client_id=client_id)
+        except BinanceAPIError as exc:
+            logger.warning("Testnet limit fill check failed for %s: %s", symbol, exc)
+            if time.monotonic() >= deadline:
+                try:
+                    client.cancel_order(symbol=symbol, client_id=client_id)
+                except BinanceAPIError as cancel_exc:
+                    logger.warning(
+                        "Cancel timed-out limit entry failed for %s: %s", symbol, cancel_exc
+                    )
+                _drop_pending(symbol, client_id)
+                logger.info(
+                    "Testnet limit entry timed out and was canceled: %s %s", symbol, client_id
+                )
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                continue
+            time.sleep(min(poll_interval, remaining))
+            continue
+        if status == "FILLED":
+            try:
+                _attach_protection(client, symbol, side, stop, target)
+            except BinanceAPIError as exc:
+                _drop_pending(symbol, client_id)
+                try:
+                    client.close_market_position(
+                        symbol=symbol,
+                        side="SELL" if side == "BUY" else "BUY",
+                        quantity=quantity,
+                    )
+                except BinanceAPIError:
+                    logger.exception("Failed to close filled limit position for %s", symbol)
+                logger.error("Limit entry filled but protection failed for %s: %s", symbol, exc)
+                return
+            _remember_signal(signal_id)
+            _drop_pending(symbol, client_id)
+            logger.info("Testnet limit entry filled and protected: %s %s", symbol, client_id)
+            return
+        if status in ("CANCELED", "EXPIRED", "REJECTED"):
+            _drop_pending(symbol, client_id)
+            logger.info("Testnet limit entry ended (%s): %s %s", status, symbol, client_id)
+            return
+        if time.monotonic() >= deadline:
+            try:
+                client.cancel_order(symbol=symbol, client_id=client_id)
+            except BinanceAPIError as exc:
+                logger.warning("Cancel timed-out limit entry failed for %s: %s", symbol, exc)
+            _drop_pending(symbol, client_id)
+            logger.info("Testnet limit entry timed out and was canceled: %s %s", symbol, client_id)
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            continue
+        time.sleep(min(poll_interval, remaining))
 
 
 def _signal_id(symbol: str, decision: dict[str, Any]) -> str:
@@ -327,39 +611,86 @@ def _signal_id(symbol: str, decision: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def _is_recent_signal(signal_id: str, cooldown_minutes: int) -> bool:
-    """Return whether a successfully-submitted plan is still in cooldown."""
+def _load_state() -> dict[str, Any]:
+    """Load the runtime execution state file (empty dict when absent)."""
     path = os.fspath(_RUNTIME_STATE_PATH)
-    now = time.time()
     try:
         with open(path, encoding="utf-8") as file:
             state = json.load(file)
     except FileNotFoundError:
         state = {}
     except (OSError, json.JSONDecodeError) as exc:
-        raise BinanceAPIError("Cannot read Testnet duplicate-signal state") from exc
-    seen_at = state.get(signal_id)
+        raise BinanceAPIError("Cannot read Testnet execution state") from exc
+    return state if isinstance(state, dict) else {}
+
+
+def _save_state(state: dict[str, Any]) -> None:
+    """Atomically persist the runtime execution state file."""
+    path = os.fspath(_RUNTIME_STATE_PATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp = f"{path}.tmp"
+    try:
+        with open(temp, "w", encoding="utf-8") as file:
+            json.dump(state, file, ensure_ascii=False)
+        os.replace(temp, path)
+    except OSError as exc:
+        # Fail closed: an unavailable state must not allow new orders.
+        raise BinanceAPIError("Cannot persist Testnet execution state") from exc
+
+
+def _is_recent_signal(signal_id: str, cooldown_minutes: int) -> bool:
+    """Return whether a successfully-submitted plan is still in cooldown."""
+    now = time.time()
+    with _STATE_LOCK:
+        seen = _load_state().get("seen")
+    seen_at = seen.get(signal_id) if isinstance(seen, dict) else None
     return isinstance(seen_at, (int, float)) and now - seen_at < cooldown_minutes * 60
+
+
+def _is_missing_order_error(exc: BinanceAPIError) -> bool:
+    """Return whether Binance explicitly reported error code -2013."""
+    message = str(exc).lower()
+    return "binance error -2013" in message
 
 
 def _remember_signal(signal_id: str) -> None:
     """Persist only after all entry and protective orders were accepted."""
-    path = os.fspath(_RUNTIME_STATE_PATH)
-    try:
-        with open(path, encoding="utf-8") as file:
-            state = json.load(file)
-    except FileNotFoundError:
-        state = {}
-    except (OSError, json.JSONDecodeError) as exc:
-        raise BinanceAPIError("Cannot read Testnet duplicate-signal state") from exc
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    state[signal_id] = time.time()
-    try:
-        with open(path, "w", encoding="utf-8") as file:
-            json.dump(state, file, ensure_ascii=False)
-    except OSError as exc:
-        # Fail closed: an unavailable dedupe state must not allow new orders.
-        raise BinanceAPIError("Cannot persist Testnet duplicate-signal state") from exc
+    with _STATE_LOCK:
+        state = _load_state()
+        seen = state.get("seen")
+        if not isinstance(seen, dict):
+            seen = {}
+            state["seen"] = seen
+        seen[signal_id] = time.time()
+        _save_state(state)
+
+
+def _persist_pending(symbol: str, entry: dict[str, Any]) -> None:
+    """Record a resting limit entry that is awaiting fill."""
+    with _STATE_LOCK:
+        state = _load_state()
+        pending = state.get("pending")
+        if not isinstance(pending, dict):
+            pending = {}
+            state["pending"] = pending
+        pending[symbol] = entry
+        _save_state(state)
+
+
+def _drop_pending(symbol: str, client_id: str | None = None) -> None:
+    """Remove the pending record for ``symbol`` unless it belongs to another order."""
+    with _STATE_LOCK:
+        state = _load_state()
+        pending = state.get("pending")
+        if not isinstance(pending, dict):
+            return
+        record = pending.get(symbol)
+        if record is None:
+            return
+        if client_id is not None and record.get("client_id") != client_id:
+            return
+        del pending[symbol]
+        _save_state(state)
 
 
 def _dict_response(value: dict[str, Any] | list[Any]) -> dict[str, Any]:
