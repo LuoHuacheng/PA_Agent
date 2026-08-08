@@ -1,8 +1,8 @@
 """Prompt assembler for Stage 1 (diagnosis) and Stage 2 (decision)."""
+
 from __future__ import annotations
 
 import datetime
-import functools
 import json
 import logging
 import math
@@ -143,7 +143,7 @@ _STAGE2_TAIL_REMINDER = (
     "禁止调用 exec/Python/写文件等工具；算术在 JSON 推理字段内完成。\n"
     "若 token 紧张，优先保证 `content` 有 JSON，可缩短思考。\n"
     "⚠️ 禁止在 content 中只写思考过程或分隔符（如 ---输出JSON---）而不附 JSON——"
-    "这会导致校验直接失败。哪怕只输出最小骨架 {\"decision\":{\"order_type\":\"不下单\",...}} 也比没有强。\n\n"
+    '这会导致校验直接失败。哪怕只输出最小骨架 {"decision":{"order_type":"不下单",...}} 也比没有强。\n\n'
     "【⚠️ 输出前自检 — terminal.outcome 语义规则（在输出 JSON 前逐项确认）：】\n"
     "1. §9.0=否 时，**必须先写 §9.0P** 评估背景限价；仅当 §9.0P 也=否 且无三价方案时，"
     "terminal.outcome=wait（node_id=9.0P 或 9.0）。\n"
@@ -151,7 +151,7 @@ _STAGE2_TAIL_REMINDER = (
     "   §9.0=是（有合格信号棒）或 §9.0P=是（计划型限价）且有三价 → 继续 §10，不得因缺信号棒直接 wait。\n"
     "   禁止写 reject — 你没有东西可以拒绝（除非 §10.3 已有三价方案）。\n"
     "2. 你有入场方案（entry/stop/target 三价齐全），但 10.3 交易者方程不通过？\n"
-    "   → 这才可以写 terminal.outcome=reject，node_id=\"10.3\"。\n"
+    '   → 这才可以写 terminal.outcome=reject，node_id="10.3"。\n'
     "3. 你有入场方案且 10.3 通过？→ terminal.outcome=trade，node_id 为最终节点。\n"
     "   **禁止**写 action/execute/entry 等自创词，只能是 wait|reject|trade|proceed。\n"
     "4. 限价/突破尚未触发？→ entry_bar.freshness=pending（禁止 limit_order_pending 等自创词）。\n"
@@ -687,6 +687,7 @@ _NEXT_BAR_DISABLED_NOTE = """\
 `next_cycle_prediction` 上，勿因缺少 `next_bar_prediction` 反复重试。
 """.strip()
 
+
 def _build_next_cycle_prediction_instruction(*, enable_next_bar: bool) -> str:
     """Return next-cycle instruction; avoid referencing next_bar when that feature is off."""
     if enable_next_bar:
@@ -746,7 +747,7 @@ spike | micro_channel | tight_channel | normal_channel | broad_channel | trendin
 # txt files merged into each stage prompt (order preserved)
 COMMON_SYSTEM_STAGE1_TXT_FILES: tuple[str, ...] = (
     "提示词大纲_人设与思维方式.txt",
-    "二元决策.txt",           # unified with Stage 2 for prefix caching; §0–§2 gate subset is included
+    "二元决策_阶段一闸门.txt",  # Stage 1 only needs §0–§2 gates; §3–§14 are Stage 2 strategy routing
 )
 COMMON_SYSTEM_STAGE2_TXT_FILES: tuple[str, ...] = (
     "提示词大纲_人设与思维方式.txt",
@@ -861,11 +862,7 @@ def stage2_user_task_txt_files(
             else ()
         )
         skip = frozenset((*opposite, *opposite_spike))
-        core = [
-            f
-            for f in routed
-            if f not in skip
-        ]
+        core = [f for f in routed if f not in skip]
         core.extend(STAGE2_BASE_PROMPT_TXT_FILES)
     return list(dict.fromkeys([*core]))
 
@@ -888,6 +885,7 @@ def stage2_prompt_txt_files(
 
 
 # ── PromptAssembler ────────────────────────────────────────────────────────────
+
 
 class PromptAssembler:
     """Builds message lists for Stage 1 and Stage 2 API calls."""
@@ -913,41 +911,38 @@ class PromptAssembler:
     # ── Process-level system-prompt cache ────────────────────────────────────
     # DeepSeek KV Cache hits require the *prefix* of consecutive requests to
     # be byte-identical.  System prompts are fully static (persona + txt files)
-    # and never change during a session, so we cache them at the process level.
-    # Stage 1 and Stage 2 share one system blob so S1→S2 prefix matches.
+    # and never change during a session, so each stage variant is cached at the
+    # process level.
+    #
+    # Stage 1 uses the slim §0–§2 gate file (二元决策_阶段一闸门.txt) and Stage 2
+    # uses the full binary tree (二元决策.txt).  System prompts are therefore NOT
+    # byte-identical across stages — the cache is keyed per file set so repeated
+    # Stage 1 (or Stage 2) requests still cache-hit.
 
-    @functools.cached_property
-    def _shared_system_prompt(self) -> str:
-        """Shared Stage 1/2 system prompt (cached for this instance)."""
-        return self._get_shared_system_prompt()
-
-    def _get_shared_system_prompt(self) -> str:
-        key = str(self._prompt_dir.resolve())
+    def _build_system_prompt_for(self, txt_files: tuple[str, ...]) -> str:
+        """Persona + *txt_files* merged into one system blob (process-cached)."""
+        key = (str(self._prompt_dir.resolve()), txt_files)
         cached = _SYSTEM_PROMPT_CACHE.get(key)
         if cached is not None:
             return cached
-        built = self._build_shared_system_prompt_inner()
-        _SYSTEM_PROMPT_CACHE[key] = built
-        return built
-
-    def _build_stage1_system_prompt(self) -> str:
-        """Return cached shared system prompt."""
-        return self._shared_system_prompt
-
-    def _build_stage2_system_prompt(self) -> str:
-        """Return cached shared system prompt (byte-identical to Stage 1)."""
-        return self._shared_system_prompt
-
-    def _build_shared_system_prompt_inner(self) -> str:
-        """Persona + full binary decision tree (both stages)."""
         system_parts = [
             _LANGUAGE_ZH_RULE,
             _PA_TERMINOLOGY_ZH,
             _OPENCLAW_AGENT_NO_TOOLS_RULE,
             _THINKING_CONTENT_OUTPUT_RULE,
         ]
-        system_parts.extend(self._load(name) for name in COMMON_SYSTEM_PROMPT_TXT_FILES)
-        return "\n\n---\n\n".join(p for p in system_parts if p)
+        system_parts.extend(self._load(name) for name in txt_files)
+        built = "\n\n---\n\n".join(p for p in system_parts if p)
+        _SYSTEM_PROMPT_CACHE[key] = built
+        return built
+
+    def _build_stage1_system_prompt(self) -> str:
+        """Persona + Stage 1 gate subset (§0–§2) for token savings."""
+        return self._build_system_prompt_for(COMMON_SYSTEM_STAGE1_TXT_FILES)
+
+    def _build_stage2_system_prompt(self) -> str:
+        """Persona + full binary decision tree (Stage 2 strategy routing)."""
+        return self._build_system_prompt_for(COMMON_SYSTEM_STAGE2_TXT_FILES)
 
     # ── File loading ──────────────────────────────────────────────────────────
 
@@ -1118,9 +1113,7 @@ class PromptAssembler:
                 f"record.meta: {getattr(previous_record, 'meta', '<missing>')!r}"
             )
         prev_diag = getattr(previous_record, "stage1_diagnosis", None) or {}
-        if not prev_assistant_content and not (
-            isinstance(prev_diag, dict) and prev_diag
-        ):
+        if not prev_assistant_content and not (isinstance(prev_diag, dict) and prev_diag):
             raise ValueError(
                 f"build_incremental_stage1: previous_record.stage1_response "
                 f"has no 'content' field. "
@@ -1167,10 +1160,10 @@ class PromptAssembler:
         )
 
         return [
-            {"role": "system",    "content": system_content},
-            {"role": "user",      "content": prev_user_content},
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": prev_user_content},
             assistant_turn,
-            {"role": "user",      "content": incremental_user_content},
+            {"role": "user", "content": incremental_user_content},
         ]
 
     def _stage1_pattern_supplement(self) -> str:
@@ -1227,9 +1220,7 @@ class PromptAssembler:
             n_bars_hint = len(frame.bars)
             hint_lines.append(render_three_window_summary(frame, trend_ctx))
             hint_lines.append("")
-            hint_lines.append(
-                "**§2.2 长程背景 vs 近期方向（程序摘要，供 gate_trace 2.2 引用）**"
-            )
+            hint_lines.append("**§2.2 长程背景 vs 近期方向（程序摘要，供 gate_trace 2.2 引用）**")
             hint_lines.append(
                 f"  背景方向（K{n_bars_hint}-K41）≈ {trend_ctx['background_direction']}；"
                 f"交易主方向（近期）≈ {trend_ctx['trading_direction']}；"
@@ -1266,7 +1257,9 @@ class PromptAssembler:
             logger.warning("_render_program_prefill_hint failed: %s", exc)
             return ""
 
-    def _build_stage1_user_prompt(self, frame: KlineFrame, *, analysis_mode: str = "original") -> str:
+    def _build_stage1_user_prompt(
+        self, frame: KlineFrame, *, analysis_mode: str = "original"
+    ) -> str:
         """Build the Stage 1 task turn; stage-specific rules stay out of system."""
         pattern_block = self._stage1_pattern_supplement()
         prefill_hint = self._render_program_prefill_hint(frame)
@@ -1364,7 +1357,7 @@ class PromptAssembler:
             '  "incremental_delta": {"new_closed_bars":["K1"],'
             '"changed_fields":["direction","cycle_position"],'
             '"summary":"相对上一轮：新增K1突破区间上沿，方向由中性转偏多"}\n'
-            "- new_closed_bars 长度必须等于「新增已收盘K线」数量（1根则只写 [\"K1\"]）。\n"
+            '- new_closed_bars 长度必须等于「新增已收盘K线」数量（1根则只写 ["K1"]）。\n'
             "- 并在 summary / risk_warning / gate_trace 中说明相对上一轮变化。\n"
             "- gate_result=proceed 时 gate_trace 仍须覆盖 §1.2、§1.3、§2.1、§2.2、§2.5（§1.1/§2.3/§2.4 由程序填充）。\n"
             "- 输出仍必须是完整阶段一 JSON，而不是差异补丁。\n\n"
@@ -1442,7 +1435,7 @@ class PromptAssembler:
             '  "incremental_delta": {"new_closed_bars":["K1"],'
             '"changed_fields":["direction","cycle_position"],'
             '"summary":"相对上一轮：新增K1突破区间上沿，方向由中性转偏多"}\n'
-            "- new_closed_bars 长度必须等于「新增已收盘K线」数量（1根则只写 [\"K1\"]）。\n"
+            '- new_closed_bars 长度必须等于「新增已收盘K线」数量（1根则只写 ["K1"]）。\n'
             "- 并在 summary / risk_warning / gate_trace 中说明相对上一轮变化。\n"
             "- gate_result=proceed 时 gate_trace 仍须覆盖 §1.2、§1.3、§2.1、§2.2、§2.5（§1.1/§2.3/§2.4 由程序填充）。\n"
             "- 输出仍必须是完整阶段一 JSON，而不是差异补丁。\n\n"
@@ -1507,10 +1500,7 @@ class PromptAssembler:
 
         unpredictable = bool(pred.get("unpredictable", False))
         if unpredictable:
-            return (
-                "## 上一轮下一根K线预测\n\n"
-                "上一轮标记为不可预测；本轮请独立判断。\n"
-            )
+            return "## 上一轮下一根K线预测\n\n上一轮标记为不可预测；本轮请独立判断。\n"
 
         direction = pred.get("direction") or "—"
         probs = pred.get("probabilities") or {}
@@ -1579,6 +1569,7 @@ class PromptAssembler:
             enable_next_bar_prediction=enable_next_bar_prediction,
             omit_kline_block=chain_after_s1,
             structure_flip_cooldown_bars=structure_flip_cooldown_bars,
+            include_full_binary_tree=chain_after_s1,
         )
 
         if chain_after_s1:
@@ -1609,8 +1600,15 @@ class PromptAssembler:
         enable_next_bar_prediction: bool = False,
         omit_kline_block: bool = False,
         structure_flip_cooldown_bars: int = 3,
+        include_full_binary_tree: bool = False,
     ) -> str:
-        """Build the Stage 2 task turn for standalone or prefix-chain mode."""
+        """Build the Stage 2 task turn for standalone or prefix-chain mode.
+
+        ``include_full_binary_tree`` embeds the complete §3–§14 decision tree in
+        the user turn.  Prefix-chain mode reuses the Stage 1 message prefix
+        (slim §0–§2 gate system), so the full tree must be re-supplied here or
+        Stage 2 never sees the strategy-routing sections.
+        """
         from pa_agent.ai.decision_continuity import (
             build_continuity_context,
             render_continuity_prompt_block,
@@ -1627,21 +1625,29 @@ class PromptAssembler:
         conflict_block = self._render_trend_conflict_guidance(stage1_json)
         transition_block = self._render_transition_guidance(stage1_json)
         planned_limit_block = self._render_planned_limit_hint(stage1_json, frame)
-        stage2_parts = [
-            stance_block,
-            continuity_block,
-            conflict_block,
-            transition_block,
-            planned_limit_block,
-            *(
-                self._load(name)
-                for name in stage2_user_task_txt_files(
-                    strategy_files,
-                    direction=str(stage1_json.get("direction", "") or ""),
-                    load_full_strategy_library=self._load_full_strategy_library(),
+        stage2_parts = [stance_block]
+        if include_full_binary_tree:
+            tree = self._load("二元决策.txt")
+            if tree:
+                stage2_parts.append(
+                    "【阶段二决策依据：完整二元决策树（§3–§14 策略路由与执行）】\n" + tree
                 )
-            ),
-        ]
+        stage2_parts.extend(
+            [
+                continuity_block,
+                conflict_block,
+                transition_block,
+                planned_limit_block,
+                *(
+                    self._load(name)
+                    for name in stage2_user_task_txt_files(
+                        strategy_files,
+                        direction=str(stage1_json.get("direction", "") or ""),
+                        load_full_strategy_library=self._load_full_strategy_library(),
+                    )
+                ),
+            ]
+        )
         if experience_entries:
             max_chars = 400
             if self._prompt_settings is not None:
@@ -1689,11 +1695,7 @@ class PromptAssembler:
             )
             simple_features_block = self._render_simple_market_features_block(frame)
             if simple_features_block:
-                kline_block += (
-                    _MARKET_FEATURES_AUTHORITY_NOTE
-                    + simple_features_block
-                    + "\n\n"
-                )
+                kline_block += _MARKET_FEATURES_AUTHORITY_NOTE + simple_features_block + "\n\n"
             if breakout_tick_hint:
                 kline_block += f"{breakout_tick_hint}\n\n"
         else:
@@ -1921,9 +1923,7 @@ class PromptAssembler:
                 "请结合 K 线摆动高低点与 EMA 自行定价。"
             )
         if direction == "neutral":
-            lines.append(
-                "- 阶段一 direction=neutral：**§9.0P 默认 wait**（禁止双边边界挂单）。"
-            )
+            lines.append("- 阶段一 direction=neutral：**§9.0P 默认 wait**（禁止双边边界挂单）。")
         return "\n".join(lines) + "\n"
 
     @staticmethod

@@ -1,4 +1,5 @@
 """Unit tests for PromptAssembler (task 7.3)."""
+
 from __future__ import annotations
 
 import json
@@ -45,7 +46,7 @@ def assembler(tmp_path: Path) -> PromptAssembler:
         "提示词大纲_人设与思维方式.txt",
         "市场诊断框架.txt",
         "二元决策.txt",
-        "二元决策_闸门.txt",
+        "二元决策_阶段一闸门.txt",
         "文件16-K线信号识别.txt",
         "逐棒分析检查单.txt",
         "文件17-止损和止盈与仓位管理.txt",
@@ -78,7 +79,7 @@ def assembler(tmp_path: Path) -> PromptAssembler:
 
 
 def test_stage1_system_prompt_order(assembler: PromptAssembler):
-    """Stage 1 system: shared persona + full binary tree; user: framework + signals."""
+    """Stage 1 system: persona + slim §0–§2 gate subset; user: framework + signals."""
     frame = _make_frame()
     messages = assembler.build_stage1(frame)
     system = messages[0]["content"]
@@ -86,15 +87,15 @@ def test_stage1_system_prompt_order(assembler: PromptAssembler):
     pos_persona = system.find("提示词大纲_人设与思维方式")
     pos_binary_sys = system.find("二元决策")
     assert pos_persona >= 0
-    assert 0 <= pos_persona < pos_binary_sys, "Binary decision tree should follow persona in system"
-    # Stage 1 now uses the FULL binary tree (same as Stage 2) for prefix caching
+    assert 0 <= pos_persona < pos_binary_sys, "Binary decision gate should follow persona in system"
     assert "市场诊断框架" not in system
 
     pos_diag = user.find("市场诊断框架")
     pos_signal = user.find("文件16-K线信号识别")
     assert "是否为尖峰 / 极速行情" not in system
-    assert "[CONTENT OF 二元决策.txt]" in system
-    assert "[CONTENT OF 二元决策_闸门.txt]" not in system
+    # Stage 1 uses the slim §0–§2 gate subset, NOT the full binary tree
+    assert "[CONTENT OF 二元决策_阶段一闸门.txt]" in system
+    assert "[CONTENT OF 二元决策.txt]" not in system
     assert 0 <= pos_diag < pos_signal, "Stage 1 user task files are out of order"
     assert "逐棒分析检查单" not in user, "Bar-by-bar checklist is Stage 2 only"
     assert "文件18-突破失败与突破测试" not in user
@@ -133,10 +134,14 @@ def test_stage2_user_prompt_includes_gate_trace(assembler: PromptAssembler):
 
 
 def test_stage2_system_prompt_order(assembler: PromptAssembler):
-    """Stage 2 system reuses stage-1 system (persona + binary); user: strategy → risk."""
+    """Stage 2 system: persona + FULL binary tree; user: strategy → risk."""
     frame = _make_frame()
     stage1_json = {"cycle_position": "normal_channel", "direction": "bullish"}
-    strategy_files = ["上涨通道分析识别.txt", "上涨通道交易策略.txt", "文件13-窄通道与宽通道策略.txt"]
+    strategy_files = [
+        "上涨通道分析识别.txt",
+        "上涨通道交易策略.txt",
+        "文件13-窄通道与宽通道策略.txt",
+    ]
     messages = assembler.build_stage2(frame, stage1_json, strategy_files, [])
     system = messages[0]["content"]
     user = messages[1]["content"]
@@ -150,6 +155,9 @@ def test_stage2_system_prompt_order(assembler: PromptAssembler):
         "Full binary tree file is not duplicated in stage 2 user turn"
     )
     assert "[CONTENT OF 二元决策.txt]" in system
+    assert "[CONTENT OF 二元决策_闸门.txt]" not in system, (
+        "Stage 2 must use the full binary tree, not the slim Stage 1 gate subset"
+    )
     pos_strategy = user.find("上涨通道分析识别")
     pos_bar_by_bar = user.find("逐棒分析检查单")
     pos_signal = user.find("文件16-K线信号识别")
@@ -269,16 +277,27 @@ def test_stage2_system_prompt_only_matches_build_stage2(assembler: PromptAssembl
 def test_kline_table_contains_nan_as_na(assembler: PromptAssembler):
     """K-line table renders NaN indicator values as 'N/A'."""
     bars = (
-        KlineBar(seq=1, ts_open=1_700_000_000.0, open=2600.0, high=2610.0,
-                 low=2590.0, close=2605.0, volume=1000.0, closed=False),
+        KlineBar(
+            seq=1,
+            ts_open=1_700_000_000.0,
+            open=2600.0,
+            high=2610.0,
+            low=2590.0,
+            close=2605.0,
+            volume=1000.0,
+            closed=False,
+        ),
     )
     indicators = IndicatorBundle(
         ema20=(float("nan"),),
         atr14=(float("nan"),),
     )
     frame = KlineFrame(
-        symbol="XAUUSD", timeframe="1h", bars=bars,
-        indicators=indicators, snapshot_ts_local_ms=1_700_000_000_000,
+        symbol="XAUUSD",
+        timeframe="1h",
+        bars=bars,
+        indicators=indicators,
+        snapshot_ts_local_ms=1_700_000_000_000,
     )
     messages = assembler.build_stage1(frame)
     user = messages[1]["content"]
@@ -332,14 +351,6 @@ def test_stage2_continuation_is_standalone_not_stage1_chat(assembler: PromptAsse
     assert "【最后一步·必做】" in s2_user
 
 
-def test_stage1_stage2_system_prompt_byte_identical(assembler: PromptAssembler):
-    """Stage 1 and Stage 2 must share one system blob for KV prefix reuse."""
-    frame = _make_frame()
-    s1_system = assembler.build_stage1(frame)[0]["content"]
-    s2_system = assembler.build_stage2(frame, {}, [], [])[0]["content"]
-    assert s1_system == s2_system
-
-
 def test_stage2_continuation_prefix_chain_reuses_stage1(assembler: PromptAssembler):
     """DeepSeek-style prefix chain: S2 reuses entire S1 message prefix."""
     frame = _make_frame()
@@ -368,6 +379,12 @@ def test_stage2_continuation_prefix_chain_reuses_stage1(assembler: PromptAssembl
     assert "阶段二任务" in s2_user
     assert "序号 | 时间" not in s2_user
     assert "完整 K 线表与几何特征已包含在上方阶段一用户消息中" in s2_user
+    # Chain mode reuses the slim §0–§2 Stage 1 system prefix, so the full
+    # §3–§14 tree must be re-supplied in the Stage 2 user turn.
+    assert "[CONTENT OF 二元决策.txt]" in s2_user, (
+        "Prefix-chain Stage 2 must receive the full binary decision tree in the "
+        "user turn (its system message is the slim Stage 1 gate subset)"
+    )
 
 
 def test_stage2_prompt_includes_balanced_stance_guidance(assembler: PromptAssembler):
@@ -621,7 +638,11 @@ def test_stage2_prompt_contains_prediction_instruction(assembler: PromptAssemble
 
     messages_on = assembler._build_stage2_user_prompt(
         frame=frame,
-        stage1_json={"cycle_position": "normal_channel", "direction": "bullish", "gate_result": "proceed"},
+        stage1_json={
+            "cycle_position": "normal_channel",
+            "direction": "bullish",
+            "gate_result": "proceed",
+        },
         strategy_files=[],
         experience_entries=[],
         enable_next_bar_prediction=True,
@@ -637,7 +658,11 @@ def test_previous_prediction_rendered_in_incremental_mode(assembler: PromptAssem
 
     frame = _make_frame()
     stage1_messages = assembler.build_stage1(frame)
-    stage1_json = {"cycle_position": "normal_channel", "direction": "bullish", "gate_result": "proceed"}
+    stage1_json = {
+        "cycle_position": "normal_channel",
+        "direction": "bullish",
+        "gate_result": "proceed",
+    }
 
     previous = AnalysisRecord(
         meta=RecordMeta(
@@ -700,7 +725,11 @@ def test_unpredictable_previous_prediction_renders_note(assembler: PromptAssembl
 
     frame = _make_frame()
     stage1_messages = assembler.build_stage1(frame)
-    stage1_json = {"cycle_position": "normal_channel", "direction": "bullish", "gate_result": "proceed"}
+    stage1_json = {
+        "cycle_position": "normal_channel",
+        "direction": "bullish",
+        "gate_result": "proceed",
+    }
 
     previous = AnalysisRecord(
         meta=RecordMeta(

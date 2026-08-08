@@ -1,0 +1,333 @@
+# 交易二元决策树
+
+本文件按二元判断方式组织交易决策逻辑。每一步只问一个问题：是 / 否。如果答案不清楚，默认进入“等待”，而不是强行做多或做空。
+
+核心顺序：
+
+1. 先判断市场状态。
+2. 再判断方向偏好。
+3. 再找入场信号。
+4. 再检查风险收益（含止损、目标）。
+5. **交易者方程（10.3）在已确定止损与目标之后、下单（§11）之前做最终裁定。**
+6. ~~入场后逐K管理。~~（PA Agent 不持仓，跳过 §12–§13）
+7. ~~市场状态变化时立刻切换策略。~~（单次分析；请用户重新跑分析）
+
+**阶段划分（与 PA Agent 两阶段分析一致）：**
+- 阶段一（诊断闸门 §0–§2）：只做定性判断，**不做**交易者方程数值检验。
+- 阶段二（策略与执行 §3–§11、§14）：结构分支 → 入场信号(§9) → 风险收益(§10，含 10.3) → 下单方式(§11)。
+
+**四条全局硬禁令（与 `提示词大纲_人设与思维方式.txt` 一致，覆盖下文各专篇）**
+1. **禁止逆势**：只顺 `direction` / Always In / 近期主方向；§7 反转、MTR、楔形反转、区间假突破反手等**不得**产出逆势三价。
+2. **禁止追高潮**：`climax_risk` 预警/触发或高潮确认后禁追原方向；**禁止 SCS**；仅 SPS 回撤顺势或 wait。
+3. **禁止仓位管理**：不输出手数、比例、分批、移止损、跟踪止损、保护利润。
+4. **不依赖成交量**：成交量不作为识别或下单必要条件。
+
+---
+
+## 0. 总原则
+
+### 0.1 是否看得懂当前市场？
+
+是：继续下一步。
+
+否：等待。
+
+处理：
+- 不开仓。
+- 不猜方向。
+- 不因为“感觉要动了”而交易。
+- 等待更多K线，让结构变清楚。
+
+### 0.2 是否具备继续深入分析的条件？（定性，非交易者方程）
+
+是：允许进入阶段二，继续评估具体策略分支、入场与风控。
+
+否：等待。
+
+本步仅做**定性**判断（结构是否足以支持后续分析），须考虑：
+- 当前周期位置是否可识别。
+- 长程结构窗口背景是否可描述。
+- 价格位置是否极端模糊。
+
+**不在此步**用胜率×回报做数值检验；数值检验见 **§10.3**（止损与目标确定之后）。
+
+### 0.3 交易者方程（原则提醒，非执行节点）
+
+公式：胜率 × 预期回报 > 败率 × 预期风险
+
+本条为总原则：**最终是否允许下单，以 §10.3 的评估为准。**
+
+- 阶段一（诊断）**不要**填写本节点为「是/否」闸门。
+- 阶段二在 **§10.1–§10.2 已定止损与目标之后** 必须执行 **§10.3**，通过后才可进入 **§11 下单方式**。
+
+---
+
+## 1. 是否可以决策
+
+### 1.1 数据是否足够？
+
+否：
+- K线数量少于20根。
+- 数据质量不足。
+- 图形太乱无法判断。
+
+处理：
+- 输出：无法决定。
+- 操作：等待。
+- 不加载交易策略。
+- 不做任何方向性判断。
+
+是：进入下一步。
+
+### 1.2 是否能识别市场周期？
+
+必须能归入以下状态之一：
+
+- 尖峰 / 极速上涨或极速下跌。
+- 微型通道。
+- 紧凑通道。
+- 常规通道。
+- 宽通道 / 台阶。
+- 趋势型交易区间。
+- 普通交易区间。
+- 极端交易区间。
+
+否：
+- 输出：unknown。
+- 操作：等待。
+- 原因：诊断不清，决策必错。
+
+是：进入下一步。
+
+### 1.3 当前市场是否极端混乱？
+
+判断条件：
+- 大量K线重叠。
+- 上下影线频繁。
+- 20EMA水平并与价格纠缠。
+- 没有清晰方向。
+- 任意入场接近抛硬币。
+- 胜率接近50%，扣除滑点手续费后期望为负。
+
+是：
+- 状态：极端交易区间。
+- 操作：不交易。
+- 等待以下任一信号：
+  - 连续3到5根强趋势棒突破。
+  - 价格形成清晰通道。
+  - 重要消息后市场选择方向。
+
+否：进入方向判断。
+
+---
+
+## 2. 多空方向判断
+
+### 2.1 是否存在明确惯性方向？
+
+判断依据：
+- 20EMA是否上倾或下倾。
+- 最近20根K线重心是否上移或下移。
+- 波段高低点是否有序。
+- K线重叠度是否低。
+- 是否连续出现同方向趋势棒。
+- 价格是否持续运行在EMA一侧。
+
+否：
+- 进入区间逻辑。
+- 不做趋势跟踪。
+- 只考虑区间边界交易，或等待。
+
+是：进入趋势 / 通道 / 尖峰逻辑。
+
+### 2.2 长程大背景方向与近期方向的关系？
+
+提取方法：
+- 长程大背景方向：在 **K{n}–K41**（Brooks 亦称全窗口 K{n}–K1，n 通常为 100）的完整结构上判断主要趋势方向
+  （多头/空头/区间/中性）
+- 近期方向：来自 §2.3（当前方向判断）的结果
+- 比较两者关系，分三种情况：
+
+**同向（一致）：**
+- 强共振，置信度可提高。
+- 顺势交易的可靠性最高。
+
+**反向（冲突）：**
+- **不否决近期方向。** Al Brooks："新趋势比旧有趋势更能代表当前的现状，
+  也应该成为你交易的核心"（《逐棒分析》第88页）
+- 近期方向是当前交易的主方向，大背景方向作为风险提示。
+- 策略调整：
+  - 不输出任何仓位/资金/手数建议；仅用“信号强弱/风险等级/是否建议交易”表达保守程度。
+  - htf_context 中记录大背景方向（如"AIS"），作为磁力位警告。
+  - 若近期方向明确（§2.3 非中性）且 §2.5 惯性够强 →
+    按近期方向执行，不等待。
+  - 若近期信号弱（§2.3 中性 + §2.4 否 + §2.5 否）→ 等待更多K线确认。
+  - 不要求"必须出现楔形反转/双重顶底等特殊形态"才允许交易——
+    近期尖峰本身就是有效的顺势方向（"新趋势是交易核心"）。
+
+**中性/无明确大背景方向：**
+- 中立，按近期信号窗口独立判断。
+- 交易决策完全由 §2.3–§2.5 决定。
+
+### 2.3 当前方向是多头还是空头？
+
+多头条件：
+- EMA上倾。
+- HH + HL结构。
+- 收盘重心上移。
+- 多头趋势棒占优。
+- 回撤小且被买入。
+
+空头条件：
+- EMA下倾。
+- LL + LH结构。
+- 收盘重心下移。
+- 空头趋势棒占优。
+- 反弹小且被卖出。
+
+如果都不明显：
+- 视为中性。
+- 进入区间 / 等待逻辑。
+
+### 2.4 当前是否处于 Always In 状态？
+
+Always In Long（AIL）条件：
+- 近端 **K8–K1** 多数收在 EMA 上方（加权同侧占比高）。
+- EMA上倾，且价格回撤浅。
+- HH + HL结构清晰。
+- 多头趋势棒占优，空头反击缺少跟随。
+
+⚠️ 20GB特殊规则：连续约20根K线未触及EMA（即"20GB"，定义见「文件16-K线信号识别.txt」），表示趋势极强。在20GB状态下：
+  - 绝对不逆势。
+  - 首次触及EMA是顺势刮头皮机会（非反转信号）。
+  - 两次尝试失败（触及EMA后无顺势跟随）则放弃，不做第三次。
+  - 识别到20GB时，detected_patterns 写入 `20gb`。
+
+Always In Short（AIS）条件：
+- 近端 **K8–K1** 多数收在 EMA 下方（加权同侧占比高）。
+- EMA下倾，且反弹弱。
+- LL + LH结构清晰。
+- 空头趋势棒占优，多头反击缺少跟随。
+
+⚠️ 20GB空头对称规则：连续约20根K线未触及EMA，首次触及EMA是顺势做空机会。
+
+是：
+- AIL：默认只找做多方案，不做首个做空反转信号。
+- AIS：默认只找做空方案，不做首个做多反转信号。
+- 只有满足趋势线突破 + 前极点测试失败，才允许进入反转**诊断**路由（§7：`reversal_attempt` / `mtr`；**禁止逆势三价**）。
+
+否：
+- 视为中性或弱惯性。
+- 降低方向置信度，优先等待区间边界、二次入场或更多K线确认。
+
+### 2.5 当前惯性强度是否足够支持趋势跟踪？
+
+强惯性条件：
+- K线重叠少。
+- 回撤通常不超过1到3根K线。
+- 趋势方向K线连续出现，收盘接近方向极点。
+- 没有连续两根K线收在EMA另一侧。
+- 反向信号缺少跟随。
+
+是：
+- 允许趋势跟踪或顺势回撤交易。
+- 逆势信号默认视为回撤或旗形，而不是反转。
+
+否：
+- **不代表 gate=wait，不在此节点短路阶段二。** 继续进入策略分支（§3–§6），切换为"等待反弹到位后的顺势信号"模式。
+- 具体处理：
+  - 不做激进趋势跟踪（不追突破、不在反弹中追顺势）。
+  - 转为等待反弹衰竭后的入场信号：宽通道等反弹至上边界/EMA附近出现空头信号棒；常规通道等回撤至38%–50%出现顺势信号棒。
+  - 在 watch_points 中明确写出触发条件（位置+形态），而不是泛泛说"等待结构明朗"。
+- **只有当市场状态完全无法识别（§1.2 unknown）或极端混乱（§1.3 extreme_tr）时，才在阶段一输出 gate=wait。惯性暂时中断不构成 gate=wait 的条件。**
+
+---
+
+## 阶段一输出格式（诊断 JSON 契约）
+
+完成三层诊断后，必须按以下JSON格式输出结果，供程序解析并进入阶段二：
+
+```json
+{
+  "cycle_position": "spike/micro_channel/tight_channel/normal_channel/broad_channel/trending_tr/trading_range/extreme_tr/unknown",
+  "alternative_cycle_position": "第二可能的周期状态（边界模糊时必填，稳定状态下可为null）",
+  "direction": "bullish/bearish/neutral",
+  "diagnosis_confidence": 75,
+  "spike_stage": "active/ending/transitioning（仅当cycle_position=spike或micro_channel时必填；active=进行中，ending=特征减弱但未完全结束，transitioning=已结束正在转通道/区间）",
+  "climax_risk": "none/warning/triggered（高潮风险字段，独立于spike_stage；warning=连续强趋势棒过多但未衰竭，triggered=已出现长尾/小实体/反向棒等衰竭信号）",
+  "market_phase": "stable/transitioning（stable=当前状态稳定持续中，transitioning=状态正在发生转换，如通道→区间、尖峰→通道等）",
+  "transition_risk": "low/medium/high（状态转换期的误判风险等级，仅当market_phase=transitioning时必填）",
+  "detected_patterns": ["wedge", "reversal_attempt"]（楔形/反转等特殊形态检测结果，无则为空数组[]，值含义见下方说明）,
+  "key_signals": ["信号1", "信号2"],
+  "htf_context": "长程结构窗口的背景描述",
+  "entry_setup": "是否出现入场形态（是/否/等待）",
+  "strategy_files_needed": ["策略文件名1", "策略文件名2"]（仅供参考，实际加载由程序静态路由决定，不可覆盖程序路由）,
+  "risk_warning": "需要警惕的风险点（如有）"
+}
+```
+
+diagnosis_confidence：必填整数 0–100（禁止 high/medium/low 字符串），表示对 cycle_position 判断的把握程度，非入场信号强度。
+
+⚠️ **cycle_position 只能是8种市场状态之一，绝对不能填形态名称**：
+- ✅ 合法值：`spike` / `micro_channel` / `tight_channel` / `normal_channel` / `broad_channel` / `trending_tr` / `trading_range` / `extreme_tr` / `unknown`
+- ❌ 错误示例：`cycle_position: "descending_triangle"` / `cycle_position: "wedge"` / `cycle_position: "double_top"`
+- 三角形、楔形、双顶底、MTR 等形态是**叠加在市场状态之上的结构特征**，必须填在 `detected_patterns` 数组中，而不是 `cycle_position`。
+- 正确做法：先判断底层市场状态（例如 `"trading_range"`），再将形态名填入 `detected_patterns`（例如 `["descending_triangle"]`）。
+
+⚠️ 诊断不清时（diagnosis_confidence **低于 50** 且 key_signals 为空），阶段二应强烈倾向不下单；confidence 在 30–49 时亦应显著降低 trade_confidence。
+
+⚠️ spike_stage路由规则（解决尖峰结束后策略文件加载问题）：
+- spike_stage="active" → 阶段二加载「极速上涨/下跌策略」+「极速上涨/下跌识别」
+- spike_stage="ending" → 阶段二加载「极速上涨/下跌策略」+「极速上涨/下跌识别」+ 预加载通道策略文件
+- spike_stage="transitioning" → 阶段二加载「通道策略文件」+「通道识别文件」（已转通道，按通道态处理）
+  - 若direction=bullish → 加载上涨通道策略+上涨通道识别
+  - 若direction=bearish → 加载下跌通道策略+下跌通道识别
+
+⚠️ alternative_cycle_position路由规则（解决边界模糊时策略加载问题）：
+- 若alternative_cycle_position不为null → 阶段二同时加载主状态和备选状态对应的策略文件
+- 例：cycle_position=normal_channel, alternative_cycle_position=trending_tr → 同时加载通道策略和震荡区间策略
+- 阶段二在实际分析中以主状态策略为主，备选策略为辅
+
+⚠️ market_phase路由规则（状态转换期降级处理）：
+- market_phase="transitioning" + transition_risk="high" → 阶段二提高门槛：优先等待更清晰结构（二次入场/突破回踩/边界信号）；弱信号直接不下单；目标更保守
+- market_phase="transitioning" + transition_risk="medium" → 阶段二选择性入场：放弃弱信号与中间位置，优先结构清晰且失效位明确的方案
+- market_phase="stable" → 正常执行
+
+⚠️ detected_patterns字段说明（特殊形态路由依据，阶段一必填英文 key）：
+
+detected_patterns 判定表如下（key 为唯一合法值，程序按此路由阶段二策略文件；`entry_setup_type` 与表内 key 对齐，二者不一致时以本表为准）：
+
+| key | 含义概要 | 阶段二加载 |
+|-----|----------|------------|
+| wedge | 楔形/三推：三次同向推进递减、趋势线收敛 | 文件14 |
+| reversal_attempt / mtr / final_flag | 反转尝试、主要趋势反转、末端旗形 | 文件15、文件25、文件24 |
+| h1 / h2 / l1 / l2 | 计数入场结构 | 文件19 |
+| breakout_test / breakout_pullback | 突破测试、突破回踩（失败的失败） | 文件18 |
+| breakout_failure / failed_breakout | 突破失败、假突破 | 文件18、文件22 |
+| always_in / ail / ais / 20gb / gap_bar / opening_gap | Always In、20GB、均线缺口棒、开盘跳空 | 文件20 |
+| spike_candidate / spike_active / spike_ending / spike_transitioning / climax_warning / climax_triggered | 尖峰候选、尖峰阶段、高潮风险（与 `climax_risk` 字段 warning/triggered 对齐；勿用裸 `climax`） | 极速上涨/下跌识别与策略 |
+| barbwire / wire / overlap / middle_range | 铁丝网、重叠、区间中部 | 文件21 |
+| failed_signal / magnet / trapped_traders | 信号失败、磁力位、被套 | 文件22 |
+| ascending_triangle / descending_triangle / symmetrical_triangle / expanding_triangle | 三角形收敛形态 | 文件27 |
+| double_top_bottom | 双顶/双底/微型双顶底 | 文件28 |
+
+阶段二常驻（非 detected_patterns 触发）：文件23（Measured Move 与结构目标）。
+
+**MRV vs MTR（阶段一勿混淆）**：
+- 小趋势反转（MRV）→ 仅 `reversal_attempt` 或观察，**不要**标 `mtr`。
+- 主要趋势反转（MTR）→ 须趋势线突破 + 极点测试失败等（文件25）；阶段一可标 `reversal_attempt`，`mtr` 仅在结构齐全时填写。
+
+**Measured Move（第三层参考）**：
+- 区间突破后约 60% 概率到达「区间高度翻测」目标；强趋势 leg 可等距投影。
+- 阶段一在 `support_levels`/`resistance_levels` 与 `htf_context` 中可提及 MM 候选；具体 TP 在阶段二按文件23 填写。
+
+硬规则：
+- 形态勿只写在 key_signals；必须写入 detected_patterns（程序路由只认该数组 + entry_setup_type 补全）。
+- bar_analysis.entry_setup_type=wedge → detected_patterns 须含 wedge；entry_setup_type=breakout_pullback → 须含 breakout_pullback。
+- 多个形态可同时出现（如 wedge + reversal_attempt），程序加载所有对应文件。
+- 无特殊形态时填 []。
+
+⚠️ cycle_position="unknown" 处理规则（数据不足时的兜底）：
+- 当K线数量<20或数据质量不足以做出有效诊断时，AI应输出 cycle_position="unknown"
+- 程序路由：unknown → 不加载任何策略文件，阶段二输出 action="wait"
+- diagnosis_confidence 此时不得超过 30（整数 0–100）
