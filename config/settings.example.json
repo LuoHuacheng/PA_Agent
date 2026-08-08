@@ -53,8 +53,8 @@
   "monitoring": {
     "enabled": false,
     "targets": [
-      {"symbol": "XAUUSD", "timeframe": "15m", "enabled": true},
-      {"symbol": "BTCUSDT", "timeframe": "30m", "enabled": true}
+      {"symbol": "ETHUSDT", "timeframe": "15m", "enabled": true},
+      {"symbol": "BTCUSDT", "timeframe": "15m", "enabled": true}
     ],
     "max_concurrent_analyses": 1,
     "poll_lead_seconds": 5,
@@ -70,9 +70,13 @@
     "emergency_stop": true,
     "require_analysis_symbol_match": true,
     "symbol": "BTCUSDT",
-    "symbol_whitelist": ["BTCUSDT"],
+    "symbol_whitelist": ["BTCUSDT", "ETHUSDT"],
     "leverage": 1,
     "max_notional_usdt": 20.0,
-    "cooldown_minutes": 30
+    "cooldown_minutes": 30,
+    "require_trader_equation": true,
+    "limit_order_enabled": true,
+    "limit_fill_timeout_minutes": 60,
+    "limit_poll_interval_seconds": 10
   }
 }
