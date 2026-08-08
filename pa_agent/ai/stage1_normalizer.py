@@ -416,16 +416,55 @@ def _normalize_signal_bar_quality(out: dict[str, Any]) -> None:
         logger.debug("Mapped signal_bar.quality %r -> %s", quality, normalized)
 
 
+def _infer_risk_level(text: str) -> str | None:
+    """Coarse high/medium/low inference from free-text risk narrative."""
+    low = text.lower()
+    if any(t in low for t in ("高", "强", "大", "显著", "明确", "活跃", "急", "strong", "significant", "high", "active")):
+        return "high"
+    if any(t in low for t in ("低", "弱", "小", "微弱", "轻微", "有限", "low", "weak", "minor", "limited")):
+        return "low"
+    if any(t in low for t in ("中", "一般", "中等", "温和", "moderate", "medium", "middle")):
+        return "medium"
+    return None
+
+
 def _normalize_transition_risk(out: dict[str, Any]) -> None:
-    """Normalize transition_risk to valid enum values."""
+    """Normalize transition_risk to valid enum values.
+
+    Models sometimes dump a free-text narrative into this field; schema only
+    allows high|medium|low|null. Additionally, when ``market_phase`` is
+    ``transitioning`` the schema conditional *requires* transition_risk to be a
+    non-null enum — so prose is coerced to an inferred level instead of null.
+    """
     risk = out.get("transition_risk")
-    if not isinstance(risk, str):
+    market_phase = str(out.get("market_phase") or "").strip().lower()
+    transitioning = market_phase == "transitioning"
+
+    level: str | None = None
+    if isinstance(risk, str):
+        key = risk.strip().lower()
+        if key in ("high", "medium", "low"):
+            level = key
+        else:
+            level = _TRANSITION_RISK_ALIASES.get(key)
+            if level is None:
+                level = _infer_risk_level(risk)
+
+    if level is not None:
+        if risk != level:
+            out["transition_risk"] = level
+            logger.debug("Mapped transition_risk %r -> %s", risk, level)
         return
-    key = risk.strip().lower()
-    normalized = _TRANSITION_RISK_ALIASES.get(key)
-    if normalized and normalized != risk:
-        out["transition_risk"] = normalized
-        logger.debug("Mapped transition_risk %r -> %s", risk, normalized)
+
+    if transitioning:
+        # Schema conditional: transitioning market_phase needs a non-null enum.
+        out["transition_risk"] = "medium"
+        logger.debug("transition_risk prose/None -> medium (market_phase=transitioning)")
+    else:
+        out["transition_risk"] = None
+        logger.debug(
+            "Cleared non-enum transition_risk (%r)", risk,
+        )
 
 
 def _summary_bar_seq(bar_label: object) -> int | None:
