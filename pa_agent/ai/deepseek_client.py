@@ -15,7 +15,6 @@ from pa_agent.util.mask_secret import mask_secret
 from pa_agent.ai.mimo_compat import (
     ReasoningCache,
     is_mimo_provider,
-    mimo_max_output_tokens,
     patch_messages_for_mimo,
     resolve_mimo_thinking_extra_body,
     response_message_dict,
@@ -196,10 +195,10 @@ def _is_minimax(base_url: str) -> bool:
     return "minimax.io" in url or "minimax.com" in url
 
 
-# Packy claude-officially returns 400 if max_tokens exceeds model output cap.
-_PACKY_CLAUDE_MAX_OUTPUT_TOKENS = 128_000
-# DeepSeek API: max_tokens must be in [1, 393216].
-_DEEPSEEK_MAX_OUTPUT_TOKENS = 393_216
+# Unified completion cap. All providers we use (DeepSeek native, packy, cun.ai,
+# one-api) accept max_tokens up to 393216; we do not connect sub-200K models.
+# Keeping a single value avoids per-gateway 400s and branch complexity.
+_MAX_OUTPUT_TOKENS = 200_000
 
 
 def _model_uses_claude_adaptive(model: str) -> bool:
@@ -231,8 +230,6 @@ def _adaptive_output_effort(reasoning_effort: str | None) -> str:
     return _EFFORT_TO_ADAPTIVE_OUTPUT.get(key, "medium")
 
 
-# Sent to OpenAI-compatible gateways; upstream may clamp below these values.
-_PRACTICAL_UNLIMITED_MAX_TOKENS = 524288
 # Anthropic-style thinking requires budget_tokens < max_tokens.
 _PRACTICAL_UNLIMITED_THINKING_BUDGET = 524287
 
@@ -301,24 +298,9 @@ def _prepare_api_messages(
 
 
 def _provider_max_output_tokens(settings: AIProviderSettings) -> int:
-    """Per-gateway completion cap (max_tokens); avoids 400 from provider limits."""
-    model = (settings.model or "").lower()
-    if _is_packyapi(settings.base_url):
-        # Packy enforces max_tokens ∈ [1, 393216] for its DeepSeek models
-        # (and 128_000 for claude-officially). Clamp any Packy route to the
-        # DeepSeek cap so `deepseek-v4-flash` no longer 400s at 524288.
-        if "claude" in model:
-            return _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
-        return _DEEPSEEK_MAX_OUTPUT_TOKENS
-    if _is_cunai(settings.base_url):
-        # cun.ai one-api gateway strictly validates max_tokens ∈ [1, 393216]
-        # for its DeepSeek models (400 instead of clamping). Same DeepSeek cap.
-        return _DEEPSEEK_MAX_OUTPUT_TOKENS
-    if _is_deepseek_native(settings.base_url):
-        return _DEEPSEEK_MAX_OUTPUT_TOKENS
-    if _is_mimo(settings):
-        return mimo_max_output_tokens(settings.model)
-    return _PRACTICAL_UNLIMITED_MAX_TOKENS
+    """Unified completion cap; we only connect models with >= 200K output."""
+    del settings
+    return _MAX_OUTPUT_TOKENS
 
 
 def _completion_max_tokens(

@@ -89,22 +89,22 @@ def test_completion_max_tokens_deepseek_cap():
     settings = _make_settings()
     settings.base_url = "https://api.deepseek.com"
     settings.model = "deepseek-v4-pro"
-    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 393_216
+    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 200_000
 
 
 def test_completion_max_tokens_packy_claude_cap():
     settings = _make_settings()
     settings.base_url = "https://www.packyapi.com/v1"
     extra_body = {"thinking": {"type": "enabled", "budget_tokens": 127_999}}
-    assert _completion_max_tokens(settings, extra_body=extra_body, effort="max") == 128_000
+    assert _completion_max_tokens(settings, extra_body=extra_body, effort="max") == 200_000
 
 
 def test_completion_max_tokens_cunai_deepseek_cap():
-    """cun.ai one-api gateway strictly validates max_tokens ∈ [1, 393216]; no 524288."""
+    """cun.ai one-api gateway uses the unified 200K cap (was 393216/524288)."""
     settings = _make_settings()
     settings.base_url = "https://www.cun.ai/v1"
     settings.model = "deepseek-v4-flash"
-    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 393_216
+    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 200_000
 
 
 def test_packy_hoists_system_message_to_extra_body():
@@ -132,7 +132,7 @@ def test_packy_claude_thinking_uses_budget_not_reasoning_effort():
     extra, effort = _resolve_thinking_params(settings, thinking=True, reasoning_effort="max")
     assert effort is None
     assert extra["thinking"]["type"] == "enabled"
-    assert extra["thinking"]["budget_tokens"] == 127_999
+    assert extra["thinking"]["budget_tokens"] == 199_999
 
 
 def test_chat_sends_max_tokens_when_thinking():
@@ -151,7 +151,7 @@ def test_chat_sends_max_tokens_when_thinking():
         client.chat([{"role": "user", "content": "hi"}])
 
     kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
-    assert kwargs["max_tokens"] == 393_216
+    assert kwargs["max_tokens"] == 200_000
 
 
 def test_chat_kkai_sends_thinking_object_not_reasoning_effort():
@@ -390,7 +390,7 @@ def test_mimo_chat_sends_enable_thinking_extra_body() -> None:
 
     kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
     assert kwargs["extra_body"]["chat_template_kwargs"] == {"enable_thinking": True}
-    assert kwargs["max_tokens"] == 65_536
+    assert kwargs["max_tokens"] == 200_000
 
 
 def test_mimo_chat_patches_tool_call_messages_before_send() -> None:
