@@ -185,6 +185,11 @@ def _is_packyapi(base_url: str) -> bool:
     return "packyapi" in (base_url or "").lower()
 
 
+def _is_cunai(base_url: str) -> bool:
+    """cun.ai (www.cun.ai) one-api/new-api gateway proxying DeepSeek models."""
+    return "cun.ai" in (base_url or "").lower()
+
+
 def _is_minimax(base_url: str) -> bool:
     """MiniMax (api.minimax.io) OpenAI-compatible gateway."""
     url = (base_url or "").lower()
@@ -304,6 +309,10 @@ def _provider_max_output_tokens(settings: AIProviderSettings) -> int:
         # DeepSeek cap so `deepseek-v4-flash` no longer 400s at 524288.
         if "claude" in model:
             return _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
+        return _DEEPSEEK_MAX_OUTPUT_TOKENS
+    if _is_cunai(settings.base_url):
+        # cun.ai one-api gateway strictly validates max_tokens ∈ [1, 393216]
+        # for its DeepSeek models (400 instead of clamping). Same DeepSeek cap.
         return _DEEPSEEK_MAX_OUTPUT_TOKENS
     if _is_deepseek_native(settings.base_url):
         return _DEEPSEEK_MAX_OUTPUT_TOKENS

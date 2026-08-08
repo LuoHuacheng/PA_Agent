@@ -1,4 +1,5 @@
 """Unit tests for DeepSeekClient (task 6.5)."""
+
 from __future__ import annotations
 
 import sys
@@ -96,6 +97,14 @@ def test_completion_max_tokens_packy_claude_cap():
     settings.base_url = "https://www.packyapi.com/v1"
     extra_body = {"thinking": {"type": "enabled", "budget_tokens": 127_999}}
     assert _completion_max_tokens(settings, extra_body=extra_body, effort="max") == 128_000
+
+
+def test_completion_max_tokens_cunai_deepseek_cap():
+    """cun.ai one-api gateway strictly validates max_tokens ∈ [1, 393216]; no 524288."""
+    settings = _make_settings()
+    settings.base_url = "https://www.cun.ai/v1"
+    settings.model = "deepseek-v4-flash"
+    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 393_216
 
 
 def test_packy_hoists_system_message_to_extra_body():
@@ -250,9 +259,7 @@ def test_stream_kkai_passes_thinking_extra_body():
     )
 
     mock_openai = MagicMock()
-    mock_openai.return_value.chat.completions.create.return_value = iter(
-        [chunk_reason, chunk_done]
-    )
+    mock_openai.return_value.chat.completions.create.return_value = iter([chunk_reason, chunk_done])
 
     with patch("pa_agent.ai.deepseek_client._OpenAI", mock_openai):
         reply = client.stream_chat(
@@ -269,6 +276,7 @@ def test_stream_kkai_passes_thinking_extra_body():
 def test_chat_cancel_token_raises():
     """If cancel_token is set, chat() raises CancelledError before calling API."""
     from pa_agent.util.threading import CancelToken
+
     settings = _make_settings()
     client = DeepSeekClient(settings)
 
@@ -287,6 +295,7 @@ def test_chat_cancel_token_raises():
 def test_chat_no_plaintext_key_in_logs(caplog):
     """API key must not appear in log output."""
     import logging
+
     settings = _make_settings(api_key="sk-super-secret-9999")
     client = DeepSeekClient(settings)
 
