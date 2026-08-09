@@ -3,6 +3,7 @@
 All runtime directories are rooted at PROJECT_ROOT.
 Import this module everywhere instead of hard-coding paths.
 """
+
 from __future__ import annotations
 from pathlib import Path
 
@@ -26,5 +27,6 @@ LOGS_DIR: Path = PROJECT_ROOT / "logs"
 FEISHU_JSON_LEGACY_PATH: Path = CONFIG_DIR / "feishu.json"
 SETTINGS_JSON_PATH: Path = CONFIG_DIR / "settings.json"
 MONITORING_STATE_PATH: Path = CONFIG_DIR / "monitoring_state.json"
+MONITORING_PID_PATH: Path = CONFIG_DIR / "monitoring.pid"
 LOG_FILE_PATH: Path = LOGS_DIR / "pa_agent.log"
 CRASH_LOG_PATH: Path = LOGS_DIR / "crash.log"

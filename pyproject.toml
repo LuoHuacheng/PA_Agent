@@ -42,6 +42,7 @@ dev = [
 
 [project.scripts]
 pa-agent = "pa_agent.main:main"
+pa-monitor = "pa_agent.monitoring.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["pa_agent*"]
