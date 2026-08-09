@@ -1,4 +1,5 @@
 """Tests for settings-driven close-of-bar multi-symbol monitoring."""
+
 from __future__ import annotations
 
 import json
@@ -107,7 +108,7 @@ def test_monitor_processes_a_closed_bar_once_and_persists_state(tmp_path: Path) 
         state_path=path,
         source_factory=lambda _kind: source,
         clock=lambda: 1_805,
-        analyze=lambda frame: analyzed.append(frame) or None,
+        analyze=lambda frame, **_kw: analyzed.append(frame) or None,
     )
     state = next(iter(monitor._states.values()))
 
@@ -117,6 +118,48 @@ def test_monitor_processes_a_closed_bar_once_and_persists_state(tmp_path: Path) 
     assert len(analyzed) == 1
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["last_processed_closed_ts"]["XAUUSD::15m"] == 1_800_000_000
+
+
+def test_monitor_reuses_previous_record_for_incremental_analysis(tmp_path: Path) -> None:
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
+    calls: list[tuple[object, dict]] = []
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_805)),
+        clock=lambda: 1_805_000.0,
+        analyze=lambda frame, **kw: calls.append((frame, kw)) or None,
+    )
+    state = next(iter(monitor._states.values()))
+    state.previous_record = {"stage1_diagnosis": {"direction": "bullish"}}
+    state.last_processed_closed_ts = 1_800_000_000
+
+    monitor._poll_and_analyze(state)
+
+    assert len(calls) == 1
+    kw = calls[0][1]
+    # 15m bar: prev close 1_800_900_000, now 1_805_000_000 → 5 new bars.
+    assert kw["previous_record"] == state.previous_record
+    assert kw["incremental_new_bar_count"] == 5
+    assert "record_sink" in kw
+
+
+def test_monitor_without_prior_record_uses_full_pipeline(tmp_path: Path) -> None:
+    calls: list[tuple[object, dict]] = []
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=_settings(MonitorTarget(symbol="XAUUSD", timeframe="15m")),
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        clock=lambda: 1_805,
+        analyze=lambda frame, **kw: calls.append((frame, kw)) or None,
+    )
+    monitor._poll_and_analyze(next(iter(monitor._states.values())))
+    assert len(calls) == 1
+    assert "previous_record" not in calls[0][1]
+    assert "incremental_new_bar_count" not in calls[0][1]
+    assert "record_sink" in calls[0][1]
 
 
 def test_monitor_reports_each_completed_decision_to_callback(tmp_path: Path) -> None:
@@ -129,7 +172,7 @@ def test_monitor_reports_each_completed_decision_to_callback(tmp_path: Path) -> 
         state_path=tmp_path / "state.json",
         source_factory=lambda _kind: FakeSource(_bars(1_800)),
         clock=lambda: 1_805,
-        analyze=lambda _frame: decision,
+        analyze=lambda _frame, **_kw: decision,
         on_result=lambda frame, value: results.append((frame.symbol, value)),
     )
 
@@ -146,7 +189,7 @@ def test_monitor_persists_completed_analysis_when_result_callback_fails(tmp_path
         state_path=tmp_path / "state.json",
         source_factory=lambda _kind: FakeSource(_bars(1_800)),
         clock=lambda: 1_805,
-        analyze=lambda _frame: {"decision": {"order_type": "观望"}},
+        analyze=lambda _frame, **_kw: {"decision": {"order_type": "观望"}},
         on_result=lambda _frame, _value: (_ for _ in ()).throw(RuntimeError("output failed")),
     )
     state = next(iter(monitor._states.values()))
@@ -200,9 +243,11 @@ def test_monitor_failure_retries_without_blocking_other_target(tmp_path: Path) -
         ctx=object(),
         settings=settings,
         state_path=tmp_path / "state.json",
-        source_factory=lambda _kind: sources.pop("BAD") if "BAD" in sources else sources.pop("GOOD"),
+        source_factory=lambda _kind: (
+            sources.pop("BAD") if "BAD" in sources else sources.pop("GOOD")
+        ),
         clock=lambda: 1_805,
-        analyze=lambda frame: analyzed.append(frame.symbol) or None,
+        analyze=lambda frame, **_kw: analyzed.append(frame.symbol) or None,
     )
     states = list(monitor._states.values())
 
@@ -245,7 +290,7 @@ def test_monitor_respects_configured_analysis_concurrency(tmp_path: Path) -> Non
     max_active = 0
     lock = threading.Lock()
 
-    def analyze(_frame: object) -> None:
+    def analyze(_frame: object, **kw: object) -> None:
         nonlocal active, max_active
         with lock:
             active += 1
@@ -275,13 +320,15 @@ def test_monitor_respects_configured_analysis_concurrency(tmp_path: Path) -> Non
     monitor._executor.shutdown(wait=True)
 
 
-def test_monitor_stop_disconnects_source_before_waiting_for_running_analysis(tmp_path: Path) -> None:
+def test_monitor_stop_disconnects_source_before_waiting_for_running_analysis(
+    tmp_path: Path,
+) -> None:
     settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
     source = FakeSource(_bars(1_800))
     started = threading.Event()
     released = threading.Event()
 
-    def analyze(_frame: object) -> None:
+    def analyze(_frame: object, **kw: object) -> None:
         started.set()
         released.wait(timeout=2)
 
@@ -345,9 +392,7 @@ def test_monitor_auto_execution_calls_executor_and_logger(tmp_path: Path, monkey
         calls.append({"inner": inner, "analysis_symbol": analysis_symbol})
         return type("Result", (), {"status": "dry_run", "symbol": "BTCUSDT", "reason": "test"})()
 
-    monkeypatch.setattr(
-        "pa_agent.trading.binance_usdm_testnet.execute_market_signal", fake_execute
-    )
+    monkeypatch.setattr("pa_agent.trading.binance_usdm_testnet.execute_market_signal", fake_execute)
     monkeypatch.setattr(
         "pa_agent.records.trade_logger.save_trade_record",
         lambda **kw: recorded.append(kw),
@@ -358,10 +403,12 @@ def test_monitor_auto_execution_calls_executor_and_logger(tmp_path: Path, monkey
         state_path=tmp_path / "state.json",
         source_factory=lambda _kind: FakeSource(_bars(1_800)),
         clock=lambda: 1_805,
-        analyze=lambda _frame: _order_decision(),
+        analyze=lambda _frame, **_kw: _order_decision(),
     )
 
-    monitor._save_order_opportunity(_order_frame(), _order_decision(), _order_decision()["decision"], _record_double())
+    monitor._save_order_opportunity(
+        _order_frame(), _order_decision(), _order_decision()["decision"], _record_double()
+    )
 
     assert calls and calls[0]["analysis_symbol"] == "BTCUSDT"
     assert calls[0]["inner"]["order_type"] == "市价单"
@@ -370,7 +417,9 @@ def test_monitor_auto_execution_calls_executor_and_logger(tmp_path: Path, monkey
     assert recorded[0]["model_name"] == "test-model"
 
 
-def test_monitor_auto_execution_disabled_by_default_returns_skipped(tmp_path: Path, monkeypatch) -> None:
+def test_monitor_auto_execution_disabled_by_default_returns_skipped(
+    tmp_path: Path, monkeypatch
+) -> None:
     """With binance_usdm_testnet.enabled=False (default), execution is a no-op."""
     settings = _settings(MonitorTarget(symbol="BTCUSDT", timeframe="15m"))
     from pa_agent.trading.binance_usdm_testnet import execute_market_signal
@@ -385,10 +434,12 @@ def test_monitor_auto_execution_disabled_by_default_returns_skipped(tmp_path: Pa
         state_path=tmp_path / "state.json",
         source_factory=lambda _kind: FakeSource(_bars(1_800)),
         clock=lambda: 1_805,
-        analyze=lambda _frame: _order_decision(),
+        analyze=lambda _frame, **_kw: _order_decision(),
     )
 
-    result = execute_market_signal(_order_decision()["decision"], settings, analysis_symbol="BTCUSDT")
+    result = execute_market_signal(
+        _order_decision()["decision"], settings, analysis_symbol="BTCUSDT"
+    )
 
     assert result.status == "skipped"
     assert result.reason == "Binance Testnet automation disabled"

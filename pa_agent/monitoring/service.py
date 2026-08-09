@@ -74,6 +74,8 @@ class _TargetState:
     retry_count: int = 0
     running: bool = False
     last_error: str = ""
+    #: Last AnalysisRecord, reused as the incremental Stage-1 base on next poll.
+    previous_record: Any = None
 
 
 class MultiSymbolMonitor:
@@ -91,7 +93,7 @@ class MultiSymbolMonitor:
         state_path: Path,
         source_factory: Callable[[str], DataSource] | None = None,
         clock: Callable[[], float] = time.time,
-        analyze: Callable[[Any], dict | None] | None = None,
+        analyze: Callable[..., dict | None] | None = None,
         on_result: Callable[[Any, dict | None], None] | None = None,
         on_status: Callable[[str], None] | None = None,
     ) -> None:
@@ -224,7 +226,11 @@ class MultiSymbolMonitor:
             ):
                 raise ValueError("data source returned an older closed bar")
 
-            decision = self._analyze(frame)
+            decision = self._analyze(
+                frame,
+                record_sink=state,
+                **self._incremental_kwargs(state, now),
+            )
             if self._on_result is not None:
                 try:
                     self._on_result(frame, decision)
@@ -309,7 +315,34 @@ class MultiSymbolMonitor:
         except Exception:
             logger.exception("Monitor status callback failed")
 
-    def _analyze_and_notify(self, frame: Any) -> dict | None:
+    def _incremental_kwargs(self, state: _TargetState, now: float) -> dict[str, object]:
+        """Return kwargs enabling incremental Stage-1 when a prior record exists.
+
+        Incremental re-analysis reuses the previous Stage-1 prompt chain (K-line
+        table stays in the cached prefix) and only asks about the bars closed
+        since the last poll. Without a prior record this returns empty, so the
+        full two-stage pipeline runs unchanged.
+        """
+        if state.previous_record is None or state.last_processed_closed_ts is None:
+            return {}
+        bar_s = timeframe_seconds(state.target.timeframe)
+        prev_close_ms = state.last_processed_closed_ts + int(bar_s * 1000)
+        new_bars = max(1, round((int(now * 1000) - prev_close_ms) / (bar_s * 1000)))
+        if new_bars < 1:
+            return {}
+        return {
+            "previous_record": state.previous_record,
+            "incremental_new_bar_count": new_bars,
+        }
+
+    def _analyze_and_notify(
+        self,
+        frame: Any,
+        *,
+        previous_record: Any = None,
+        incremental_new_bar_count: int | None = None,
+        record_sink: Any = None,
+    ) -> dict | None:
         from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
         from pa_agent.util.threading import CancelToken
 
@@ -322,7 +355,15 @@ class MultiSymbolMonitor:
             exp_reader=self._ctx.exp_reader,
             settings=self._settings,
         )
-        record = orchestrator.submit(frame, CancelToken(), lambda _event: None)
+        record = orchestrator.submit(
+            frame,
+            CancelToken(),
+            lambda _event: None,
+            previous_record=previous_record,
+            incremental_new_bar_count=incremental_new_bar_count,
+        )
+        if record_sink is not None and record is not None:
+            record_sink.previous_record = record
         decision = record.stage2_decision if record is not None else None
         if not isinstance(decision, dict):
             return None
