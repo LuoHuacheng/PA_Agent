@@ -4,6 +4,7 @@ The service deliberately does not share the GUI's single-subscription data
 source. Each configured target owns one source instance of the configured
 source *kind*, so subscriptions cannot overwrite one another.
 """
+
 from __future__ import annotations
 
 import json
@@ -135,7 +136,9 @@ class MultiSymbolMonitor:
             max_workers=self._cfg.max_concurrent_analyses,
             thread_name_prefix="symbol-monitor",
         )
-        self._thread = threading.Thread(target=self._run, name="symbol-monitor-scheduler", daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, name="symbol-monitor-scheduler", daemon=True
+        )
         self._thread.start()
         targets = ", ".join(
             f"{state.target.symbol} {state.target.timeframe}"
@@ -147,7 +150,7 @@ class MultiSymbolMonitor:
             f"max_concurrent_analyses={self._cfg.max_concurrent_analyses}: {targets}"
         )
 
-    def stop(self, timeout: float = 10.0) -> None:
+    def stop(self, timeout: float = 10.0) -> bool:
         self._stop.set()
         # Disconnect before waiting for executor threads. TradingView's blocking
         # socket read is released by disconnect(), allowing the worker to finish.
@@ -157,11 +160,15 @@ class MultiSymbolMonitor:
                     state.source.disconnect()
                 except Exception:
                     logger.debug("Monitor source disconnect failed", exc_info=True)
+        deadline = time.monotonic() + max(0.0, timeout)
         if self._executor is not None:
-            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._executor.shutdown(wait=False, cancel_futures=True)
         if self._thread is not None:
-            self._thread.join(timeout=timeout)
+            self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        while self._futures and time.monotonic() < deadline:
+            time.sleep(0.01)
         self._save_state()
+        return not self._futures
 
     def run_due_once(self, now: float | None = None) -> int:
         """Schedule due targets once. Public primarily for deterministic tests."""
@@ -188,7 +195,9 @@ class MultiSymbolMonitor:
         try:
             future.result()
         except Exception:
-            logger.exception("Monitor task crashed for %s %s", state.target.symbol, state.target.timeframe)
+            logger.exception(
+                "Monitor task crashed for %s %s", state.target.symbol, state.target.timeframe
+            )
 
     def _poll_and_analyze(self, state: _TargetState) -> None:
         now = self._clock()
@@ -209,7 +218,10 @@ class MultiSymbolMonitor:
             closed_ts = int(frame.bars[0].ts_open)
             if state.last_processed_closed_ts == closed_ts:
                 raise ValueError("data source has not published the new closed bar")
-            if state.last_processed_closed_ts is not None and closed_ts < state.last_processed_closed_ts:
+            if (
+                state.last_processed_closed_ts is not None
+                and closed_ts < state.last_processed_closed_ts
+            ):
                 raise ValueError("data source returned an older closed bar")
 
             decision = self._analyze(frame)
@@ -360,9 +372,7 @@ class MultiSymbolMonitor:
         )
         return decision
 
-    def _save_order_opportunity(
-        self, frame: Any, decision: dict, inner: dict, record: Any
-    ) -> None:
+    def _save_order_opportunity(self, frame: Any, decision: dict, inner: dict, record: Any) -> None:
         """Persist the trade record and auto-execute the Testnet market signal."""
         from pa_agent.records.trade_logger import save_trade_record
         from pa_agent.trading.binance_usdm_testnet import execute_market_signal
@@ -375,9 +385,7 @@ class MultiSymbolMonitor:
             provider = getattr(meta, "ai_provider", None) or {}
             if isinstance(provider, dict):
                 model_name = str(provider.get("model") or "")
-        flip_cooldown = int(
-            getattr(self._settings.general, "structure_flip_cooldown_bars", 3) or 3
-        )
+        flip_cooldown = int(getattr(self._settings.general, "structure_flip_cooldown_bars", 3) or 3)
         save_trade_record(
             decision_inner=inner,
             stage2_full=decision,
