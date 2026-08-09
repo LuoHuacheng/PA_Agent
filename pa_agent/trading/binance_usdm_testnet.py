@@ -344,8 +344,14 @@ def execute_market_signal(
             str(entry.get("orderId", "")),
         )
     except (BinanceAPIError, ValueError) as exc:
-        logger.warning("Binance Testnet automatic order rejected: %s", exc)
-        return ExecutionResult("failed", str(exc), symbol)
+        message = str(exc)
+        if "-2015" in message or "HTTP 401" in message:
+            message += (
+                " (Hint: check BINANCE_USDM_TESTNET_API_KEY/SECRET pair, futures "
+                "permission, and IP whitelist on https://testnet.binancefuture.com/)"
+            )
+        logger.warning("Binance Testnet automatic order rejected: %s", message)
+        return ExecutionResult("failed", message, symbol)
 
 
 def _execute_limit_signal(

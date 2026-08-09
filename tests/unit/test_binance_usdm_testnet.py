@@ -98,6 +98,13 @@ class FailSecondProtectionClient(FakeClient):
             raise BinanceAPIError("take-profit rejected")
 
 
+class AuthRejectedClient(FakeClient):
+    def one_way_mode(self) -> bool:
+        raise BinanceAPIError(
+            'Binance HTTP 401: {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action"}'
+        )
+
+
 def _settings(*, enabled: bool = True, dry_run: bool = False) -> Settings:
     settings = Settings()
     settings.binance_usdm_testnet.enabled = enabled
@@ -195,6 +202,14 @@ def test_breakout_plan_still_requires_manual_review() -> None:
     assert result.status == "rejected"
     assert "manual review" in result.reason
     assert not client.calls
+
+
+def test_auth_401_failure_includes_actionable_hint() -> None:
+    client = AuthRejectedClient()
+    result = execute_market_signal(_long_decision(), _settings(), analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "failed"
+    assert "testnet.binancefuture.com" in result.reason
+    assert "BINANCE_USDM_TESTNET_API_KEY" in result.reason
 
 
 def test_limit_signal_places_resting_entry_and_tracks_pending() -> None:
