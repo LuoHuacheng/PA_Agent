@@ -256,8 +256,8 @@ def test_limit_signal_places_resting_entry_and_tracks_pending() -> None:
     assert pending["BTCUSDT"]["client_id"] == entries[0]["client_id"]
 
 
-def test_limit_entry_above_mark_rejected() -> None:
-    """A long limit priced at/above mark would fill immediately: reject it."""
+def test_limit_entry_above_mark_submits_market_entry_with_protection() -> None:
+    """A crossed long limit must execute immediately without losing protection."""
     client = FakeClient()
     decision = _long_decision() | {
         "order_type": "限价单",
@@ -265,8 +265,16 @@ def test_limit_entry_above_mark_rejected() -> None:
         "take_profit_price": 150,
     }
     result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
-    assert result.status == "rejected"
-    assert "Long limit requires" in result.reason, result.reason
+    assert result.status == "submitted", result.reason
+    assert "crossed mark price" in result.reason
+    assert [call[0] for call in client.calls] == [
+        "exchange_info",
+        "mark_price",
+        "set_leverage",
+        "entry",
+        "protection",
+        "protection",
+    ]
     assert "limit_entry" not in [call[0] for call in client.calls]
 
 

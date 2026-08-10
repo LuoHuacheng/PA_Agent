@@ -369,10 +369,41 @@ def _execute_limit_signal(
     entry_price = _positive_decimal(decision.get("entry_price"))
     if entry_price is None:
         return ExecutionResult("rejected", "Limit order entry price required")
-    if side == "BUY" and not (stop < entry_price < mark_price):
-        return ExecutionResult("rejected", "Long limit requires stop < limit price < mark price")
-    if side == "SELL" and not (mark_price < entry_price < stop):
-        return ExecutionResult("rejected", "Short limit requires mark price < limit price < stop")
+    if side == "BUY":
+        if not stop < entry_price:
+            return ExecutionResult("rejected", "Long limit requires stop < limit price")
+        crosses_mark = entry_price >= mark_price
+    else:
+        if not entry_price < stop:
+            return ExecutionResult("rejected", "Short limit requires limit price < stop")
+        crosses_mark = entry_price <= mark_price
+    if crosses_mark:
+        # A crossed limit would fill immediately. Submit a market entry instead
+        # so protection is attached through the same rollback-safe path.
+        client.set_leverage(symbol, config.leverage)
+        entry = client.place_market_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            client_id=f"{_ENTRY_CLIENT_PREFIX}{uuid.uuid4().hex[:22]}",
+        )
+        try:
+            _attach_protection(client, symbol, side, stop, target)
+        except BinanceAPIError:
+            client.close_market_position(
+                symbol=symbol,
+                side="SELL" if side == "BUY" else "BUY",
+                quantity=quantity,
+            )
+            raise
+        _remember_signal(signal_id)
+        return ExecutionResult(
+            "submitted",
+            "Limit entry crossed mark price; submitted market entry and protective orders",
+            symbol,
+            _decimal_text(quantity),
+            str(entry.get("orderId", "")),
+        )
     replacement = _replace_pending_limit(client, symbol)
     if replacement is not None:
         return replacement
