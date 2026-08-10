@@ -297,6 +297,8 @@ def execute_market_signal(
             )
         info = active_client.exchange_info(symbol)
         price = active_client.mark_price(symbol)
+        stop = _price_for_tick(stop, info)
+        target = _price_for_tick(target, info)
         quantity = _quantity_for_notional(config.max_notional_usdt, price, info)
         if quantity is None:
             return ExecutionResult(
@@ -755,6 +757,18 @@ def _quantity_for_notional(
     if quantity * price < Decimal(str(min_notional)):
         return None
     return quantity
+
+
+def _price_for_tick(price: Decimal, exchange_info: dict[str, Any]) -> Decimal:
+    """Round a trigger price down to the symbol's PRICE_FILTER tick size."""
+    filters = {item.get("filterType"): item for item in exchange_info.get("filters", [])}
+    price_filter = filters.get("PRICE_FILTER")
+    if not isinstance(price_filter, dict):
+        return price
+    tick_size = Decimal(str(price_filter.get("tickSize", "0")))
+    if tick_size <= 0:
+        return price
+    return (price / tick_size).to_integral_value(rounding=ROUND_DOWN) * tick_size
 
 
 def _decimal_text(value: Decimal) -> str:

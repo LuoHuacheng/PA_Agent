@@ -159,6 +159,14 @@ def test_execution_constructs_client_from_settings_credentials(monkeypatch) -> N
     assert created_with == [("settings-key", "settings-secret")]
 
 
+def test_price_for_tick_rounds_down_to_exchange_precision() -> None:
+    exchange_info = {"filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.01"}]}
+
+    result = binance_usdm_testnet._price_for_tick(Decimal("1957.686"), exchange_info)
+
+    assert result == Decimal("1957.68")
+
+
 def test_trader_equation_risk_is_entry_to_stop() -> None:
     """Risk in the §10.3 equation is entry→SL distance, not stop↔target span.
 
