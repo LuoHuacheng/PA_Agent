@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from decimal import Decimal
+from http.client import RemoteDisconnected
 
 import pytest
 
@@ -166,6 +167,18 @@ def test_price_for_tick_rounds_down_to_exchange_precision() -> None:
     result = binance_usdm_testnet._price_for_tick(Decimal("1957.686"), exchange_info)
 
     assert result == Decimal("1957.68")
+
+
+def test_request_wraps_remote_disconnect_as_binance_api_error() -> None:
+    def disconnected_opener(*_args: object, **_kwargs: object) -> None:
+        raise RemoteDisconnected("remote closed connection")
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "test-key", "test-secret", opener=disconnected_opener
+    )
+
+    with pytest.raises(BinanceAPIError, match="Binance network error"):
+        client.order_status(symbol="BTCUSDT", client_id="pa-entry-test")
 
 
 def test_trader_equation_risk_is_entry_to_stop() -> None:

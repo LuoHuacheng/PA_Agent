@@ -86,6 +86,8 @@ class BinanceUSDMTestnetClient:
             raise BinanceAPIError(f"Binance HTTP {exc.code}: {body}") from exc
         except URLError as exc:
             raise BinanceAPIError(f"Binance network error: {exc.reason}") from exc
+        except OSError as exc:
+            raise BinanceAPIError(f"Binance network error: {exc}") from exc
         try:
             result = json.loads(raw)
         except json.JSONDecodeError as exc:
