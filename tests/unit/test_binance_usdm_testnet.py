@@ -35,6 +35,7 @@ class FakeClient:
         self.calls.append(("exchange_info", symbol))
         return {
             "filters": [
+                {"filterType": "PRICE_FILTER", "tickSize": "0.1"},
                 {"filterType": "LOT_SIZE", "minQty": "0.001", "stepSize": "0.001"},
                 {"filterType": "MIN_NOTIONAL", "notional": "5"},
             ]
@@ -234,7 +235,9 @@ def test_breakout_plan_still_requires_manual_review() -> None:
 
 def test_auth_401_failure_includes_actionable_hint() -> None:
     client = AuthRejectedClient()
-    result = execute_market_signal(_long_decision(), _settings(), analysis_symbol="BTCUSDT", client=client)
+    result = execute_market_signal(
+        _long_decision(), _settings(), analysis_symbol="BTCUSDT", client=client
+    )
     assert result.status == "failed"
     assert "futures permission" in result.reason
     assert "configured API key/secret pair" in result.reason
@@ -254,6 +257,17 @@ def test_limit_signal_places_resting_entry_and_tracks_pending() -> None:
     pending = _pending_state()
     assert "BTCUSDT" in pending
     assert pending["BTCUSDT"]["client_id"] == entries[0]["client_id"]
+
+
+def test_limit_signal_rounds_entry_price_to_exchange_tick_size() -> None:
+    client = FakeClient()
+    decision = _long_decision() | {"order_type": "限价单", "entry_price": "95.123"}
+
+    result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
+
+    assert result.status == "pending", result.reason
+    entries = [call[1] for call in client.calls if call[0] == "limit_entry"]
+    assert entries[0]["price"] == Decimal("95.1")
 
 
 def test_limit_entry_above_mark_submits_market_entry_with_protection() -> None:

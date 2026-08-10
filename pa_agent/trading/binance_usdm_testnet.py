@@ -315,6 +315,7 @@ def execute_market_signal(
                 target,
                 quantity,
                 price,
+                info,
                 signal_id,
             )
         if side == "BUY" and not (stop < price < target):
@@ -362,6 +363,7 @@ def _execute_limit_signal(
     target: Decimal,
     quantity: Decimal,
     mark_price: Decimal,
+    exchange_info: dict[str, Any],
     signal_id: str,
 ) -> ExecutionResult:
     if not config.limit_order_enabled:
@@ -369,6 +371,7 @@ def _execute_limit_signal(
     entry_price = _positive_decimal(decision.get("entry_price"))
     if entry_price is None:
         return ExecutionResult("rejected", "Limit order entry price required")
+    entry_price = _price_for_tick(entry_price, exchange_info)
     if side == "BUY":
         if not stop < entry_price:
             return ExecutionResult("rejected", "Long limit requires stop < limit price")
