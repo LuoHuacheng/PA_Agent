@@ -106,11 +106,13 @@
 
 ### binance_usdm_testnet — Binance U 本位 Testnet 自动执行
 
-不含 API Key。密钥只能通过环境变量 `BINANCE_USDM_TESTNET_API_KEY` 与 `BINANCE_USDM_TESTNET_API_SECRET` 提供。
+API Key 与 Secret Key 保存在本机、已被 Git 忽略的 `config/settings.json` 中。请勿将此文件发送、上传或提交到 Git。
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
 | `enabled` | `false` | 自动执行总开关 |
+| `api_key` | `""` | Binance Demo Trading API Key |
+| `api_secret` | `""` | Binance Demo Trading Secret Key |
 | `dry_run` | `true` | 为 `true` 时不发送任何 Binance 请求 |
 | `emergency_stop` | `true` | 熔断开关，必须设为 `false` 才可能执行 |
 | `require_analysis_symbol_match` | `true` | 分析品种必须和交易品种完全一致 |

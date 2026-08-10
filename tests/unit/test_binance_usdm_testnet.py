@@ -139,6 +139,26 @@ def test_dry_run_never_calls_client() -> None:
     assert not client.calls
 
 
+def test_execution_constructs_client_from_settings_credentials(monkeypatch) -> None:
+    """Automatic execution uses local settings credentials, never environment variables."""
+    created_with: list[tuple[str, str]] = []
+    fake_client = FakeClient()
+
+    def construct_client(api_key: str, api_secret: str) -> FakeClient:
+        created_with.append((api_key, api_secret))
+        return fake_client
+
+    monkeypatch.setattr(binance_usdm_testnet, "BinanceUSDMTestnetClient", construct_client)
+    settings = _settings()
+    settings.binance_usdm_testnet.api_key = "settings-key"
+    settings.binance_usdm_testnet.api_secret = "settings-secret"
+
+    result = execute_market_signal(_long_decision(), settings, analysis_symbol="BTCUSDT")
+
+    assert result.status == "submitted"
+    assert created_with == [("settings-key", "settings-secret")]
+
+
 def test_trader_equation_risk_is_entry_to_stop() -> None:
     """Risk in the §10.3 equation is entry→SL distance, not stop↔target span.
 
@@ -208,8 +228,8 @@ def test_auth_401_failure_includes_actionable_hint() -> None:
     client = AuthRejectedClient()
     result = execute_market_signal(_long_decision(), _settings(), analysis_symbol="BTCUSDT", client=client)
     assert result.status == "failed"
-    assert "testnet.binancefuture.com" in result.reason
-    assert "BINANCE_USDM_TESTNET_API_KEY" in result.reason
+    assert "futures permission" in result.reason
+    assert "configured API key/secret pair" in result.reason
 
 
 def test_limit_signal_places_resting_entry_and_tracks_pending() -> None:

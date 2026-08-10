@@ -1,8 +1,7 @@
 """Binance USDⓈ-M Futures Testnet order execution.
 
-This module intentionally supports Testnet only. Credentials are read only from
-``BINANCE_USDM_TESTNET_API_KEY`` and ``BINANCE_USDM_TESTNET_API_SECRET`` so they
-never enter ``settings.json`` or application logs.
+This module intentionally supports Testnet only. Credentials are read from the
+local gitignored ``settings.json`` file and never written to application logs.
 """
 
 import hashlib
@@ -289,8 +288,8 @@ def execute_market_signal(
 
     try:
         active_client = client or BinanceUSDMTestnetClient(
-            os.environ.get("BINANCE_USDM_TESTNET_API_KEY", ""),
-            os.environ.get("BINANCE_USDM_TESTNET_API_SECRET", ""),
+            config.api_key,
+            config.api_secret,
         )
         if not active_client.one_way_mode():
             return ExecutionResult(
@@ -346,10 +345,7 @@ def execute_market_signal(
     except (BinanceAPIError, ValueError) as exc:
         message = str(exc)
         if "-2015" in message or "HTTP 401" in message:
-            message += (
-                " (Hint: check BINANCE_USDM_TESTNET_API_KEY/SECRET pair, futures "
-                "permission, and IP whitelist on https://testnet.binancefuture.com/)"
-            )
+            message += " (Hint: check configured API key/secret pair and futures permission.)"
         logger.warning("Binance Testnet automatic order rejected: %s", message)
         return ExecutionResult("failed", message, symbol)
 

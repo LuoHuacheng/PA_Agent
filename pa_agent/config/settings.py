@@ -167,13 +167,14 @@ class PushPlusSettings(BaseModel):
 class BinanceUSDMTestnetSettings(BaseModel):
     """Binance U本位合约 Testnet automatic-execution safety controls.
 
-    API credentials are intentionally excluded. Set them through environment
-    variables so ``settings.json`` cannot persist trading secrets.
+    Credentials persist in the gitignored local ``settings.json`` file.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = False
+    api_key: str = ""
+    api_secret: str = ""
     dry_run: bool = True
     emergency_stop: bool = True
     require_analysis_symbol_match: bool = True

@@ -85,7 +85,7 @@ make uv-run
 2. 分析品种与 `symbol` 完全一致，且在 `symbol_whitelist` 内。
 3. 仅完成 dry-run 验证后，才将 `dry_run` 改为 `false`。
 
-密钥仅从环境变量读取，绝不写入配置或日志：`BINANCE_USDM_TESTNET_API_KEY`、`BINANCE_USDM_TESTNET_API_SECRET`。API Key 应只启用交易权限，禁止提现，并设置 IP 白名单。自动执行使用单向持仓模式；单笔名义价值受 `max_notional_usdt` 限制，杠杆最大 5 倍。
+密钥保存在本机、被 Git 忽略的 `config/settings.json` 的 `binance_usdm_testnet.api_key` 与 `api_secret` 中，绝不写入日志。不要分享、上传或提交该文件。API Key 应只启用交易权限，禁止提现。自动执行使用单向持仓模式；单笔名义价值受 `max_notional_usdt` 限制，杠杆最大 5 倍。
 
 ---
 

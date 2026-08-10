@@ -50,6 +50,20 @@ def test_api_key_present_on_disk(tmp_path):
     assert data["provider"]["api_key"] == "sk-super-secret-key"
 
 
+def test_binance_credentials_round_trip(tmp_path):
+    """Binance Testnet credentials persist in the ignored settings file."""
+    p = tmp_path / "settings.json"
+    original = Settings()
+    original.binance_usdm_testnet.api_key = "binance-test-key"
+    original.binance_usdm_testnet.api_secret = "binance-test-secret"
+
+    save_settings(original, p)
+    loaded = load_settings(p)
+
+    assert loaded.binance_usdm_testnet.api_key == "binance-test-key"
+    assert loaded.binance_usdm_testnet.api_secret == "binance-test-secret"
+
+
 def test_corrupt_json_returns_defaults(tmp_path):
     """Corrupt settings.json falls back to defaults without raising."""
     p = tmp_path / "settings.json"
