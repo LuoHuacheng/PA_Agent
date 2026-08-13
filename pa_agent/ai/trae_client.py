@@ -46,6 +46,14 @@ logger = logging.getLogger(__name__)
 # Minimum interval between cancellation checks while streaming.
 _CANCEL_POLL_INTERVAL_S = 0.2
 
+# Rate-limit retry configuration.
+_RATE_LIMIT_MAX_RETRIES = 5
+_RATE_LIMIT_BACKOFF_BASE_S = 10.0  # First retry waits 10s, then 20s, 40s, 80s, 160s.
+
+
+class _TraeRateLimitError(RuntimeError):
+    """Raised when TRAE Work CN returns a rate-limit error (429 or SSE error)."""
+
 
 def _messages_to_trae_payload(
     messages: list[dict[str, Any]],
@@ -321,106 +329,141 @@ class TraeClient:
             ) from exc
 
         try:
-            with httpx.stream(
-                "POST",
-                base_url,
-                headers=headers,
-                json=payload,
-                timeout=timeout_s,
-            ) as resp:
-                if resp.status_code != 200:
-                    body = resp.read().decode("utf-8", errors="replace")[:500]
-                    self._log.error(
-                        "TraeClient HTTP %s: %s",
-                        resp.status_code,
-                        body,
-                    )
-                    if resp.status_code in (401, 403):
-                        raise RuntimeError(
-                            f"TRAE Work CN 认证失败 (HTTP {resp.status_code})。"
-                            "请启动 TRAE Work CN 重新登录后，在「AI 模型」设置中"
-                            "重新保存以刷新 Token。"
-                        )
-                    raise RuntimeError(
-                        f"TRAE Work CN API 返回 HTTP {resp.status_code}: {body}"
-                    )
+            for _attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+                try:
+                    with httpx.stream(
+                        "POST",
+                        base_url,
+                        headers=headers,
+                        json=payload,
+                        timeout=timeout_s,
+                    ) as resp:
+                        if resp.status_code != 200:
+                            body = resp.read().decode("utf-8", errors="replace")[:500]
+                            self._log.error(
+                                "TraeClient HTTP %s: %s",
+                                resp.status_code,
+                                body,
+                            )
+                            if resp.status_code in (401, 403):
+                                raise RuntimeError(
+                                    f"TRAE Work CN 认证失败 (HTTP {resp.status_code})。"
+                                    "请启动 TRAE Work CN 重新登录后，在「AI 模型」设置中"
+                                    "重新保存以刷新 Token。"
+                                )
+                            if resp.status_code == 429 or "rate limit" in body.lower():
+                                raise _TraeRateLimitError(
+                                    f"TRAE Work CN 速率限制 (HTTP {resp.status_code})"
+                                )
+                            raise RuntimeError(
+                                f"TRAE Work CN API 返回 HTTP {resp.status_code}: {body}"
+                            )
 
-                # Iterate SSE lines as they arrive.
-                sse_buffer = ""
-                for raw_line in resp.iter_lines():
-                    if cancel_token is not None and cancel_token.is_set():
-                        raise CancelledError("Request cancelled during TRAE stream")
-
-                    if raw_line is None:
-                        continue
-                    if isinstance(raw_line, bytes):
-                        raw_line = raw_line.decode("utf-8", errors="replace")
-
-                    # SSE events are separated by blank lines. httpx iter_lines
-                    # strips the trailing newline, so an empty string marks the
-                    # separator between events.
-                    if raw_line:
-                        sse_buffer += raw_line + "\n"
-                        continue
-
-                    if not sse_buffer.strip():
+                        # Iterate SSE lines as they arrive.
                         sse_buffer = ""
-                        continue
+                        for raw_line in resp.iter_lines():
+                            if cancel_token is not None and cancel_token.is_set():
+                                raise CancelledError("Request cancelled during TRAE stream")
 
-                    event, data_str = _parse_sse_event(sse_buffer)
-                    sse_buffer = ""
+                            if raw_line is None:
+                                continue
+                            if isinstance(raw_line, bytes):
+                                raw_line = raw_line.decode("utf-8", errors="replace")
 
-                    if not event:
-                        continue
+                            # SSE events are separated by blank lines. httpx iter_lines
+                            # strips the trailing newline, so an empty string marks the
+                            # separator between events.
+                            if raw_line:
+                                sse_buffer += raw_line + "\n"
+                                continue
 
-                    # Parse data as JSON when possible; fall back to raw string.
-                    data: Any = data_str
-                    if data_str:
-                        try:
-                            data = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            # Keep as raw string; _extract_* helpers handle it.
-                            data = data_str
+                            if not sse_buffer.strip():
+                                sse_buffer = ""
+                                continue
 
-                    if event in ("output", "plan_item"):
-                        # llm_raw_chat emits ``output``; older endpoints used
-                        # ``plan_item``. Both carry content/reasoning deltas.
-                        c_delta, r_delta = _extract_content_fields(data)
-                        if r_delta:
-                            reasoning_parts.append(r_delta)
-                            if on_reasoning_token is not None:
-                                on_reasoning_token(r_delta)
-                        if c_delta:
-                            content_parts.append(c_delta)
-                            if on_content_token is not None:
-                                on_content_token(c_delta)
-                    elif event == "token_usage":
-                        u = _extract_usage_fields(data)
-                        if u["prompt_tokens"]:
-                            prompt_tokens = u["prompt_tokens"]
-                        if u["completion_tokens"]:
-                            completion_tokens = u["completion_tokens"]
-                        if u["total_tokens"]:
-                            total_tokens = u["total_tokens"]
-                        if u["cached_prompt_tokens"]:
-                            cached_tokens = u["cached_prompt_tokens"]
-                    elif event == "done":
-                        break
-                    elif event in ("error", "fatal_error"):
-                        msg = (
-                            data.get("message")
-                            or data.get("error")
-                            or data_str
-                            if isinstance(data, dict)
-                            else data_str
-                        )
-                        raise RuntimeError(f"TRAE Work CN 流式响应错误: {msg}")
-                    # Other events (notification / queuing / progress_notice /
-                    # metadata / context_usage) are informational — ignore.
+                            event, data_str = _parse_sse_event(sse_buffer)
+                            sse_buffer = ""
 
-                # If total_tokens wasn't reported, compute from parts.
-                if total_tokens == 0 and (prompt_tokens or completion_tokens):
-                    total_tokens = prompt_tokens + completion_tokens
+                            if not event:
+                                continue
+
+                            # Parse data as JSON when possible; fall back to raw string.
+                            data: Any = data_str
+                            if data_str:
+                                try:
+                                    data = json.loads(data_str)
+                                except json.JSONDecodeError:
+                                    # Keep as raw string; _extract_* helpers handle it.
+                                    data = data_str
+
+                            if event in ("output", "plan_item"):
+                                # llm_raw_chat emits ``output``; older endpoints used
+                                # ``plan_item``. Both carry content/reasoning deltas.
+                                c_delta, r_delta = _extract_content_fields(data)
+                                if r_delta:
+                                    reasoning_parts.append(r_delta)
+                                    if on_reasoning_token is not None:
+                                        on_reasoning_token(r_delta)
+                                if c_delta:
+                                    content_parts.append(c_delta)
+                                    if on_content_token is not None:
+                                        on_content_token(c_delta)
+                            elif event == "token_usage":
+                                u = _extract_usage_fields(data)
+                                if u["prompt_tokens"]:
+                                    prompt_tokens = u["prompt_tokens"]
+                                if u["completion_tokens"]:
+                                    completion_tokens = u["completion_tokens"]
+                                if u["total_tokens"]:
+                                    total_tokens = u["total_tokens"]
+                                if u["cached_prompt_tokens"]:
+                                    cached_tokens = u["cached_prompt_tokens"]
+                            elif event == "done":
+                                break
+                            elif event in ("error", "fatal_error"):
+                                msg = (
+                                    data.get("message")
+                                    or data.get("error")
+                                    or data_str
+                                    if isinstance(data, dict)
+                                    else data_str
+                                )
+                                if "rate limit" in str(msg).lower():
+                                    raise _TraeRateLimitError(
+                                        f"TRAE Work CN 流式响应错误: {msg}"
+                                    )
+                                raise RuntimeError(
+                                    f"TRAE Work CN 流式响应错误: {msg}"
+                                )
+                            # Other events (notification / queuing / progress_notice /
+                            # metadata / context_usage) are informational — ignore.
+
+                        # If total_tokens wasn't reported, compute from parts.
+                        if total_tokens == 0 and (prompt_tokens or completion_tokens):
+                            total_tokens = prompt_tokens + completion_tokens
+
+                    # Success — break out of retry loop.
+                    break
+
+                except _TraeRateLimitError:
+                    if _attempt >= _RATE_LIMIT_MAX_RETRIES:
+                        raise
+                    wait_s = _RATE_LIMIT_BACKOFF_BASE_S * (2 ** _attempt)
+                    self._log.warning(
+                        "TRAE Work CN 速率限制，%.0f 秒后重试 (第 %d/%d 次)...",
+                        wait_s,
+                        _attempt + 1,
+                        _RATE_LIMIT_MAX_RETRIES,
+                    )
+                    # Reset accumulated content for retry.
+                    reasoning_parts.clear()
+                    content_parts.clear()
+                    prompt_tokens = 0
+                    completion_tokens = 0
+                    total_tokens = 0
+                    cached_tokens = 0
+                    time.sleep(wait_s)
+                    continue
 
         except CancelledError:
             raise

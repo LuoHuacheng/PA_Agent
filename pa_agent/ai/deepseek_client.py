@@ -190,10 +190,23 @@ def _is_minimax(base_url: str) -> bool:
     return "minimax.io" in url or "minimax.com" in url
 
 
+def _is_sensenova(base_url: str) -> bool:
+    """SenseNova (token.sensenova.cn) OpenAI-compatible gateway.
+
+    Provides deepseek-v4-flash 等 DeepSeek 模型的免费代理；其 max_tokens 上限为
+    384000（低于默认 _PRACTICAL_UNLIMITED_MAX_TOKENS），需单独限流以避免 400。
+    """
+    return "sensenova.cn" in (base_url or "").lower()
+
+
 # Packy claude-officially returns 400 if max_tokens exceeds model output cap.
 _PACKY_CLAUDE_MAX_OUTPUT_TOKENS = 128_000
 # DeepSeek API: max_tokens must be in [1, 393216].
 _DEEPSEEK_MAX_OUTPUT_TOKENS = 393_216
+# SenseNova API: max_tokens is model-specific (per /v1/models max_output_length).
+# glm-5.2: [1, 131072]; deepseek-v4-flash / sensenova-*-flash-lite: [1, 65536].
+_SENSENOVA_GLM_MAX_OUTPUT_TOKENS = 131_072
+_SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 
 
 def _model_uses_claude_adaptive(model: str) -> bool:
@@ -296,6 +309,11 @@ def _provider_max_output_tokens(settings: AIProviderSettings) -> int:
         return _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
     if _is_deepseek_native(settings.base_url):
         return _DEEPSEEK_MAX_OUTPUT_TOKENS
+    if _is_sensenova(settings.base_url):
+        _smodel = (settings.model or "").lower()
+        if "glm" in _smodel:
+            return _SENSENOVA_GLM_MAX_OUTPUT_TOKENS
+        return _SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS
     if _is_mimo(settings):
         return mimo_max_output_tokens(settings.model)
     return _PRACTICAL_UNLIMITED_MAX_TOKENS

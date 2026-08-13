@@ -490,8 +490,18 @@ class QoderClient:
                 pass
 
         latency_ms = (time.monotonic() - t0) * 1000
-        content = "".join(content_parts).strip()
+        raw_content = "".join(content_parts).strip()
         reasoning_content = "".join(reasoning_parts).strip()
+
+        # Qoder CN's agent system prompt causes the model to output analysis
+        # text before the actual JSON answer. Extract the JSON portion and
+        # move any preceding analysis to reasoning_content so PA Agent's
+        # validation logic sees clean JSON.
+        content, extracted_reasoning = _extract_json_content(raw_content)
+        if extracted_reasoning:
+            reasoning_content = (
+                reasoning_content + "\n" + extracted_reasoning
+            ).strip() if reasoning_content else extracted_reasoning
 
         # Estimate completion tokens from content length if not reported.
         if not completion_tokens and content:
