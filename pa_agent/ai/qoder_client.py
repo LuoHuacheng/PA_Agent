@@ -26,6 +26,7 @@ import uuid
 from typing import Any, Callable, TYPE_CHECKING
 
 from pa_agent.ai.deepseek_client import AIReply, AIUsage, CancelledError
+from pa_agent.ai.json_validator import _extract_outer_json_object
 from pa_agent.ai.qoder_connector import (
     _QODER_WS_URL,
     is_openclaw_qc_model,
@@ -46,6 +47,29 @@ _RECV_TIMEOUT_S = 0.5
 # Full markers include surrounding newlines and backtick fences.
 _THINK_START_MARKER = "\n````think::{THINK_TIME}\n"
 _THINK_END_MARKER = "\n````\n"
+
+
+def _extract_json_content(raw: str) -> tuple[str, str]:
+    """Split model output into (json_content, preceding_reasoning).
+
+    Qoder CN's agent system prompt may cause the model to emit analysis
+    text before the actual JSON answer.  This function finds the first
+    top-level ``{...}`` object and returns it as *content*; any text
+    before it is returned as *reasoning* so PA Agent's validation logic
+    sees clean JSON.
+    """
+    text = raw.strip()
+    if not text:
+        return "", ""
+
+    brace_idx = text.find("{")
+    if brace_idx < 0:
+        # No JSON object at all — return as-is, no reasoning.
+        return text, ""
+
+    preceding = text[:brace_idx].strip()
+    json_part = _extract_outer_json_object(text[brace_idx:])
+    return json_part, preceding
 
 
 def _messages_to_question_text(
