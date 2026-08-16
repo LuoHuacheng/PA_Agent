@@ -703,15 +703,16 @@ def test_signal_bar_bumped_when_same_seq_as_entry() -> None:
             "entry_basis_bar": "K3",
             "entry_basis_extreme": "low",
             "entry_rule": "test",
-            "take_profit_price": 3.20,
-            "take_profit_price_2": 3.00,
-            "stop_loss_price": 3.6,
+            # Keep RR / trader equation passing after stop-cap widening.
+            "take_profit_price": 3.00,
+            "take_profit_price_2": 2.80,
+            "stop_loss_price": 3.55,
             "reasoning": "t",
             "diagnosis_confidence": 50,
             "diagnosis_confidence_reasoning": "t",
-            "trade_confidence": 50,
+            "trade_confidence": 60,
             "trade_confidence_reasoning": "t",
-            "estimated_win_rate": 50,
+            "estimated_win_rate": 70,
             "estimated_win_rate_reasoning": "t",
             "key_factors": [],
             "watch_points": [],
@@ -736,6 +737,7 @@ def test_signal_bar_bumped_when_same_seq_as_entry() -> None:
         "terminal": {"node_id": "0", "outcome": "trade", "label": "t"},
     }
     out = normalize_stage2(obj)
+    assert out["decision"]["order_type"] == "突破单"
     assert out["bar_analysis"]["signal_bar"]["bar"] == "K2"
 
 

@@ -16,8 +16,8 @@ from pa_agent.data.tradingview import TradingViewSource
 
 
 def test_normalize_data_source_kind_defaults_unknown():
-    assert normalize_data_source_kind("invalid") == "eastmoney"
-    assert normalize_data_source_kind(None) == "eastmoney"
+    assert normalize_data_source_kind("invalid") == "mt5"
+    assert normalize_data_source_kind(None) == "mt5"
 
 
 def test_normalize_data_source_kind_hidden_sources():
@@ -27,12 +27,13 @@ def test_normalize_data_source_kind_hidden_sources():
     assert normalize_data_source_kind("yfinance") == "yfinance"
 
 
-def test_eastmoney_in_ui_choices():
-    """东方财富(A股) 为默认数据源, 必须在 UI 可选列表中且排首位。"""
+def test_mt5_in_ui_choices():
+    """MT5 为默认数据源, 必须在 UI 可选列表中且排首位。"""
     ui_kinds = {k for k, _ in DATA_SOURCE_CHOICES}
-    assert "eastmoney" in ui_kinds
-    assert DATA_SOURCE_CHOICES[0][0] == "eastmoney"
-    # AkShare 仍是隐藏源
+    assert "mt5" in ui_kinds
+    assert DATA_SOURCE_CHOICES[0][0] == "mt5"
+    # eastmoney / AkShare 仍是隐藏源
+    assert "eastmoney" not in ui_kinds
     assert "akshare" not in ui_kinds
 
 

@@ -20,28 +20,31 @@ def test_messages_to_trae_payload_basic() -> None:
         {"role": "user", "content": "What is 2+2?"},
     ]
     payload = _messages_to_trae_payload(messages, model_name="glm-5.2")
-    assert payload["user_input"] == "What is 2+2?"
     assert payload["model_name"] == "glm-5.2"
-    assert payload["intent_name"] == "chat"
-    assert payload["function"] == "utils"
-    assert len(payload["chat_history"]) == 3
-    assert payload["chat_history"][0] == {"role": "system", "content": "You are helpful."}
-    assert payload["chat_history"][1] == {"role": "user", "content": "Hello"}
-    assert payload["chat_history"][2] == {"role": "assistant", "content": "Hi there"}
+    assert len(payload["messages"]) == 4
+    assert payload["messages"][0] == {
+        "role": "system",
+        "content": [{"type": "text", "text": "You are helpful."}],
+    }
+    assert payload["messages"][-1] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "What is 2+2?"}],
+    }
 
 
 def test_messages_to_trae_payload_single_message() -> None:
     messages = [{"role": "user", "content": "Hi"}]
     payload = _messages_to_trae_payload(messages, model_name="glm-5.1")
-    assert payload["user_input"] == "Hi"
-    assert payload["chat_history"] == []
     assert payload["model_name"] == "glm-5.1"
+    assert payload["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "Hi"}]}
+    ]
 
 
 def test_messages_to_trae_payload_empty_messages() -> None:
     payload = _messages_to_trae_payload([], model_name="glm-5.2")
-    assert payload["user_input"] == ""
-    assert payload["chat_history"] == []
+    assert payload["messages"] == []
+    assert payload["model_name"] == "glm-5.2"
 
 
 def test_messages_to_trae_payload_vision_style_content() -> None:
@@ -56,8 +59,17 @@ def test_messages_to_trae_payload_vision_style_content() -> None:
         },
     ]
     payload = _messages_to_trae_payload(messages, model_name="glm-5.2")
-    assert payload["user_input"] == "Look at this:\nWhat do you see?"
-    assert payload["chat_history"] == [{"role": "user", "content": "First question"}]
+    assert payload["messages"][0] == {
+        "role": "user",
+        "content": [{"type": "text", "text": "First question"}],
+    }
+    assert payload["messages"][1] == {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Look at this:"},
+            {"type": "text", "text": "What do you see?"},
+        ],
+    }
 
 
 # ── _parse_sse_event ─────────────────────────────────────────────────────────
