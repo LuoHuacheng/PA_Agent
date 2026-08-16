@@ -1,0 +1,243 @@
+{
+  "symbol": "US100",
+  "timeframe": "H1",
+  "bars": 33073,
+  "start": "2017-12-29 00:00:00+00:00",
+  "end": "2026-07-10 08:00:00+00:00",
+  "nesting": {
+    "n_swings": 5558,
+    "n_legs": 5557,
+    "push_count_hist": {
+      "1": 5226,
+      "2": 249,
+      "3": 51,
+      "4": 25,
+      "5": 4,
+      "6": 1,
+      "7": 1
+    },
+    "pct_legs_with_3plus_pushes": 0.014756163397516646,
+    "pct_legs_with_3or4_pushes": 0.013676444124527622,
+    "n_ranges": 1276,
+    "pct_ranges_with_nested_3push_legs": 0.0007836990595611285,
+    "nested_leg_examples": [
+      {
+        "bar0": 51,
+        "bar1": 66,
+        "dir": "down",
+        "pushes": 3,
+        "bars": 15,
+        "range": 881.7802734375,
+        "t0": "2018-03-13 00:00:00+00:00",
+        "t1": "2018-04-04 00:00:00+00:00"
+      },
+      {
+        "bar0": 843,
+        "bar1": 860,
+        "dir": "up",
+        "pushes": 3,
+        "bars": 17,
+        "range": 218.0,
+        "t0": "2021-01-26 05:00:00+00:00",
+        "t1": "2021-01-26 22:00:00+00:00"
+      },
+      {
+        "bar0": 860,
+        "bar1": 883,
+        "dir": "down",
+        "pushes": 3,
+        "bars": 23,
+        "range": 717.9501953125,
+        "t0": "2021-01-26 22:00:00+00:00",
+        "t1": "2021-01-27 22:00:00+00:00"
+      },
+      {
+        "bar0": 1441,
+        "bar1": 1460,
+        "dir": "down",
+        "pushes": 3,
+        "bars": 19,
+        "range": 681.0498046875,
+        "t0": "2021-03-03 09:00:00+00:00",
+        "t1": "2021-03-04 05:00:00+00:00"
+      },
+      {
+        "bar0": 1522,
+        "bar1": 1545,
+        "dir": "up",
+        "pushes": 4,
+        "bars": 23,
+        "range": 583.6494140625,
+        "t0": "2021-03-08 21:00:00+00:00",
+        "t1": "2021-03-09 21:00:00+00:00"
+      },
+      {
+        "bar0": 1693,
+        "bar1": 1716,
+        "dir": "down",
+        "pushes": 4,
+        "bars": 23,
+        "range": 516.0,
+        "t0": "2021-03-18 08:00:00+00:00",
+        "t1": "2021-03-19 08:00:00+00:00"
+      }
+    ]
+  },
+  "tr_breakout_mm": {
+    "n_ranges": 1276,
+    "n_events": 1276,
+    "counts": {
+      "failed_breakout": 527,
+      "mm_miss_timeout": 218,
+      "mm_hit": 400,
+      "reversed_before_mm": 53,
+      "no_breakout": 78
+    },
+    "breakout_fail_rate": 0.43989983305509184,
+    "mm_hit_rate_given_breakout": 0.333889816360601,
+    "mm_hit_rate_given_surviving_breakout": 0.5961251862891207,
+    "mean_extension_ratio": 1.3400444683563197
+  },
+  "spike_aftermath": {
+    "n_spikes": 0,
+    "distribution": {},
+    "counts": {},
+    "brooks_claim": {
+      "channel": 0.6,
+      "trading_range": 0.3,
+      "reversal": 0.1
+    }
+  },
+  "markov": {
+    "transition_probs": {
+      "trading_range": {
+        "trading_range": 0.7831156716417911,
+        "broad_channel": 0.21688432835820895
+      },
+      "broad_channel": {
+        "broad_channel": 0.5996548748921484,
+        "trading_range": 0.4003451251078516
+      }
+    },
+    "transition_entropy_bits": {
+      "trading_range": 0.7544374321242222,
+      "broad_channel": 0.9711521217323147
+    },
+    "persistence_accuracy": 0.7187405389040267,
+    "majority_null_accuracy": 0.6488041174689676,
+    "markov_accuracy": 0.7187405389040267,
+    "lift_vs_majority": 0.06993642143505907,
+    "lift_vs_persistence": 0.0,
+    "n_steps": 3303,
+    "regime_counts": {
+      "trading_range": 2144,
+      "broad_channel": 1160
+    }
+  },
+  "early_detection": {
+    "n_changes": 1143,
+    "lag_mean_bars": 8.460192475940508,
+    "lag_median_bars": 5.0,
+    "lag_p25": 5.0,
+    "lag_p75": 5.0,
+    "note": "lag measured in bars from previous regime sample to first sticky new label"
+  },
+  "forward_returns_by_regime": {
+    "trading_range": {
+      "n": 2143,
+      "mean_signed_atr": -0.06745369121087468,
+      "hit_rate_gt0": 0.49930004666355576,
+      "mean_abs_move_atr": 2.8724588864509495
+    },
+    "broad_channel": {
+      "n": 1159,
+      "mean_signed_atr": 0.06255148694888812,
+      "hit_rate_gt0": 0.5150992234685073,
+      "mean_abs_move_atr": 2.8466881914626465
+    }
+  },
+  "pct_breakouts_followed_by_channelish": 0.3625110521662246,
+  "n_breakouts_checked_for_channel": 1131,
+  "case_studies": [
+    {
+      "t_range_start": "2018-05-14 00:00:00+00:00",
+      "t_range_end": "2018-05-29 00:00:00+00:00",
+      "t_breakout": "2018-06-01 00:00:00+00:00",
+      "range_high": 7012.93994140625,
+      "range_low": 6829.18994140625,
+      "height": 183.75,
+      "n_legs": 3,
+      "breakout_dir": "up",
+      "mm_target": 7196.68994140625,
+      "mm_hit": true,
+      "nested_micro_legs": [],
+      "bar0": 94,
+      "bar1": 105,
+      "bo_i": 108
+    },
+    {
+      "t_range_start": "2018-09-21 00:00:00+00:00",
+      "t_range_end": "2018-10-01 00:00:00+00:00",
+      "t_breakout": "2018-10-05 00:00:00+00:00",
+      "range_high": 7727.66015625,
+      "range_low": 7473.16015625,
+      "height": 254.5,
+      "n_legs": 2,
+      "breakout_dir": "down",
+      "mm_target": 7218.66015625,
+      "mm_hit": true,
+      "nested_micro_legs": [],
+      "bar0": 188,
+      "bar1": 194,
+      "bo_i": 198
+    },
+    {
+      "t_range_start": "2019-02-08 00:00:00+00:00",
+      "t_range_end": "2019-02-27 00:00:00+00:00",
+      "t_breakout": "2019-03-12 00:00:00+00:00",
+      "range_high": 7163.41015625,
+      "range_low": 6832.7099609375,
+      "height": 330.7001953125,
+      "n_legs": 2,
+      "breakout_dir": "up",
+      "mm_target": 7494.1103515625,
+      "mm_hit": true,
+      "nested_micro_legs": [],
+      "bar0": 286,
+      "bar1": 299,
+      "bo_i": 308
+    },
+    {
+      "t_range_start": "2018-11-02 00:00:00+00:00",
+      "t_range_end": "2018-12-12 00:00:00+00:00",
+      "t_breakout": "2018-12-19 00:00:00+00:00",
+      "range_high": 7228.41015625,
+      "range_low": 6448.66015625,
+      "height": 779.75,
+      "n_legs": 6,
+      "breakout_dir": "down",
+      "mm_target": 5668.91015625,
+      "mm_hit": false,
+      "nested_micro_legs": [],
+      "bar0": 218,
+      "bar1": 246,
+      "bo_i": 251
+    },
+    {
+      "t_range_start": "2019-02-27 00:00:00+00:00",
+      "t_range_end": "2019-03-27 00:00:00+00:00",
+      "t_breakout": "2019-04-03 00:00:00+00:00",
+      "range_high": 7515.81005859375,
+      "range_low": 6938.31005859375,
+      "height": 577.5,
+      "n_legs": 4,
+      "breakout_dir": "up",
+      "mm_target": 8093.31005859375,
+      "mm_hit": false,
+      "nested_micro_legs": [],
+      "bar0": 299,
+      "bar1": 319,
+      "bo_i": 324
+    }
+  ]
+}

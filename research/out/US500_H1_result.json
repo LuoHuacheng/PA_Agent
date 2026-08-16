@@ -1,0 +1,242 @@
+{
+  "symbol": "US500",
+  "timeframe": "H1",
+  "bars": 33073,
+  "start": "2017-12-29 00:00:00+00:00",
+  "end": "2026-07-10 08:00:00+00:00",
+  "nesting": {
+    "n_swings": 5619,
+    "n_legs": 5618,
+    "push_count_hist": {
+      "1": 5283,
+      "2": 238,
+      "3": 77,
+      "4": 16,
+      "5": 3,
+      "6": 1
+    },
+    "pct_legs_with_3plus_pushes": 0.017265930936276253,
+    "pct_legs_with_3or4_pushes": 0.01655393378426486,
+    "n_ranges": 1259,
+    "pct_ranges_with_nested_3push_legs": 0.0023828435266084196,
+    "nested_leg_examples": [
+      {
+        "bar0": 127,
+        "bar1": 146,
+        "dir": "up",
+        "pushes": 3,
+        "bars": 19,
+        "range": 156.239990234375,
+        "t0": "2018-06-28 00:00:00+00:00",
+        "t1": "2018-07-25 00:00:00+00:00"
+      },
+      {
+        "bar0": 860,
+        "bar1": 885,
+        "dir": "down",
+        "pushes": 3,
+        "bars": 25,
+        "range": 150.320068359375,
+        "t0": "2021-01-26 21:00:00+00:00",
+        "t1": "2021-01-28 00:00:00+00:00"
+      },
+      {
+        "bar0": 1157,
+        "bar1": 1178,
+        "dir": "up",
+        "pushes": 3,
+        "bars": 21,
+        "range": 43.75,
+        "t0": "2021-02-12 19:00:00+00:00",
+        "t1": "2021-02-15 17:00:00+00:00"
+      },
+      {
+        "bar0": 1341,
+        "bar1": 1365,
+        "dir": "down",
+        "pushes": 3,
+        "bars": 24,
+        "range": 129.64990234375,
+        "t0": "2021-02-25 00:00:00+00:00",
+        "t1": "2021-02-26 01:00:00+00:00"
+      },
+      {
+        "bar0": 1605,
+        "bar1": 1620,
+        "dir": "up",
+        "pushes": 3,
+        "bars": 15,
+        "range": 46.85009765625,
+        "t0": "2021-03-12 11:00:00+00:00",
+        "t1": "2021-03-15 03:00:00+00:00"
+      },
+      {
+        "bar0": 2366,
+        "bar1": 2384,
+        "dir": "up",
+        "pushes": 3,
+        "bars": 18,
+        "range": 38.27001953125,
+        "t0": "2021-04-28 21:00:00+00:00",
+        "t1": "2021-04-29 16:00:00+00:00"
+      }
+    ]
+  },
+  "tr_breakout_mm": {
+    "n_ranges": 1259,
+    "n_events": 1259,
+    "counts": {
+      "no_breakout": 58,
+      "mm_miss_timeout": 211,
+      "failed_breakout": 585,
+      "reversed_before_mm": 46,
+      "mm_hit": 359
+    },
+    "breakout_fail_rate": 0.4870940882597835,
+    "mm_hit_rate_given_breakout": 0.29891756869275604,
+    "mm_hit_rate_given_surviving_breakout": 0.5827922077922078,
+    "mean_extension_ratio": 1.3074180906678066
+  },
+  "spike_aftermath": {
+    "n_spikes": 0,
+    "distribution": {},
+    "counts": {},
+    "brooks_claim": {
+      "channel": 0.6,
+      "trading_range": 0.3,
+      "reversal": 0.1
+    }
+  },
+  "markov": {
+    "transition_probs": {
+      "trading_range": {
+        "trading_range": 0.7921195652173914,
+        "broad_channel": 0.2078804347826087
+      },
+      "broad_channel": {
+        "trading_range": 0.4182648401826484,
+        "broad_channel": 0.5817351598173516
+      }
+    },
+    "transition_entropy_bits": {
+      "trading_range": 0.73741168620937,
+      "broad_channel": 0.9806369753966054
+    },
+    "persistence_accuracy": 0.7223735997577959,
+    "majority_null_accuracy": 0.6681804420224039,
+    "markov_accuracy": 0.7223735997577959,
+    "lift_vs_majority": 0.05419315773539202,
+    "lift_vs_persistence": 0.0,
+    "n_steps": 3303,
+    "regime_counts": {
+      "trading_range": 2208,
+      "broad_channel": 1096
+    }
+  },
+  "early_detection": {
+    "n_changes": 1104,
+    "lag_mean_bars": 8.37409420289855,
+    "lag_median_bars": 5.0,
+    "lag_p25": 5.0,
+    "lag_p75": 5.0,
+    "note": "lag measured in bars from previous regime sample to first sticky new label"
+  },
+  "forward_returns_by_regime": {
+    "trading_range": {
+      "n": 2207,
+      "mean_signed_atr": -0.10735934936120724,
+      "hit_rate_gt0": 0.4934299954689624,
+      "mean_abs_move_atr": 2.825981807030673
+    },
+    "broad_channel": {
+      "n": 1095,
+      "mean_signed_atr": -0.04594784993453191,
+      "hit_rate_gt0": 0.5095890410958904,
+      "mean_abs_move_atr": 2.69185962396248
+    }
+  },
+  "pct_breakouts_followed_by_channelish": 0.3189577717879605,
+  "n_breakouts_checked_for_channel": 1113,
+  "case_studies": [
+    {
+      "t_range_start": "2018-11-15 00:00:00+00:00",
+      "t_range_end": "2018-12-12 00:00:00+00:00",
+      "t_breakout": "2018-12-17 00:00:00+00:00",
+      "range_high": 2813.080078125,
+      "range_low": 2582.080078125,
+      "height": 231.0,
+      "n_legs": 5,
+      "breakout_dir": "down",
+      "mm_target": 2351.080078125,
+      "mm_hit": true,
+      "nested_micro_legs": [],
+      "bar0": 227,
+      "bar1": 246,
+      "bo_i": 249
+    },
+    {
+      "t_range_start": "2018-10-17 00:00:00+00:00",
+      "t_range_end": "2018-11-15 00:00:00+00:00",
+      "t_breakout": "2018-12-17 00:00:00+00:00",
+      "range_high": 2823.719970703125,
+      "range_low": 2602.969970703125,
+      "height": 220.75,
+      "n_legs": 3,
+      "breakout_dir": "down",
+      "mm_target": 2382.219970703125,
+      "mm_hit": true,
+      "nested_micro_legs": [],
+      "bar0": 206,
+      "bar1": 227,
+      "bo_i": 249
+    },
+    {
+      "t_range_start": "2019-01-18 00:00:00+00:00",
+      "t_range_end": "2019-02-08 00:00:00+00:00",
+      "t_breakout": "2019-02-12 00:00:00+00:00",
+      "range_high": 2738.030029296875,
+      "range_low": 2612.280029296875,
+      "height": 125.75,
+      "n_legs": 3,
+      "breakout_dir": "up",
+      "mm_target": 2863.780029296875,
+      "mm_hit": true,
+      "nested_micro_legs": [],
+      "bar0": 271,
+      "bar1": 286,
+      "bo_i": 288
+    },
+    {
+      "t_range_start": "2018-02-16 00:00:00+00:00",
+      "t_range_end": "2018-04-25 00:00:00+00:00",
+      "t_breakout": "2018-07-17 00:00:00+00:00",
+      "range_high": 2801.97998046875,
+      "range_low": 2551.5,
+      "height": 250.47998046875,
+      "n_legs": 9,
+      "breakout_dir": "up",
+      "mm_target": 3052.4599609375,
+      "mm_hit": false,
+      "nested_micro_legs": [],
+      "bar0": 34,
+      "bar1": 81,
+      "bo_i": 140
+    },
+    {
+      "t_range_start": "2018-07-25 00:00:00+00:00",
+      "t_range_end": "2018-08-21 00:00:00+00:00",
+      "t_breakout": "2018-08-27 00:00:00+00:00",
+      "range_high": 2873.469970703125,
+      "range_low": 2790.719970703125,
+      "height": 82.75,
+      "n_legs": 4,
+      "breakout_dir": "up",
+      "mm_target": 2956.219970703125,
+      "mm_hit": false,
+      "nested_micro_legs": [],
+      "bar0": 146,
+      "bar1": 165,
+      "bo_i": 169
+    }
+  ]
+}

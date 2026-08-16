@@ -1,0 +1,194 @@
+{
+  "pooled": {
+    "A_close015": {
+      "attempts": 5838,
+      "fail8_rate": 0.4958890030832477,
+      "fail20_rate": 0.6144227475162727,
+      "mm_hit_rate": 0.5101062007536827,
+      "fail_not_reaching_mm": 0.48989379924631726,
+      "sustained20_rate": 0.6637547105173004,
+      "never_closes_outside_rate": null
+    },
+    "B_close0": {
+      "attempts": 5880,
+      "fail8_rate": 0.5346938775510204,
+      "fail20_rate": 0.6443877551020408,
+      "mm_hit_rate": 0.5023809523809524,
+      "fail_not_reaching_mm": 0.4976190476190476,
+      "sustained20_rate": 0.6496598639455783,
+      "never_closes_outside_rate": null
+    },
+    "C_wick": {
+      "attempts": 5992,
+      "fail8_rate": 0.6460280373831776,
+      "fail20_rate": 0.7232977303070761,
+      "mm_hit_rate": 0.4833110814419226,
+      "fail_not_reaching_mm": 0.5166889185580774,
+      "sustained20_rate": 0.5982977303070761,
+      "never_closes_outside_rate": 0.08778371161548731
+    },
+    "D_wick_or_close": {
+      "attempts": 5992,
+      "fail8_rate": 0.6460280373831776,
+      "fail20_rate": 0.7232977303070761,
+      "mm_hit_rate": 0.4833110814419226,
+      "fail_not_reaching_mm": 0.5166889185580774,
+      "sustained20_rate": 0.5982977303070761,
+      "never_closes_outside_rate": 0.08778371161548731
+    }
+  },
+  "per": {
+    "XAUUSD_H1": {
+      "A_close015": {
+        "attempts": 1658,
+        "fail8_rate": 0.5566948130277443,
+        "fail20_rate": 0.6646562123039808,
+        "mm_hit_rate": 0.4897466827503016,
+        "fail_not_reaching_mm": 0.5102533172496984,
+        "sustained20_rate": 0.6634499396863691,
+        "never_closes_outside_rate": null
+      },
+      "B_close0": {
+        "attempts": 1678,
+        "fail8_rate": 0.5893921334922527,
+        "fail20_rate": 0.6883194278903456,
+        "mm_hit_rate": 0.48092967818831944,
+        "fail_not_reaching_mm": 0.5190703218116806,
+        "sustained20_rate": 0.6448152562574494,
+        "never_closes_outside_rate": null
+      },
+      "C_wick": {
+        "attempts": 1728,
+        "fail8_rate": 0.7042824074074074,
+        "fail20_rate": 0.7696759259259259,
+        "mm_hit_rate": 0.45601851851851855,
+        "fail_not_reaching_mm": 0.5439814814814814,
+        "sustained20_rate": 0.5677083333333334,
+        "never_closes_outside_rate": 0.12905092592592593
+      },
+      "D_wick_or_close": {
+        "attempts": 1728,
+        "fail8_rate": 0.7042824074074074,
+        "fail20_rate": 0.7696759259259259,
+        "mm_hit_rate": 0.45601851851851855,
+        "fail_not_reaching_mm": 0.5439814814814814,
+        "sustained20_rate": 0.5677083333333334,
+        "never_closes_outside_rate": 0.12905092592592593
+      }
+    },
+    "XAUUSD_M15": {
+      "A_close015": {
+        "attempts": 1739,
+        "fail8_rate": 0.48763657274295574,
+        "fail20_rate": 0.618171362852214,
+        "mm_hit_rate": 0.5393904542840713,
+        "fail_not_reaching_mm": 0.4606095457159287,
+        "sustained20_rate": 0.6584243818286372,
+        "never_closes_outside_rate": null
+      },
+      "B_close0": {
+        "attempts": 1749,
+        "fail8_rate": 0.52715837621498,
+        "fail20_rate": 0.6512292738707833,
+        "mm_hit_rate": 0.5294453973699257,
+        "fail_not_reaching_mm": 0.4705546026300743,
+        "sustained20_rate": 0.6489422527158376,
+        "never_closes_outside_rate": null
+      },
+      "C_wick": {
+        "attempts": 1774,
+        "fail8_rate": 0.6381059751972943,
+        "fail20_rate": 0.729988726042841,
+        "mm_hit_rate": 0.5140924464487034,
+        "fail_not_reaching_mm": 0.48590755355129656,
+        "sustained20_rate": 0.6014656144306652,
+        "never_closes_outside_rate": 0.06877113866967305
+      },
+      "D_wick_or_close": {
+        "attempts": 1774,
+        "fail8_rate": 0.6381059751972943,
+        "fail20_rate": 0.729988726042841,
+        "mm_hit_rate": 0.5140924464487034,
+        "fail_not_reaching_mm": 0.48590755355129656,
+        "sustained20_rate": 0.6014656144306652,
+        "never_closes_outside_rate": 0.06877113866967305
+      }
+    },
+    "US100_H1": {
+      "A_close015": {
+        "attempts": 1222,
+        "fail8_rate": 0.4369885433715221,
+        "fail20_rate": 0.55810147299509,
+        "mm_hit_rate": 0.5040916530278232,
+        "fail_not_reaching_mm": 0.4959083469721768,
+        "sustained20_rate": 0.6734860883797054,
+        "never_closes_outside_rate": null
+      },
+      "B_close0": {
+        "attempts": 1228,
+        "fail8_rate": 0.4796416938110749,
+        "fail20_rate": 0.5887622149837134,
+        "mm_hit_rate": 0.498371335504886,
+        "fail_not_reaching_mm": 0.501628664495114,
+        "sustained20_rate": 0.6587947882736156,
+        "never_closes_outside_rate": null
+      },
+      "C_wick": {
+        "attempts": 1253,
+        "fail8_rate": 0.5969672785315243,
+        "fail20_rate": 0.6703910614525139,
+        "mm_hit_rate": 0.47326416600159615,
+        "fail_not_reaching_mm": 0.5267358339984038,
+        "sustained20_rate": 0.6169193934557063,
+        "never_closes_outside_rate": 0.07741420590582601
+      },
+      "D_wick_or_close": {
+        "attempts": 1253,
+        "fail8_rate": 0.5969672785315243,
+        "fail20_rate": 0.6703910614525139,
+        "mm_hit_rate": 0.47326416600159615,
+        "fail_not_reaching_mm": 0.5267358339984038,
+        "sustained20_rate": 0.6169193934557063,
+        "never_closes_outside_rate": 0.07741420590582601
+      }
+    },
+    "US500_H1": {
+      "A_close015": {
+        "attempts": 1219,
+        "fail8_rate": 0.48400328137817883,
+        "fail20_rate": 0.5972108285479901,
+        "mm_hit_rate": 0.5020508613617719,
+        "fail_not_reaching_mm": 0.4979491386382281,
+        "sustained20_rate": 0.6620180475799836,
+        "never_closes_outside_rate": null
+      },
+      "B_close0": {
+        "attempts": 1225,
+        "fail8_rate": 0.5257142857142857,
+        "fail20_rate": 0.6302040816326531,
+        "mm_hit_rate": 0.49714285714285716,
+        "fail_not_reaching_mm": 0.5028571428571429,
+        "sustained20_rate": 0.6481632653061224,
+        "never_closes_outside_rate": null
+      },
+      "C_wick": {
+        "attempts": 1237,
+        "fail8_rate": 0.6257073565076798,
+        "fail20_rate": 0.7025060630557801,
+        "mm_hit_rate": 0.4874696847210994,
+        "fail_not_reaching_mm": 0.5125303152789006,
+        "sustained20_rate": 0.6176232821341956,
+        "never_closes_outside_rate": 0.06790622473726758
+      },
+      "D_wick_or_close": {
+        "attempts": 1237,
+        "fail8_rate": 0.6257073565076798,
+        "fail20_rate": 0.7025060630557801,
+        "mm_hit_rate": 0.4874696847210994,
+        "fail_not_reaching_mm": 0.5125303152789006,
+        "sustained20_rate": 0.6176232821341956,
+        "never_closes_outside_rate": 0.06790622473726758
+      }
+    }
+  }
+}

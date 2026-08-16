@@ -1,0 +1,1785 @@
+{
+  "brooks_claim": {
+    "channel": 0.6,
+    "trading_range": 0.3,
+    "reversal": 0.1
+  },
+  "prior_study_approx": {
+    "note": "loose regime spike + loose_55 reversal ≈ 38% rev"
+  },
+  "focus_pooled": {
+    "loose_oldproxy|loose_55|h30": {
+      "n": 7454,
+      "distribution": {
+        "channel": 0.3956265092567749,
+        "trading_range": 0.14354708881137646,
+        "reversal": 0.46082640193184865,
+        "other": 0.0
+      },
+      "counts": {
+        "reversal": 3435,
+        "channel": 2949,
+        "trading_range": 1070
+      }
+    },
+    "standard_brooks|loose_55|h30": {
+      "n": 1739,
+      "distribution": {
+        "channel": 0.3927544565842438,
+        "trading_range": 0.23289246693502014,
+        "reversal": 0.37435307648073607,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 683,
+        "trading_range": 405,
+        "reversal": 651
+      }
+    },
+    "standard_brooks|mae_70|h30": {
+      "n": 1739,
+      "distribution": {
+        "channel": 0.34445083381253594,
+        "trading_range": 0.17078780908568142,
+        "reversal": 0.48476135710178264,
+        "other": 0.0
+      },
+      "counts": {
+        "reversal": 843,
+        "trading_range": 297,
+        "channel": 599
+      }
+    },
+    "standard_brooks|strict_brooks|h30": {
+      "n": 1739,
+      "distribution": {
+        "channel": 0.37780333525014376,
+        "trading_range": 0.300747556066705,
+        "reversal": 0.32144910868315124,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 657,
+        "trading_range": 523,
+        "reversal": 559
+      }
+    },
+    "standard_brooks|strict_plus_hold|h30": {
+      "n": 1739,
+      "distribution": {
+        "channel": 0.425531914893617,
+        "trading_range": 0.3024726854514089,
+        "reversal": 0.2719953996549741,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 740,
+        "trading_range": 526,
+        "reversal": 473
+      }
+    },
+    "strict_spike|strict_brooks|h30": {
+      "n": 928,
+      "distribution": {
+        "channel": 0.4084051724137931,
+        "trading_range": 0.33405172413793105,
+        "reversal": 0.25754310344827586,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 379,
+        "reversal": 239,
+        "trading_range": 310
+      }
+    },
+    "very_strict|strict_brooks|h30": {
+      "n": 102,
+      "distribution": {
+        "channel": 0.47058823529411764,
+        "trading_range": 0.38235294117647056,
+        "reversal": 0.14705882352941177,
+        "other": 0.0
+      },
+      "counts": {
+        "trading_range": 39,
+        "channel": 48,
+        "reversal": 15
+      }
+    },
+    "strict_spike|strict_brooks|h20": {
+      "n": 929,
+      "distribution": {
+        "channel": 0.35091496232508074,
+        "trading_range": 0.48008611410118407,
+        "reversal": 0.1689989235737352,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 326,
+        "reversal": 157,
+        "trading_range": 446
+      }
+    },
+    "strict_spike|strict_brooks|h40": {
+      "n": 928,
+      "distribution": {
+        "channel": 0.4418103448275862,
+        "trading_range": 0.24568965517241378,
+        "reversal": 0.3125,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 410,
+        "reversal": 290,
+        "trading_range": 228
+      }
+    }
+  },
+  "all_pooled_h30": {
+    "loose_oldproxy|loose_55|h30": {
+      "n": 7454,
+      "distribution": {
+        "channel": 0.3956265092567749,
+        "trading_range": 0.14354708881137646,
+        "reversal": 0.46082640193184865,
+        "other": 0.0
+      },
+      "counts": {
+        "reversal": 3435,
+        "channel": 2949,
+        "trading_range": 1070
+      }
+    },
+    "loose_oldproxy|mae_70|h30": {
+      "n": 7454,
+      "distribution": {
+        "channel": 0.3669170914944996,
+        "trading_range": 0.11376442178696002,
+        "reversal": 0.5193184867185404,
+        "other": 0.0
+      },
+      "counts": {
+        "reversal": 3871,
+        "channel": 2735,
+        "trading_range": 848
+      }
+    },
+    "loose_oldproxy|mae_100_or_origin|h30": {
+      "n": 7454,
+      "distribution": {
+        "channel": 0.279581432787765,
+        "trading_range": 0.12396028977730078,
+        "reversal": 0.5964582774349343,
+        "other": 0.0
+      },
+      "counts": {
+        "reversal": 4446,
+        "channel": 2084,
+        "trading_range": 924
+      }
+    },
+    "loose_oldproxy|strict_brooks|h30": {
+      "n": 7454,
+      "distribution": {
+        "channel": 0.2935336731955997,
+        "trading_range": 0.16071907700563456,
+        "reversal": 0.5457472497987658,
+        "other": 0.0
+      },
+      "counts": {
+        "trading_range": 1198,
+        "reversal": 4068,
+        "channel": 2188
+      }
+    },
+    "loose_oldproxy|strict_plus_hold|h30": {
+      "n": 7454,
+      "distribution": {
+        "channel": 0.4086396565602361,
+        "trading_range": 0.17976925140863967,
+        "reversal": 0.4115910920311242,
+        "other": 0.0
+      },
+      "counts": {
+        "trading_range": 1340,
+        "reversal": 3068,
+        "channel": 3046
+      }
+    },
+    "standard_brooks|loose_55|h30": {
+      "n": 1739,
+      "distribution": {
+        "channel": 0.3927544565842438,
+        "trading_range": 0.23289246693502014,
+        "reversal": 0.37435307648073607,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 683,
+        "trading_range": 405,
+        "reversal": 651
+      }
+    },
+    "standard_brooks|mae_70|h30": {
+      "n": 1739,
+      "distribution": {
+        "channel": 0.34445083381253594,
+        "trading_range": 0.17078780908568142,
+        "reversal": 0.48476135710178264,
+        "other": 0.0
+      },
+      "counts": {
+        "reversal": 843,
+        "trading_range": 297,
+        "channel": 599
+      }
+    },
+    "standard_brooks|mae_100_or_origin|h30": {
+      "n": 1739,
+      "distribution": {
+        "channel": 0.34157561817136284,
+        "trading_range": 0.23116733755031627,
+        "reversal": 0.4272570442783209,
+        "other": 0.0
+      },
+      "counts": {
+        "reversal": 743,
+        "trading_range": 402,
+        "channel": 594
+      }
+    },
+    "standard_brooks|strict_brooks|h30": {
+      "n": 1739,
+      "distribution": {
+        "channel": 0.37780333525014376,
+        "trading_range": 0.300747556066705,
+        "reversal": 0.32144910868315124,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 657,
+        "trading_range": 523,
+        "reversal": 559
+      }
+    },
+    "standard_brooks|strict_plus_hold|h30": {
+      "n": 1739,
+      "distribution": {
+        "channel": 0.425531914893617,
+        "trading_range": 0.3024726854514089,
+        "reversal": 0.2719953996549741,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 740,
+        "trading_range": 526,
+        "reversal": 473
+      }
+    },
+    "strict_spike|loose_55|h30": {
+      "n": 928,
+      "distribution": {
+        "channel": 0.3933189655172414,
+        "trading_range": 0.2629310344827586,
+        "reversal": 0.34375,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 365,
+        "reversal": 319,
+        "trading_range": 244
+      }
+    },
+    "strict_spike|mae_70|h30": {
+      "n": 928,
+      "distribution": {
+        "channel": 0.35021551724137934,
+        "trading_range": 0.17995689655172414,
+        "reversal": 0.4698275862068966,
+        "other": 0.0
+      },
+      "counts": {
+        "reversal": 436,
+        "trading_range": 167,
+        "channel": 325
+      }
+    },
+    "strict_spike|mae_100_or_origin|h30": {
+      "n": 928,
+      "distribution": {
+        "channel": 0.36530172413793105,
+        "trading_range": 0.2521551724137931,
+        "reversal": 0.38254310344827586,
+        "other": 0.0
+      },
+      "counts": {
+        "reversal": 355,
+        "trading_range": 234,
+        "channel": 339
+      }
+    },
+    "strict_spike|strict_brooks|h30": {
+      "n": 928,
+      "distribution": {
+        "channel": 0.4084051724137931,
+        "trading_range": 0.33405172413793105,
+        "reversal": 0.25754310344827586,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 379,
+        "reversal": 239,
+        "trading_range": 310
+      }
+    },
+    "strict_spike|strict_plus_hold|h30": {
+      "n": 928,
+      "distribution": {
+        "channel": 0.4364224137931034,
+        "trading_range": 0.33512931034482757,
+        "reversal": 0.22844827586206898,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 405,
+        "reversal": 212,
+        "trading_range": 311
+      }
+    },
+    "very_strict|loose_55|h30": {
+      "n": 102,
+      "distribution": {
+        "channel": 0.4411764705882353,
+        "trading_range": 0.28431372549019607,
+        "reversal": 0.27450980392156865,
+        "other": 0.0
+      },
+      "counts": {
+        "trading_range": 29,
+        "channel": 45,
+        "reversal": 28
+      }
+    },
+    "very_strict|mae_70|h30": {
+      "n": 102,
+      "distribution": {
+        "channel": 0.4117647058823529,
+        "trading_range": 0.23529411764705882,
+        "reversal": 0.35294117647058826,
+        "other": 0.0
+      },
+      "counts": {
+        "trading_range": 24,
+        "channel": 42,
+        "reversal": 36
+      }
+    },
+    "very_strict|mae_100_or_origin|h30": {
+      "n": 102,
+      "distribution": {
+        "channel": 0.43137254901960786,
+        "trading_range": 0.3137254901960784,
+        "reversal": 0.2549019607843137,
+        "other": 0.0
+      },
+      "counts": {
+        "trading_range": 32,
+        "channel": 44,
+        "reversal": 26
+      }
+    },
+    "very_strict|strict_brooks|h30": {
+      "n": 102,
+      "distribution": {
+        "channel": 0.47058823529411764,
+        "trading_range": 0.38235294117647056,
+        "reversal": 0.14705882352941177,
+        "other": 0.0
+      },
+      "counts": {
+        "trading_range": 39,
+        "channel": 48,
+        "reversal": 15
+      }
+    },
+    "very_strict|strict_plus_hold|h30": {
+      "n": 102,
+      "distribution": {
+        "channel": 0.4803921568627451,
+        "trading_range": 0.38235294117647056,
+        "reversal": 0.13725490196078433,
+        "other": 0.0
+      },
+      "counts": {
+        "trading_range": 39,
+        "channel": 49,
+        "reversal": 14
+      }
+    }
+  },
+  "definitions": {
+    "spike": {
+      "loose_oldproxy": {
+        "min_run": 2,
+        "min_body_atr": 0.35,
+        "max_avg_overlap": 0.55,
+        "require_new_ext": false,
+        "cooldown": 15,
+        "max_run": 10
+      },
+      "standard_brooks": {
+        "min_run": 3,
+        "min_body_atr": 0.55,
+        "max_avg_overlap": 0.35,
+        "require_new_ext": true,
+        "cooldown": 25,
+        "max_run": 8
+      },
+      "strict_spike": {
+        "min_run": 3,
+        "min_body_atr": 0.7,
+        "max_avg_overlap": 0.25,
+        "require_new_ext": true,
+        "cooldown": 30,
+        "max_run": 8
+      },
+      "very_strict": {
+        "min_run": 4,
+        "min_body_atr": 0.8,
+        "max_avg_overlap": 0.22,
+        "require_new_ext": true,
+        "cooldown": 35,
+        "max_run": 10
+      }
+    },
+    "reversal_modes": {
+      "loose_55": "net against spike by >55% of spike size (OLD — too loose)",
+      "mae_70": "MAE>=70% of spike and net against",
+      "mae_100_or_origin": "full retrace or close beyond spike origin",
+      "strict_brooks": "MAE>=100% AND close beyond origin, OR opposite 2-bar spike through origin",
+      "strict_plus_hold": "strict_brooks + still wrong-side at horizon"
+    },
+    "channel": "pullback then resume / extension with trend; continued_spike mapped into channel",
+    "trading_range": "high overlap / low efficiency chop without origin break"
+  },
+  "verdict_guide": {
+    "if_old_loose": "reproduces high reversal % — definition artifact",
+    "if_strict_brooks": "compare to 10% claim under tradable reversal meaning"
+  },
+  "per_dataset_focus": [
+    {
+      "symbol": "XAUUSD",
+      "timeframe": "H1",
+      "bars": 50000,
+      "focus": {
+        "loose_oldproxy|loose_55|h30": {
+          "n": 2045,
+          "n_events_detected": 2046,
+          "distribution": {
+            "channel": 0.3823960880195599,
+            "trading_range": 0.160880195599022,
+            "reversal": 0.45672371638141807,
+            "other": 0.0
+          },
+          "raw": {
+            "reversal": 934,
+            "channel": 782,
+            "trading_range": 329
+          },
+          "counts": {
+            "reversal": 934,
+            "channel": 782,
+            "trading_range": 329
+          }
+        },
+        "standard_brooks|loose_55|h30": {
+          "n": 422,
+          "n_events_detected": 422,
+          "distribution": {
+            "channel": 0.36729857819905215,
+            "trading_range": 0.26540284360189575,
+            "reversal": 0.36729857819905215,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 155,
+            "trading_range": 112,
+            "reversal": 155
+          },
+          "counts": {
+            "channel": 155,
+            "trading_range": 112,
+            "reversal": 155
+          }
+        },
+        "standard_brooks|mae_70|h30": {
+          "n": 422,
+          "n_events_detected": 422,
+          "distribution": {
+            "channel": 0.33649289099526064,
+            "trading_range": 0.17535545023696683,
+            "reversal": 0.4881516587677725,
+            "other": 0.0
+          },
+          "raw": {
+            "reversal": 206,
+            "trading_range": 74,
+            "channel": 142
+          },
+          "counts": {
+            "reversal": 206,
+            "trading_range": 74,
+            "channel": 142
+          }
+        },
+        "standard_brooks|strict_brooks|h30": {
+          "n": 422,
+          "n_events_detected": 422,
+          "distribution": {
+            "channel": 0.3696682464454976,
+            "trading_range": 0.36255924170616116,
+            "reversal": 0.2677725118483412,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 156,
+            "trading_range": 153,
+            "reversal": 113
+          },
+          "counts": {
+            "channel": 156,
+            "trading_range": 153,
+            "reversal": 113
+          }
+        },
+        "standard_brooks|strict_plus_hold|h30": {
+          "n": 422,
+          "n_events_detected": 422,
+          "distribution": {
+            "channel": 0.3981042654028436,
+            "trading_range": 0.36255924170616116,
+            "reversal": 0.23933649289099526,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 168,
+            "trading_range": 153,
+            "reversal": 101
+          },
+          "counts": {
+            "channel": 168,
+            "trading_range": 153,
+            "reversal": 101
+          }
+        },
+        "strict_spike|strict_brooks|h30": {
+          "n": 215,
+          "n_events_detected": 215,
+          "distribution": {
+            "channel": 0.39069767441860465,
+            "trading_range": 0.4,
+            "reversal": 0.20930232558139536,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 82,
+            "reversal": 45,
+            "trading_range": 86,
+            "continued_spike": 2
+          },
+          "counts": {
+            "channel": 84,
+            "reversal": 45,
+            "trading_range": 86
+          }
+        },
+        "very_strict|strict_brooks|h30": {
+          "n": 17,
+          "n_events_detected": 17,
+          "distribution": {
+            "channel": 0.47058823529411764,
+            "trading_range": 0.4117647058823529,
+            "reversal": 0.11764705882352941,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 7,
+            "channel": 8,
+            "reversal": 2
+          },
+          "counts": {
+            "trading_range": 7,
+            "channel": 8,
+            "reversal": 2
+          }
+        },
+        "strict_spike|strict_brooks|h20": {
+          "n": 215,
+          "n_events_detected": 215,
+          "distribution": {
+            "channel": 0.3674418604651163,
+            "trading_range": 0.4930232558139535,
+            "reversal": 0.13953488372093023,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 76,
+            "reversal": 30,
+            "trading_range": 106,
+            "continued_spike": 3
+          },
+          "counts": {
+            "channel": 79,
+            "reversal": 30,
+            "trading_range": 106
+          }
+        },
+        "strict_spike|strict_brooks|h40": {
+          "n": 215,
+          "n_events_detected": 215,
+          "distribution": {
+            "channel": 0.4604651162790698,
+            "trading_range": 0.2930232558139535,
+            "reversal": 0.24651162790697675,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 97,
+            "reversal": 53,
+            "trading_range": 63,
+            "continued_spike": 2
+          },
+          "counts": {
+            "channel": 99,
+            "reversal": 53,
+            "trading_range": 63
+          }
+        }
+      }
+    },
+    {
+      "symbol": "XAUUSD",
+      "timeframe": "M15",
+      "bars": 50000,
+      "focus": {
+        "loose_oldproxy|loose_55|h30": {
+          "n": 2144,
+          "n_events_detected": 2145,
+          "distribution": {
+            "channel": 0.37033582089552236,
+            "trading_range": 0.16930970149253732,
+            "reversal": 0.4603544776119403,
+            "other": 0.0
+          },
+          "raw": {
+            "reversal": 987,
+            "channel": 793,
+            "trading_range": 363,
+            "continued_spike": 1
+          },
+          "counts": {
+            "reversal": 987,
+            "channel": 794,
+            "trading_range": 363
+          }
+        },
+        "standard_brooks|loose_55|h30": {
+          "n": 537,
+          "n_events_detected": 538,
+          "distribution": {
+            "channel": 0.3985102420856611,
+            "trading_range": 0.2122905027932961,
+            "reversal": 0.3891992551210428,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 114,
+            "reversal": 209,
+            "channel": 208,
+            "continued_spike": 6
+          },
+          "counts": {
+            "trading_range": 114,
+            "reversal": 209,
+            "channel": 214
+          }
+        },
+        "standard_brooks|mae_70|h30": {
+          "n": 537,
+          "n_events_detected": 538,
+          "distribution": {
+            "channel": 0.35195530726256985,
+            "trading_range": 0.14338919925512103,
+            "reversal": 0.5046554934823091,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 77,
+            "reversal": 271,
+            "channel": 183,
+            "continued_spike": 6
+          },
+          "counts": {
+            "trading_range": 77,
+            "reversal": 271,
+            "channel": 189
+          }
+        },
+        "standard_brooks|strict_brooks|h30": {
+          "n": 537,
+          "n_events_detected": 538,
+          "distribution": {
+            "channel": 0.38361266294227186,
+            "trading_range": 0.2849162011173184,
+            "reversal": 0.33147113594040967,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 153,
+            "reversal": 178,
+            "channel": 200,
+            "continued_spike": 6
+          },
+          "counts": {
+            "trading_range": 153,
+            "reversal": 178,
+            "channel": 206
+          }
+        },
+        "standard_brooks|strict_plus_hold|h30": {
+          "n": 537,
+          "n_events_detected": 538,
+          "distribution": {
+            "channel": 0.4376163873370577,
+            "trading_range": 0.2886405959031657,
+            "reversal": 0.2737430167597765,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 155,
+            "reversal": 147,
+            "channel": 229,
+            "continued_spike": 6
+          },
+          "counts": {
+            "trading_range": 155,
+            "reversal": 147,
+            "channel": 235
+          }
+        },
+        "strict_spike|strict_brooks|h30": {
+          "n": 301,
+          "n_events_detected": 302,
+          "distribution": {
+            "channel": 0.4119601328903654,
+            "trading_range": 0.3289036544850498,
+            "reversal": 0.2591362126245847,
+            "other": 0.0
+          },
+          "raw": {
+            "reversal": 78,
+            "channel": 121,
+            "trading_range": 99,
+            "continued_spike": 3
+          },
+          "counts": {
+            "reversal": 78,
+            "channel": 124,
+            "trading_range": 99
+          }
+        },
+        "very_strict|strict_brooks|h30": {
+          "n": 30,
+          "n_events_detected": 30,
+          "distribution": {
+            "channel": 0.43333333333333335,
+            "trading_range": 0.36666666666666664,
+            "reversal": 0.2,
+            "other": 0.0
+          },
+          "raw": {
+            "reversal": 6,
+            "channel": 11,
+            "trading_range": 11,
+            "continued_spike": 2
+          },
+          "counts": {
+            "reversal": 6,
+            "channel": 13,
+            "trading_range": 11
+          }
+        },
+        "strict_spike|strict_brooks|h20": {
+          "n": 302,
+          "n_events_detected": 302,
+          "distribution": {
+            "channel": 0.33112582781456956,
+            "trading_range": 0.48344370860927155,
+            "reversal": 0.18543046357615894,
+            "other": 0.0
+          },
+          "raw": {
+            "reversal": 56,
+            "trading_range": 146,
+            "channel": 97,
+            "continued_spike": 3
+          },
+          "counts": {
+            "reversal": 56,
+            "trading_range": 146,
+            "channel": 100
+          }
+        },
+        "strict_spike|strict_brooks|h40": {
+          "n": 301,
+          "n_events_detected": 302,
+          "distribution": {
+            "channel": 0.4152823920265781,
+            "trading_range": 0.23920265780730898,
+            "reversal": 0.34551495016611294,
+            "other": 0.0
+          },
+          "raw": {
+            "reversal": 104,
+            "channel": 122,
+            "trading_range": 72,
+            "continued_spike": 3
+          },
+          "counts": {
+            "reversal": 104,
+            "channel": 125,
+            "trading_range": 72
+          }
+        }
+      }
+    },
+    {
+      "symbol": "XAUUSD",
+      "timeframe": "D1",
+      "bars": 5680,
+      "focus": {
+        "loose_oldproxy|loose_55|h30": {
+          "n": 251,
+          "n_events_detected": 253,
+          "distribution": {
+            "channel": 0.3545816733067729,
+            "trading_range": 0.16733067729083664,
+            "reversal": 0.47808764940239046,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 42,
+            "channel": 89,
+            "reversal": 120
+          },
+          "counts": {
+            "trading_range": 42,
+            "channel": 89,
+            "reversal": 120
+          }
+        },
+        "standard_brooks|loose_55|h30": {
+          "n": 53,
+          "n_events_detected": 53,
+          "distribution": {
+            "channel": 0.41509433962264153,
+            "trading_range": 0.1320754716981132,
+            "reversal": 0.4528301886792453,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 7,
+            "channel": 22,
+            "reversal": 24
+          },
+          "counts": {
+            "trading_range": 7,
+            "channel": 22,
+            "reversal": 24
+          }
+        },
+        "standard_brooks|mae_70|h30": {
+          "n": 53,
+          "n_events_detected": 53,
+          "distribution": {
+            "channel": 0.3018867924528302,
+            "trading_range": 0.09433962264150944,
+            "reversal": 0.6037735849056604,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 5,
+            "channel": 16,
+            "reversal": 32
+          },
+          "counts": {
+            "trading_range": 5,
+            "channel": 16,
+            "reversal": 32
+          }
+        },
+        "standard_brooks|strict_brooks|h30": {
+          "n": 53,
+          "n_events_detected": 53,
+          "distribution": {
+            "channel": 0.3584905660377358,
+            "trading_range": 0.1320754716981132,
+            "reversal": 0.5094339622641509,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 7,
+            "channel": 19,
+            "reversal": 27
+          },
+          "counts": {
+            "trading_range": 7,
+            "channel": 19,
+            "reversal": 27
+          }
+        },
+        "standard_brooks|strict_plus_hold|h30": {
+          "n": 53,
+          "n_events_detected": 53,
+          "distribution": {
+            "channel": 0.41509433962264153,
+            "trading_range": 0.1509433962264151,
+            "reversal": 0.4339622641509434,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 8,
+            "channel": 22,
+            "reversal": 23
+          },
+          "counts": {
+            "trading_range": 8,
+            "channel": 22,
+            "reversal": 23
+          }
+        },
+        "strict_spike|strict_brooks|h30": {
+          "n": 27,
+          "n_events_detected": 27,
+          "distribution": {
+            "channel": 0.37037037037037035,
+            "trading_range": 0.14814814814814814,
+            "reversal": 0.48148148148148145,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 9,
+            "trading_range": 4,
+            "reversal": 13,
+            "continued_spike": 1
+          },
+          "counts": {
+            "channel": 10,
+            "trading_range": 4,
+            "reversal": 13
+          }
+        },
+        "very_strict|strict_brooks|h30": {
+          "n": 2,
+          "n_events_detected": 2,
+          "distribution": {
+            "channel": 0.5,
+            "trading_range": 0.5,
+            "reversal": 0.0,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 1,
+            "channel": 1
+          },
+          "counts": {
+            "trading_range": 1,
+            "channel": 1
+          }
+        },
+        "strict_spike|strict_brooks|h20": {
+          "n": 27,
+          "n_events_detected": 27,
+          "distribution": {
+            "channel": 0.4074074074074074,
+            "trading_range": 0.2962962962962963,
+            "reversal": 0.2962962962962963,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 10,
+            "trading_range": 8,
+            "reversal": 8,
+            "continued_spike": 1
+          },
+          "counts": {
+            "channel": 11,
+            "trading_range": 8,
+            "reversal": 8
+          }
+        },
+        "strict_spike|strict_brooks|h40": {
+          "n": 27,
+          "n_events_detected": 27,
+          "distribution": {
+            "channel": 0.4074074074074074,
+            "trading_range": 0.07407407407407407,
+            "reversal": 0.5185185185185185,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 10,
+            "reversal": 14,
+            "trading_range": 2,
+            "continued_spike": 1
+          },
+          "counts": {
+            "channel": 11,
+            "reversal": 14,
+            "trading_range": 2
+          }
+        }
+      }
+    },
+    {
+      "symbol": "US100",
+      "timeframe": "H1",
+      "bars": 33073,
+      "focus": {
+        "loose_oldproxy|loose_55|h30": {
+          "n": 1410,
+          "n_events_detected": 1411,
+          "distribution": {
+            "channel": 0.4375886524822695,
+            "trading_range": 0.10638297872340426,
+            "reversal": 0.45602836879432623,
+            "other": 0.0
+          },
+          "raw": {
+            "reversal": 643,
+            "trading_range": 150,
+            "channel": 617
+          },
+          "counts": {
+            "reversal": 643,
+            "trading_range": 150,
+            "channel": 617
+          }
+        },
+        "standard_brooks|loose_55|h30": {
+          "n": 331,
+          "n_events_detected": 331,
+          "distribution": {
+            "channel": 0.38368580060422963,
+            "trading_range": 0.24773413897280966,
+            "reversal": 0.3685800604229607,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 82,
+            "channel": 127,
+            "reversal": 122
+          },
+          "counts": {
+            "trading_range": 82,
+            "channel": 127,
+            "reversal": 122
+          }
+        },
+        "standard_brooks|mae_70|h30": {
+          "n": 331,
+          "n_events_detected": 331,
+          "distribution": {
+            "channel": 0.34441087613293053,
+            "trading_range": 0.21450151057401812,
+            "reversal": 0.44108761329305135,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 71,
+            "channel": 114,
+            "reversal": 146
+          },
+          "counts": {
+            "trading_range": 71,
+            "channel": 114,
+            "reversal": 146
+          }
+        },
+        "standard_brooks|strict_brooks|h30": {
+          "n": 331,
+          "n_events_detected": 331,
+          "distribution": {
+            "channel": 0.3564954682779456,
+            "trading_range": 0.3081570996978852,
+            "reversal": 0.33534743202416917,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 102,
+            "channel": 118,
+            "reversal": 111
+          },
+          "counts": {
+            "trading_range": 102,
+            "channel": 118,
+            "reversal": 111
+          }
+        },
+        "standard_brooks|strict_plus_hold|h30": {
+          "n": 331,
+          "n_events_detected": 331,
+          "distribution": {
+            "channel": 0.4229607250755287,
+            "trading_range": 0.3081570996978852,
+            "reversal": 0.2688821752265861,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 102,
+            "channel": 140,
+            "reversal": 89
+          },
+          "counts": {
+            "trading_range": 102,
+            "channel": 140,
+            "reversal": 89
+          }
+        },
+        "strict_spike|strict_brooks|h30": {
+          "n": 182,
+          "n_events_detected": 182,
+          "distribution": {
+            "channel": 0.3516483516483517,
+            "trading_range": 0.37362637362637363,
+            "reversal": 0.27472527472527475,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 68,
+            "channel": 62,
+            "reversal": 50,
+            "continued_spike": 2
+          },
+          "counts": {
+            "trading_range": 68,
+            "channel": 64,
+            "reversal": 50
+          }
+        },
+        "very_strict|strict_brooks|h30": {
+          "n": 25,
+          "n_events_detected": 25,
+          "distribution": {
+            "channel": 0.4,
+            "trading_range": 0.52,
+            "reversal": 0.08,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 10,
+            "trading_range": 13,
+            "reversal": 2
+          },
+          "counts": {
+            "channel": 10,
+            "trading_range": 13,
+            "reversal": 2
+          }
+        },
+        "strict_spike|strict_brooks|h20": {
+          "n": 182,
+          "n_events_detected": 182,
+          "distribution": {
+            "channel": 0.33516483516483514,
+            "trading_range": 0.489010989010989,
+            "reversal": 0.17582417582417584,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 89,
+            "channel": 59,
+            "reversal": 32,
+            "continued_spike": 2
+          },
+          "counts": {
+            "trading_range": 89,
+            "channel": 61,
+            "reversal": 32
+          }
+        },
+        "strict_spike|strict_brooks|h40": {
+          "n": 182,
+          "n_events_detected": 182,
+          "distribution": {
+            "channel": 0.4175824175824176,
+            "trading_range": 0.2692307692307692,
+            "reversal": 0.3131868131868132,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 75,
+            "reversal": 57,
+            "trading_range": 49,
+            "continued_spike": 1
+          },
+          "counts": {
+            "channel": 76,
+            "reversal": 57,
+            "trading_range": 49
+          }
+        }
+      }
+    },
+    {
+      "symbol": "US100",
+      "timeframe": "D1",
+      "bars": 2204,
+      "focus": {
+        "loose_oldproxy|loose_55|h30": {
+          "n": 96,
+          "n_events_detected": 98,
+          "distribution": {
+            "channel": 0.3541666666666667,
+            "trading_range": 0.125,
+            "reversal": 0.5208333333333334,
+            "other": 0.0
+          },
+          "raw": {
+            "reversal": 50,
+            "trading_range": 12,
+            "channel": 34
+          },
+          "counts": {
+            "reversal": 50,
+            "trading_range": 12,
+            "channel": 34
+          }
+        },
+        "standard_brooks|loose_55|h30": {
+          "n": 25,
+          "n_events_detected": 25,
+          "distribution": {
+            "channel": 0.48,
+            "trading_range": 0.24,
+            "reversal": 0.28,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 6,
+            "channel": 12,
+            "reversal": 7
+          },
+          "counts": {
+            "trading_range": 6,
+            "channel": 12,
+            "reversal": 7
+          }
+        },
+        "standard_brooks|mae_70|h30": {
+          "n": 25,
+          "n_events_detected": 25,
+          "distribution": {
+            "channel": 0.4,
+            "trading_range": 0.2,
+            "reversal": 0.4,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 5,
+            "channel": 10,
+            "reversal": 10
+          },
+          "counts": {
+            "trading_range": 5,
+            "channel": 10,
+            "reversal": 10
+          }
+        },
+        "standard_brooks|strict_brooks|h30": {
+          "n": 25,
+          "n_events_detected": 25,
+          "distribution": {
+            "channel": 0.36,
+            "trading_range": 0.24,
+            "reversal": 0.4,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 6,
+            "channel": 9,
+            "reversal": 10
+          },
+          "counts": {
+            "trading_range": 6,
+            "channel": 9,
+            "reversal": 10
+          }
+        },
+        "standard_brooks|strict_plus_hold|h30": {
+          "n": 25,
+          "n_events_detected": 25,
+          "distribution": {
+            "channel": 0.44,
+            "trading_range": 0.24,
+            "reversal": 0.32,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 6,
+            "channel": 11,
+            "reversal": 8
+          },
+          "counts": {
+            "trading_range": 6,
+            "channel": 11,
+            "reversal": 8
+          }
+        },
+        "strict_spike|strict_brooks|h30": {
+          "n": 9,
+          "n_events_detected": 9,
+          "distribution": {
+            "channel": 0.5555555555555556,
+            "trading_range": 0.2222222222222222,
+            "reversal": 0.2222222222222222,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 2,
+            "channel": 5,
+            "reversal": 2
+          },
+          "counts": {
+            "trading_range": 2,
+            "channel": 5,
+            "reversal": 2
+          }
+        },
+        "very_strict|strict_brooks|h30": {
+          "n": 1,
+          "n_events_detected": 1,
+          "distribution": {
+            "channel": 1.0,
+            "trading_range": 0.0,
+            "reversal": 0.0,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 1
+          },
+          "counts": {
+            "channel": 1
+          }
+        },
+        "strict_spike|strict_brooks|h20": {
+          "n": 9,
+          "n_events_detected": 9,
+          "distribution": {
+            "channel": 0.5555555555555556,
+            "trading_range": 0.3333333333333333,
+            "reversal": 0.1111111111111111,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 3,
+            "channel": 5,
+            "reversal": 1
+          },
+          "counts": {
+            "trading_range": 3,
+            "channel": 5,
+            "reversal": 1
+          }
+        },
+        "strict_spike|strict_brooks|h40": {
+          "n": 9,
+          "n_events_detected": 9,
+          "distribution": {
+            "channel": 0.6666666666666666,
+            "trading_range": 0.0,
+            "reversal": 0.3333333333333333,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 6,
+            "reversal": 3
+          },
+          "counts": {
+            "channel": 6,
+            "reversal": 3
+          }
+        }
+      }
+    },
+    {
+      "symbol": "US500",
+      "timeframe": "H1",
+      "bars": 33073,
+      "focus": {
+        "loose_oldproxy|loose_55|h30": {
+          "n": 1411,
+          "n_events_detected": 1412,
+          "distribution": {
+            "channel": 0.4195605953224663,
+            "trading_range": 0.11552090715804395,
+            "reversal": 0.4649184975194897,
+            "other": 0.0
+          },
+          "raw": {
+            "reversal": 656,
+            "trading_range": 163,
+            "channel": 592
+          },
+          "counts": {
+            "reversal": 656,
+            "trading_range": 163,
+            "channel": 592
+          }
+        },
+        "standard_brooks|loose_55|h30": {
+          "n": 347,
+          "n_events_detected": 347,
+          "distribution": {
+            "channel": 0.41786743515850144,
+            "trading_range": 0.23631123919308358,
+            "reversal": 0.345821325648415,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 145,
+            "trading_range": 82,
+            "reversal": 120
+          },
+          "counts": {
+            "channel": 145,
+            "trading_range": 82,
+            "reversal": 120
+          }
+        },
+        "standard_brooks|mae_70|h30": {
+          "n": 347,
+          "n_events_detected": 347,
+          "distribution": {
+            "channel": 0.345821325648415,
+            "trading_range": 0.18155619596541786,
+            "reversal": 0.47262247838616717,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 120,
+            "trading_range": 63,
+            "reversal": 164
+          },
+          "counts": {
+            "channel": 120,
+            "trading_range": 63,
+            "reversal": 164
+          }
+        },
+        "standard_brooks|strict_brooks|h30": {
+          "n": 347,
+          "n_events_detected": 347,
+          "distribution": {
+            "channel": 0.4092219020172911,
+            "trading_range": 0.2824207492795389,
+            "reversal": 0.30835734870317005,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 142,
+            "trading_range": 98,
+            "reversal": 107
+          },
+          "counts": {
+            "channel": 142,
+            "trading_range": 98,
+            "reversal": 107
+          }
+        },
+        "standard_brooks|strict_plus_hold|h30": {
+          "n": 347,
+          "n_events_detected": 347,
+          "distribution": {
+            "channel": 0.44668587896253603,
+            "trading_range": 0.2824207492795389,
+            "reversal": 0.27089337175792505,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 155,
+            "trading_range": 98,
+            "reversal": 94
+          },
+          "counts": {
+            "channel": 155,
+            "trading_range": 98,
+            "reversal": 94
+          }
+        },
+        "strict_spike|strict_brooks|h30": {
+          "n": 182,
+          "n_events_detected": 182,
+          "distribution": {
+            "channel": 0.4835164835164835,
+            "trading_range": 0.2692307692307692,
+            "reversal": 0.24725274725274726,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 86,
+            "trading_range": 49,
+            "reversal": 45,
+            "continued_spike": 2
+          },
+          "counts": {
+            "channel": 88,
+            "trading_range": 49,
+            "reversal": 45
+          }
+        },
+        "very_strict|strict_brooks|h30": {
+          "n": 27,
+          "n_events_detected": 27,
+          "distribution": {
+            "channel": 0.5555555555555556,
+            "trading_range": 0.25925925925925924,
+            "reversal": 0.18518518518518517,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 7,
+            "channel": 15,
+            "reversal": 5
+          },
+          "counts": {
+            "trading_range": 7,
+            "channel": 15,
+            "reversal": 5
+          }
+        },
+        "strict_spike|strict_brooks|h20": {
+          "n": 182,
+          "n_events_detected": 182,
+          "distribution": {
+            "channel": 0.3626373626373626,
+            "trading_range": 0.489010989010989,
+            "reversal": 0.14835164835164835,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 89,
+            "channel": 63,
+            "continued_spike": 3,
+            "reversal": 27
+          },
+          "counts": {
+            "trading_range": 89,
+            "channel": 66,
+            "reversal": 27
+          }
+        },
+        "strict_spike|strict_brooks|h40": {
+          "n": 182,
+          "n_events_detected": 182,
+          "distribution": {
+            "channel": 0.4945054945054945,
+            "trading_range": 0.21978021978021978,
+            "reversal": 0.2857142857142857,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 88,
+            "trading_range": 40,
+            "reversal": 52,
+            "continued_spike": 2
+          },
+          "counts": {
+            "channel": 90,
+            "trading_range": 40,
+            "reversal": 52
+          }
+        }
+      }
+    },
+    {
+      "symbol": "US500",
+      "timeframe": "D1",
+      "bars": 2204,
+      "focus": {
+        "loose_oldproxy|loose_55|h30": {
+          "n": 97,
+          "n_events_detected": 98,
+          "distribution": {
+            "channel": 0.422680412371134,
+            "trading_range": 0.1134020618556701,
+            "reversal": 0.4639175257731959,
+            "other": 0.0
+          },
+          "raw": {
+            "reversal": 45,
+            "trading_range": 11,
+            "channel": 41
+          },
+          "counts": {
+            "reversal": 45,
+            "trading_range": 11,
+            "channel": 41
+          }
+        },
+        "standard_brooks|loose_55|h30": {
+          "n": 24,
+          "n_events_detected": 24,
+          "distribution": {
+            "channel": 0.3333333333333333,
+            "trading_range": 0.08333333333333333,
+            "reversal": 0.5833333333333334,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 8,
+            "trading_range": 2,
+            "reversal": 14
+          },
+          "counts": {
+            "channel": 8,
+            "trading_range": 2,
+            "reversal": 14
+          }
+        },
+        "standard_brooks|mae_70|h30": {
+          "n": 24,
+          "n_events_detected": 24,
+          "distribution": {
+            "channel": 0.3333333333333333,
+            "trading_range": 0.08333333333333333,
+            "reversal": 0.5833333333333334,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 8,
+            "trading_range": 2,
+            "reversal": 14
+          },
+          "counts": {
+            "channel": 8,
+            "trading_range": 2,
+            "reversal": 14
+          }
+        },
+        "standard_brooks|strict_brooks|h30": {
+          "n": 24,
+          "n_events_detected": 24,
+          "distribution": {
+            "channel": 0.2916666666666667,
+            "trading_range": 0.16666666666666666,
+            "reversal": 0.5416666666666666,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 7,
+            "trading_range": 4,
+            "reversal": 13
+          },
+          "counts": {
+            "channel": 7,
+            "trading_range": 4,
+            "reversal": 13
+          }
+        },
+        "standard_brooks|strict_plus_hold|h30": {
+          "n": 24,
+          "n_events_detected": 24,
+          "distribution": {
+            "channel": 0.375,
+            "trading_range": 0.16666666666666666,
+            "reversal": 0.4583333333333333,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 9,
+            "trading_range": 4,
+            "reversal": 11
+          },
+          "counts": {
+            "channel": 9,
+            "trading_range": 4,
+            "reversal": 11
+          }
+        },
+        "strict_spike|strict_brooks|h30": {
+          "n": 12,
+          "n_events_detected": 12,
+          "distribution": {
+            "channel": 0.3333333333333333,
+            "trading_range": 0.16666666666666666,
+            "reversal": 0.5,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 4,
+            "reversal": 6,
+            "trading_range": 2
+          },
+          "counts": {
+            "channel": 4,
+            "reversal": 6,
+            "trading_range": 2
+          }
+        },
+        "very_strict|strict_brooks|h30": {
+          "n": 0,
+          "n_events_detected": 0,
+          "distribution": {
+            "channel": 0.0,
+            "trading_range": 0.0,
+            "reversal": 0.0,
+            "other": 0.0
+          },
+          "raw": {},
+          "counts": {}
+        },
+        "strict_spike|strict_brooks|h20": {
+          "n": 12,
+          "n_events_detected": 12,
+          "distribution": {
+            "channel": 0.3333333333333333,
+            "trading_range": 0.4166666666666667,
+            "reversal": 0.25,
+            "other": 0.0
+          },
+          "raw": {
+            "trading_range": 5,
+            "channel": 4,
+            "reversal": 3
+          },
+          "counts": {
+            "trading_range": 5,
+            "channel": 4,
+            "reversal": 3
+          }
+        },
+        "strict_spike|strict_brooks|h40": {
+          "n": 12,
+          "n_events_detected": 12,
+          "distribution": {
+            "channel": 0.25,
+            "trading_range": 0.16666666666666666,
+            "reversal": 0.5833333333333334,
+            "other": 0.0
+          },
+          "raw": {
+            "channel": 3,
+            "trading_range": 2,
+            "reversal": 7
+          },
+          "counts": {
+            "channel": 3,
+            "trading_range": 2,
+            "reversal": 7
+          }
+        }
+      }
+    }
+  ]
+}

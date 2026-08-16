@@ -1,0 +1,210 @@
+{
+  "symbol": "US500",
+  "timeframe": "D1",
+  "bars": 2204,
+  "start": "2017-12-29 00:00:00+00:00",
+  "end": "2026-07-09 00:00:00+00:00",
+  "nesting": {
+    "n_swings": 398,
+    "n_legs": 397,
+    "push_count_hist": {
+      "1": 376,
+      "2": 17,
+      "3": 3,
+      "4": 1
+    },
+    "pct_legs_with_3plus_pushes": 0.010075566750629723,
+    "pct_legs_with_3or4_pushes": 0.010075566750629723,
+    "n_ranges": 79,
+    "pct_ranges_with_nested_3push_legs": 0.0,
+    "nested_leg_examples": [
+      {
+        "bar0": 127,
+        "bar1": 146,
+        "dir": "up",
+        "pushes": 3,
+        "bars": 19,
+        "range": 156.239990234375,
+        "t0": "2018-06-28 00:00:00+00:00",
+        "t1": "2018-07-25 00:00:00+00:00"
+      },
+      {
+        "bar0": 1507,
+        "bar1": 1532,
+        "dir": "up",
+        "pushes": 3,
+        "bars": 25,
+        "range": 497.41015625,
+        "t0": "2023-10-27 00:00:00+00:00",
+        "t1": "2023-12-01 00:00:00+00:00"
+      },
+      {
+        "bar0": 2131,
+        "bar1": 2163,
+        "dir": "up",
+        "pushes": 4,
+        "bars": 32,
+        "range": 1205.01025390625,
+        "t0": "2026-03-31 00:00:00+00:00",
+        "t1": "2026-05-14 00:00:00+00:00"
+      }
+    ]
+  },
+  "tr_breakout_mm": {
+    "n_ranges": 79,
+    "n_events": 79,
+    "counts": {
+      "no_breakout": 4,
+      "mm_miss_timeout": 12,
+      "failed_breakout": 36,
+      "reversed_before_mm": 3,
+      "mm_hit": 24
+    },
+    "breakout_fail_rate": 0.48,
+    "mm_hit_rate_given_breakout": 0.32,
+    "mm_hit_rate_given_surviving_breakout": 0.6153846153846154,
+    "mean_extension_ratio": 1.1857926397601368
+  },
+  "spike_aftermath": {
+    "n_spikes": 0,
+    "distribution": {},
+    "counts": {},
+    "brooks_claim": {
+      "channel": 0.6,
+      "trading_range": 0.3,
+      "reversal": 0.1
+    }
+  },
+  "markov": {
+    "transition_probs": {
+      "trading_range": {
+        "trading_range": 0.8076923076923077,
+        "broad_channel": 0.19230769230769232
+      },
+      "broad_channel": {
+        "trading_range": 0.5,
+        "broad_channel": 0.5
+      }
+    },
+    "transition_entropy_bits": {
+      "trading_range": 0.7062740891876007,
+      "broad_channel": 1.0
+    },
+    "persistence_accuracy": 0.7222222222222222,
+    "majority_null_accuracy": 0.7222222222222222,
+    "markov_accuracy": 0.7222222222222222,
+    "lift_vs_majority": 0.0,
+    "lift_vs_persistence": 0.0,
+    "n_steps": 216,
+    "regime_counts": {
+      "trading_range": 157,
+      "broad_channel": 60
+    }
+  },
+  "early_detection": {
+    "n_changes": 79,
+    "lag_mean_bars": 9.49367088607595,
+    "lag_median_bars": 5.0,
+    "lag_p25": 5.0,
+    "lag_p75": 5.0,
+    "note": "lag measured in bars from previous regime sample to first sticky new label"
+  },
+  "forward_returns_by_regime": {
+    "trading_range": {
+      "n": 155,
+      "mean_signed_atr": 0.3142391990370725,
+      "hit_rate_gt0": 0.567741935483871,
+      "mean_abs_move_atr": 2.187843228028163
+    },
+    "broad_channel": {
+      "n": 60,
+      "mean_signed_atr": -0.13463689912892363,
+      "hit_rate_gt0": 0.6,
+      "mean_abs_move_atr": 3.003025496463311
+    }
+  },
+  "pct_breakouts_followed_by_channelish": 0.34285714285714286,
+  "n_breakouts_checked_for_channel": 70,
+  "case_studies": [
+    {
+      "t_range_start": "2018-11-15 00:00:00+00:00",
+      "t_range_end": "2018-12-12 00:00:00+00:00",
+      "t_breakout": "2018-12-17 00:00:00+00:00",
+      "range_high": 2813.080078125,
+      "range_low": 2582.080078125,
+      "height": 231.0,
+      "n_legs": 5,
+      "breakout_dir": "down",
+      "mm_target": 2351.080078125,
+      "mm_hit": true,
+      "nested_micro_legs": [],
+      "bar0": 227,
+      "bar1": 246,
+      "bo_i": 249
+    },
+    {
+      "t_range_start": "2018-10-17 00:00:00+00:00",
+      "t_range_end": "2018-11-15 00:00:00+00:00",
+      "t_breakout": "2018-12-17 00:00:00+00:00",
+      "range_high": 2823.719970703125,
+      "range_low": 2602.969970703125,
+      "height": 220.75,
+      "n_legs": 3,
+      "breakout_dir": "down",
+      "mm_target": 2382.219970703125,
+      "mm_hit": true,
+      "nested_micro_legs": [],
+      "bar0": 206,
+      "bar1": 227,
+      "bo_i": 249
+    },
+    {
+      "t_range_start": "2019-01-18 00:00:00+00:00",
+      "t_range_end": "2019-02-08 00:00:00+00:00",
+      "t_breakout": "2019-02-12 00:00:00+00:00",
+      "range_high": 2738.030029296875,
+      "range_low": 2612.280029296875,
+      "height": 125.75,
+      "n_legs": 3,
+      "breakout_dir": "up",
+      "mm_target": 2863.780029296875,
+      "mm_hit": true,
+      "nested_micro_legs": [],
+      "bar0": 271,
+      "bar1": 286,
+      "bo_i": 288
+    },
+    {
+      "t_range_start": "2018-02-16 00:00:00+00:00",
+      "t_range_end": "2018-04-25 00:00:00+00:00",
+      "t_breakout": "2018-07-17 00:00:00+00:00",
+      "range_high": 2801.97998046875,
+      "range_low": 2551.5,
+      "height": 250.47998046875,
+      "n_legs": 9,
+      "breakout_dir": "up",
+      "mm_target": 3052.4599609375,
+      "mm_hit": false,
+      "nested_micro_legs": [],
+      "bar0": 34,
+      "bar1": 81,
+      "bo_i": 140
+    },
+    {
+      "t_range_start": "2018-07-25 00:00:00+00:00",
+      "t_range_end": "2018-08-21 00:00:00+00:00",
+      "t_breakout": "2018-08-27 00:00:00+00:00",
+      "range_high": 2873.469970703125,
+      "range_low": 2790.719970703125,
+      "height": 82.75,
+      "n_legs": 4,
+      "breakout_dir": "up",
+      "mm_target": 2956.219970703125,
+      "mm_hit": false,
+      "nested_micro_legs": [],
+      "bar0": 146,
+      "bar1": 165,
+      "bo_i": 169
+    }
+  ]
+}

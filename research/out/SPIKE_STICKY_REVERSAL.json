@@ -1,0 +1,413 @@
+{
+  "note": "sticky reversal = strict origin-break by ~20 bars AND still beyond origin at bar+40",
+  "brooks_claim": {
+    "channel": 0.6,
+    "trading_range": 0.3,
+    "reversal": 0.1
+  },
+  "pooled": {
+    "standard": {
+      "n": 1690,
+      "sticky_distribution": {
+        "channel": 0.3792899408284024,
+        "failed_reversal_to_channel": 0.046153846153846156,
+        "reversal_sticky": 0.18284023668639054,
+        "trading_range": 0.39171597633136096
+      },
+      "brooks_mapped": {
+        "channel": 0.42544378698224855,
+        "trading_range": 0.39171597633136096,
+        "reversal": 0.18284023668639054
+      },
+      "raw_strict30": {
+        "channel": 0.3792899408284024,
+        "trading_range": 0.30355029585798815,
+        "reversal": 0.31715976331360946,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 641,
+        "trading_range": 662,
+        "reversal_sticky": 309,
+        "failed_reversal_to_channel": 78
+      }
+    },
+    "strict": {
+      "n": 907,
+      "sticky_distribution": {
+        "channel": 0.4079382579933848,
+        "failed_reversal_to_channel": 0.024255788313120176,
+        "reversal_sticky": 0.1565600882028666,
+        "trading_range": 0.41124586549062847
+      },
+      "brooks_mapped": {
+        "channel": 0.432194046306505,
+        "trading_range": 0.41124586549062847,
+        "reversal": 0.1565600882028666
+      },
+      "raw_strict30": {
+        "channel": 0.4079382579933848,
+        "trading_range": 0.33737596471885334,
+        "reversal": 0.25468577728776187,
+        "other": 0.0
+      },
+      "counts": {
+        "channel": 370,
+        "reversal_sticky": 142,
+        "trading_range": 373,
+        "failed_reversal_to_channel": 22
+      }
+    },
+    "very_strict": {
+      "n": 101,
+      "sticky_distribution": {
+        "channel": 0.46534653465346537,
+        "failed_reversal_to_channel": 0.009900990099009901,
+        "reversal_sticky": 0.0891089108910891,
+        "trading_range": 0.43564356435643564
+      },
+      "brooks_mapped": {
+        "channel": 0.4752475247524753,
+        "trading_range": 0.43564356435643564,
+        "reversal": 0.0891089108910891
+      },
+      "raw_strict30": {
+        "channel": 0.46534653465346537,
+        "trading_range": 0.38613861386138615,
+        "reversal": 0.1485148514851485,
+        "other": 0.0
+      },
+      "counts": {
+        "trading_range": 44,
+        "channel": 47,
+        "reversal_sticky": 9,
+        "failed_reversal_to_channel": 1
+      }
+    }
+  },
+  "per": [
+    {
+      "symbol": "XAUUSD",
+      "timeframe": "H1",
+      "defs": {
+        "standard": {
+          "n": 422,
+          "distribution": {
+            "channel": 0.3696682464454976,
+            "trading_range": 0.44549763033175355,
+            "reversal_sticky": 0.15876777251184834,
+            "failed_reversal_to_channel": 0.026066350710900472
+          },
+          "counts": {
+            "channel": 156,
+            "trading_range": 188,
+            "reversal_sticky": 67,
+            "failed_reversal_to_channel": 11
+          },
+          "raw30": {
+            "channel": 156,
+            "trading_range": 153,
+            "reversal": 113
+          }
+        },
+        "strict": {
+          "n": 215,
+          "distribution": {
+            "channel": 0.39069767441860465,
+            "reversal_sticky": 0.12558139534883722,
+            "trading_range": 0.48372093023255813
+          },
+          "counts": {
+            "channel": 84,
+            "reversal_sticky": 27,
+            "trading_range": 104
+          },
+          "raw30": {
+            "channel": 84,
+            "reversal": 45,
+            "trading_range": 86
+          }
+        },
+        "very_strict": {
+          "n": 17,
+          "distribution": {
+            "trading_range": 0.47058823529411764,
+            "channel": 0.47058823529411764,
+            "reversal_sticky": 0.058823529411764705
+          },
+          "counts": {
+            "trading_range": 8,
+            "channel": 8,
+            "reversal_sticky": 1
+          },
+          "raw30": {
+            "trading_range": 7,
+            "channel": 8,
+            "reversal": 2
+          }
+        }
+      }
+    },
+    {
+      "symbol": "XAUUSD",
+      "timeframe": "M15",
+      "defs": {
+        "standard": {
+          "n": 537,
+          "distribution": {
+            "trading_range": 0.3687150837988827,
+            "reversal_sticky": 0.19180633147113593,
+            "channel": 0.38361266294227186,
+            "failed_reversal_to_channel": 0.055865921787709494
+          },
+          "counts": {
+            "trading_range": 198,
+            "reversal_sticky": 103,
+            "channel": 206,
+            "failed_reversal_to_channel": 30
+          },
+          "raw30": {
+            "trading_range": 153,
+            "reversal": 178,
+            "channel": 206
+          }
+        },
+        "strict": {
+          "n": 301,
+          "distribution": {
+            "reversal_sticky": 0.15946843853820597,
+            "channel": 0.4119601328903654,
+            "trading_range": 0.3853820598006645,
+            "failed_reversal_to_channel": 0.04318936877076412
+          },
+          "counts": {
+            "reversal_sticky": 48,
+            "channel": 124,
+            "trading_range": 116,
+            "failed_reversal_to_channel": 13
+          },
+          "raw30": {
+            "reversal": 78,
+            "channel": 124,
+            "trading_range": 99
+          }
+        },
+        "very_strict": {
+          "n": 30,
+          "distribution": {
+            "failed_reversal_to_channel": 0.03333333333333333,
+            "channel": 0.43333333333333335,
+            "trading_range": 0.36666666666666664,
+            "reversal_sticky": 0.16666666666666666
+          },
+          "counts": {
+            "failed_reversal_to_channel": 1,
+            "channel": 13,
+            "trading_range": 11,
+            "reversal_sticky": 5
+          },
+          "raw30": {
+            "reversal": 6,
+            "channel": 13,
+            "trading_range": 11
+          }
+        }
+      }
+    },
+    {
+      "symbol": "XAUUSD",
+      "timeframe": "D1",
+      "defs": {
+        "standard": {
+          "n": 53,
+          "distribution": {
+            "trading_range": 0.2641509433962264,
+            "channel": 0.3584905660377358,
+            "failed_reversal_to_channel": 0.09433962264150944,
+            "reversal_sticky": 0.2830188679245283
+          },
+          "counts": {
+            "trading_range": 14,
+            "channel": 19,
+            "failed_reversal_to_channel": 5,
+            "reversal_sticky": 15
+          },
+          "raw30": {
+            "trading_range": 7,
+            "channel": 19,
+            "reversal": 27
+          }
+        },
+        "strict": {
+          "n": 27,
+          "distribution": {
+            "channel": 0.37037037037037035,
+            "trading_range": 0.2222222222222222,
+            "failed_reversal_to_channel": 0.1111111111111111,
+            "reversal_sticky": 0.2962962962962963
+          },
+          "counts": {
+            "channel": 10,
+            "trading_range": 6,
+            "failed_reversal_to_channel": 3,
+            "reversal_sticky": 8
+          },
+          "raw30": {
+            "channel": 10,
+            "trading_range": 4,
+            "reversal": 13
+          }
+        },
+        "very_strict": {
+          "n": 2,
+          "distribution": {
+            "trading_range": 0.5,
+            "channel": 0.5
+          },
+          "counts": {
+            "trading_range": 1,
+            "channel": 1
+          },
+          "raw30": {
+            "trading_range": 1,
+            "channel": 1
+          }
+        }
+      }
+    },
+    {
+      "symbol": "US100",
+      "timeframe": "H1",
+      "defs": {
+        "standard": {
+          "n": 331,
+          "distribution": {
+            "trading_range": 0.39274924471299094,
+            "channel": 0.3564954682779456,
+            "failed_reversal_to_channel": 0.06948640483383686,
+            "reversal_sticky": 0.18126888217522658
+          },
+          "counts": {
+            "trading_range": 130,
+            "channel": 118,
+            "failed_reversal_to_channel": 23,
+            "reversal_sticky": 60
+          },
+          "raw30": {
+            "trading_range": 102,
+            "channel": 118,
+            "reversal": 111
+          }
+        },
+        "strict": {
+          "n": 182,
+          "distribution": {
+            "trading_range": 0.46153846153846156,
+            "channel": 0.3516483516483517,
+            "reversal_sticky": 0.16483516483516483,
+            "failed_reversal_to_channel": 0.02197802197802198
+          },
+          "counts": {
+            "trading_range": 84,
+            "channel": 64,
+            "reversal_sticky": 30,
+            "failed_reversal_to_channel": 4
+          },
+          "raw30": {
+            "trading_range": 68,
+            "channel": 64,
+            "reversal": 50
+          }
+        },
+        "very_strict": {
+          "n": 25,
+          "distribution": {
+            "channel": 0.4,
+            "trading_range": 0.56,
+            "reversal_sticky": 0.04
+          },
+          "counts": {
+            "channel": 10,
+            "trading_range": 14,
+            "reversal_sticky": 1
+          },
+          "raw30": {
+            "channel": 10,
+            "trading_range": 13,
+            "reversal": 2
+          }
+        }
+      }
+    },
+    {
+      "symbol": "US500",
+      "timeframe": "H1",
+      "defs": {
+        "standard": {
+          "n": 347,
+          "distribution": {
+            "channel": 0.4092219020172911,
+            "trading_range": 0.3804034582132565,
+            "reversal_sticky": 0.1844380403458213,
+            "failed_reversal_to_channel": 0.025936599423631124
+          },
+          "counts": {
+            "channel": 142,
+            "trading_range": 132,
+            "reversal_sticky": 64,
+            "failed_reversal_to_channel": 9
+          },
+          "raw30": {
+            "channel": 142,
+            "trading_range": 98,
+            "reversal": 107
+          }
+        },
+        "strict": {
+          "n": 182,
+          "distribution": {
+            "channel": 0.4835164835164835,
+            "trading_range": 0.34615384615384615,
+            "reversal_sticky": 0.15934065934065933,
+            "failed_reversal_to_channel": 0.01098901098901099
+          },
+          "counts": {
+            "channel": 88,
+            "trading_range": 63,
+            "reversal_sticky": 29,
+            "failed_reversal_to_channel": 2
+          },
+          "raw30": {
+            "channel": 88,
+            "trading_range": 49,
+            "reversal": 45
+          }
+        },
+        "very_strict": {
+          "n": 27,
+          "distribution": {
+            "trading_range": 0.37037037037037035,
+            "channel": 0.5555555555555556,
+            "reversal_sticky": 0.07407407407407407
+          },
+          "counts": {
+            "trading_range": 10,
+            "channel": 15,
+            "reversal_sticky": 2
+          },
+          "raw30": {
+            "trading_range": 7,
+            "channel": 15,
+            "reversal": 5
+          }
+        }
+      }
+    }
+  ],
+  "interpretation": {
+    "prior_37pct": "matched loose spike + loose_55 net-against; artifactual",
+    "strict_30bar_origin_break": "still ~25-32% — many are temporary wipeouts",
+    "sticky_reversal": "closer to 'actual reversal'; compare to Brooks 10%",
+    "failed_reversal_to_channel": "Brooks teaching: most reversal attempts become flags"
+  }
+}
