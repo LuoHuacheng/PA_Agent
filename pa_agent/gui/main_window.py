@@ -398,21 +398,21 @@ class MainWindow(QMainWindow):
         _last_symbol = "000001"
         _last_tf = "15m"
         if _settings is not None:
-            _last_symbol = getattr(_settings.general, "last_symbol", "000001") or "000001"
+            _last_symbol = getattr(_settings.general, "last_symbol", "XAUUSDm") or "XAUUSDm"
             _last_tf = getattr(_settings.general, "last_timeframe", "15m") or "15m"
 
         # Data source
         from pa_agent.data.factory import DATA_SOURCE_CHOICES, normalize_data_source_kind
 
-        _last_ds = "eastmoney"
+        _last_ds = "mt5"
         if _settings is not None:
             _last_ds = normalize_data_source_kind(
-                getattr(_settings.general, "last_data_source", "eastmoney")
+                getattr(_settings.general, "last_data_source", "mt5")
             )
-        # 如果上次保存的数据源不在 UI 可选列表中, 强制回退东方财富(A股)
+        # 如果上次保存的数据源不在 UI 可选列表中, 强制回退 MT5（默认数据源）
         _ui_kinds = {k for k, _ in DATA_SOURCE_CHOICES}
         if _last_ds not in _ui_kinds:
-            _last_ds = "eastmoney"
+            _last_ds = "mt5"
         self._active_data_source_kind = _last_ds
 
         ctrl_layout.addWidget(QLabel("数据来源:"))
@@ -424,8 +424,8 @@ class MainWindow(QMainWindow):
             self._data_source_combo.setCurrentIndex(ds_index)
         self._data_source_combo.setMinimumWidth(108)
         self._data_source_combo.setToolTip(
-            "K 线数据来源：东方财富(A股)（默认，HTTP 直连）、"
-            "MT5（需终端登录）、TradingView（tvDatafeed）"
+            "K 线数据来源：MT5（默认，需终端登录）、"
+            "TradingView（tvDatafeed）、东方财富(A股)（HTTP 直连）"
         )
         self._data_source_combo.currentIndexChanged.connect(
             self._on_data_source_combo_changed

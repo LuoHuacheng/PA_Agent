@@ -62,4 +62,4 @@ def test_default_tradingview_exchange_is_auto():
 
 def test_general_settings_last_data_source_default():
     g = GeneralSettings()
-    assert g.last_data_source == "eastmoney"
+    assert g.last_data_source == "mt5"

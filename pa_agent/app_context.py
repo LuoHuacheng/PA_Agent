@@ -75,7 +75,7 @@ class AppContext:
 
         apply_kline_adjust_from_settings(settings)
         ds_kind = normalize_data_source_kind(
-            getattr(settings.general, "last_data_source", "eastmoney")
+            getattr(settings.general, "last_data_source", "mt5")
         )
         data_source = create_data_source(ds_kind)
 
