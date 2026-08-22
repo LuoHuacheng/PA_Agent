@@ -205,6 +205,8 @@ _PACKY_CLAUDE_MAX_OUTPUT_TOKENS = 128_000
 _DEEPSEEK_MAX_OUTPUT_TOKENS = 393_216
 # SenseNova API: max_tokens is model-specific (per /v1/models max_output_length).
 # glm-5.2: [1, 131072]; deepseek-v4-flash / sensenova-*-flash-lite: [1, 65536].
+# Global gateway hard cap observed on several OpenAI-compatible proxies (incl. SenseNova).
+_GLOBAL_MAX_OUTPUT_TOKENS = 384_000
 _SENSENOVA_GLM_MAX_OUTPUT_TOKENS = 131_072
 _SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 
@@ -239,9 +241,9 @@ def _adaptive_output_effort(reasoning_effort: str | None) -> str:
 
 
 # Sent to OpenAI-compatible gateways; upstream may clamp below these values.
-_PRACTICAL_UNLIMITED_MAX_TOKENS = 524288
+_PRACTICAL_UNLIMITED_MAX_TOKENS = _GLOBAL_MAX_OUTPUT_TOKENS
 # Anthropic-style thinking requires budget_tokens < max_tokens.
-_PRACTICAL_UNLIMITED_THINKING_BUDGET = 524287
+_PRACTICAL_UNLIMITED_THINKING_BUDGET = _GLOBAL_MAX_OUTPUT_TOKENS - 1
 
 
 def _effort_budget_tokens(effort: str | None, *, max_output: int) -> int:
@@ -306,17 +308,20 @@ def _provider_max_output_tokens(settings: AIProviderSettings) -> int:
     """Per-gateway completion cap (max_tokens); avoids 400 from provider limits."""
     model = (settings.model or "").lower()
     if _is_packyapi(settings.base_url) and "claude" in model:
-        return _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
-    if _is_deepseek_native(settings.base_url):
-        return _DEEPSEEK_MAX_OUTPUT_TOKENS
-    if _is_sensenova(settings.base_url):
+        cap = _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
+    elif _is_deepseek_native(settings.base_url):
+        cap = _DEEPSEEK_MAX_OUTPUT_TOKENS
+    elif _is_sensenova(settings.base_url):
         _smodel = (settings.model or "").lower()
         if "glm" in _smodel:
-            return _SENSENOVA_GLM_MAX_OUTPUT_TOKENS
-        return _SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS
-    if _is_mimo(settings):
-        return mimo_max_output_tokens(settings.model)
-    return _PRACTICAL_UNLIMITED_MAX_TOKENS
+            cap = _SENSENOVA_GLM_MAX_OUTPUT_TOKENS
+        else:
+            cap = _SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS
+    elif _is_mimo(settings):
+        cap = mimo_max_output_tokens(settings.model)
+    else:
+        cap = _PRACTICAL_UNLIMITED_MAX_TOKENS
+    return min(cap, _GLOBAL_MAX_OUTPUT_TOKENS)
 
 
 def _completion_max_tokens(
