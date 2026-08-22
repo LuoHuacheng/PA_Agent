@@ -25,23 +25,6 @@ PRESET_SYMBOLS: tuple[str, ...] = (
 )
 
 
-def normalize_ashare_symbol(symbol: str) -> str:
-    """Normalize user input to 6-digit code or index id (sh000300)."""
-    raw = (symbol or "").strip()
-    if not raw:
-        return ""
-    m = _INDEX_PREFIX_RE.match(raw)
-    if m:
-        prefix, digits = m.group(1).lower(), m.group(2)
-        if _is_index_digits(digits):
-            return f"{prefix}{digits}"
-        return digits
-    digits = re.sub(r"\D", "", raw)
-    if len(digits) >= 6:
-        return digits[-6:]
-    return digits
-
-
 def _is_index_digits(digits: str) -> bool:
     return digits in {
         "000300",
@@ -52,6 +35,28 @@ def _is_index_digits(digits: str) -> bool:
         "399006",
         "399300",
     }
+
+
+def _keep_index_prefix(prefix: str, digits: str) -> bool:
+    """Index ids that need sh/sz prefix — bare 6-digit form is a stock (e.g. 000001 平安银行)."""
+    return prefix == "sh" and digits == "000001"
+
+
+def normalize_ashare_symbol(symbol: str) -> str:
+    """Normalize user input to 6-digit code or index id (sh000300)."""
+    raw = (symbol or "").strip()
+    if not raw:
+        return ""
+    m = _INDEX_PREFIX_RE.match(raw)
+    if m:
+        prefix, digits = m.group(1).lower(), m.group(2)
+        if _is_index_digits(digits) or _keep_index_prefix(prefix, digits):
+            return f"{prefix}{digits}"
+        return digits
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) >= 6:
+        return digits[-6:]
+    return digits
 
 
 def is_index_symbol(symbol: str) -> bool:
