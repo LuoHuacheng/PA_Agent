@@ -188,7 +188,7 @@ class SettingsDialog(QDialog):
         general_form.addRow("重试行为:", self._cancel_keep_on_retry_check)
 
         self._context_warning_spin = QSpinBox()
-        self._context_warning_spin.setRange(1, 100)
+        self._context_warning_spin.setRange(1, 99_999_999)
         self._context_warning_spin.setSuffix(" %")
         general_form.addRow("上下文警告阈值:", self._context_warning_spin)
 

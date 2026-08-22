@@ -61,7 +61,7 @@ class GeneralSettings(BaseModel):
 
     analysis_bar_count: int = Field(default=100, ge=2, le=5000)
     refresh_interval_ms: int = 1000
-    context_warning_threshold_pct: float = 80.0
+    context_warning_threshold_pct: float = 99_999_999.0
     last_data_source: DataSourceKind = "mt5"
     #: A-share K-line adjust for East Money / Baostock (qfq=前复权)
     kline_adjust: Literal["qfq", "hfq", "none"] = "qfq"
