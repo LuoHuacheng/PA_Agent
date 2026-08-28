@@ -346,6 +346,19 @@ def _resolve_thinking_params(
     _effort = reasoning_effort if reasoning_effort is not None else settings.reasoning_effort
     model = settings.model or ""
 
+    if _is_sensenova(settings.base_url):
+        # SenseNova (token.sensenova.cn) 是商汤日日新网关，位于 OpenAI 兼容
+        # 代理，支持 deepseek-v4-flash 等模型。其 thinking.type 只接受
+        # "enabled" / "disabled" / "auto"，不接受 DeepSeek 原生的 "adaptive"。
+        # 注意：检测 base_url 优先于 _is_deepseek_model，因为用户通过
+        # SenseNova 代理调用 deepseek 模型时，参数格式随网关而非 DeepSeek 原生。
+        if _thinking:
+            extra_body = {"thinking": {"type": "enabled"}}
+            return extra_body, _effort or "medium"
+        else:
+            extra_body = {"thinking": {"type": "disabled"}}
+            return extra_body, None
+
     if _is_deepseek_native(settings.base_url) or _is_deepseek_model(model):
         # DeepSeek v4+ requires thinking.type=adaptive + output_config.effort;
         # the old "enabled"/"disabled" values are no longer accepted.

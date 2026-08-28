@@ -92,6 +92,31 @@ def test_completion_max_tokens_deepseek_cap():
     assert _completion_max_tokens(settings, extra_body={}, effort="max") == 384_000
 
 
+def test_sensenova_thinking_uses_enabled_disabled_not_adaptive():
+    """SenseNova (token.sensenova.cn) 网关只接受 thinking.type 的
+    enabled/disabled/auto，不接受 DeepSeek 原生的 adaptive。
+    即使用户模型名是 deepseek-v4-flash，参数格式也随 SenseNova 网关。"""
+    from pa_agent.ai.deepseek_client import _resolve_thinking_params
+
+    settings = _make_settings()
+    settings.base_url = "https://token.sensenova.cn/api/llm/v1"
+    settings.model = "deepseek-v4-flash"
+    settings.thinking = True
+    settings.reasoning_effort = "high"
+
+    # 开启思考 → enabled
+    extra, effort = _resolve_thinking_params(settings, thinking=True, reasoning_effort="high")
+    assert extra["thinking"]["type"] == "enabled"
+    assert "adaptive" not in str(extra)
+    assert "output_config" not in extra
+    assert effort == "high"
+
+    # 关闭思考 → disabled
+    extra2, effort2 = _resolve_thinking_params(settings, thinking=False, reasoning_effort="high")
+    assert extra2["thinking"]["type"] == "disabled"
+    assert effort2 is None
+
+
 def test_completion_max_tokens_unknown_gateway_global_cap():
     settings = _make_settings()
     settings.base_url = "https://api.example-proxy.com/v1"
