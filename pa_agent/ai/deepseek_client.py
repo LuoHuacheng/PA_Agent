@@ -15,6 +15,7 @@ from pa_agent.util.mask_secret import mask_secret
 from pa_agent.ai.mimo_compat import (
     ReasoningCache,
     is_mimo_provider,
+    mimo_max_output_tokens,
     patch_messages_for_mimo,
     resolve_mimo_thinking_extra_body,
     response_message_dict,
@@ -81,11 +82,11 @@ def _is_deepseek_native(base_url: str) -> bool:
 
 
 def _is_deepseek_model(model: str) -> bool:
-    """True for DeepSeek model ids; excludes QClaw ``openclaw`` and WorkBuddy ``openclaw_wb`` Agent aliases."""
+    """True for DeepSeek model ids; excludes QClaw/WorkBuddy/Cursor/TRAE/Qoder Agent aliases."""
     m = (model or "").lower()
-    if m in ("openclaw", "openclaw_wb", "openclaw_cs"):
+    if m in ("openclaw", "openclaw_wb", "openclaw_cs", "openclaw_twc", "openclaw_qc"):
         return False
-    if m.startswith("openclaw/") or m.startswith("openclaw_wb/") or m.startswith("openclaw_cs/"):
+    if m.startswith("openclaw/") or m.startswith("openclaw_wb/") or m.startswith("openclaw_cs/") or m.startswith("openclaw_twc/") or m.startswith("openclaw_qc/"):
         return False
     return "deepseek" in m
 
@@ -116,13 +117,15 @@ def _is_workbuddy_agent(settings: AIProviderSettings) -> bool:
 
 
 def _is_openclaw_agent_model(model: str) -> bool:
-    """True for QClaw/WorkBuddy/Cursor OpenClaw Agent model aliases."""
+    """True for QClaw/WorkBuddy/Cursor/TRAE/Qoder OpenClaw Agent model aliases."""
     m = (model or "").lower()
     return (
-        m in ("openclaw", "openclaw_wb", "openclaw_cs")
+        m in ("openclaw", "openclaw_wb", "openclaw_cs", "openclaw_twc", "openclaw_qc")
         or m.startswith("openclaw/")
         or m.startswith("openclaw_wb/")
         or m.startswith("openclaw_cs/")
+        or m.startswith("openclaw_twc/")
+        or m.startswith("openclaw_qc/")
     )
 
 
@@ -195,10 +198,25 @@ def _is_minimax(base_url: str) -> bool:
     return "minimax.io" in url or "minimax.com" in url
 
 
-# Unified completion cap. All providers we use (DeepSeek native, packy, cun.ai,
-# one-api) accept max_tokens up to 393216; we do not connect sub-200K models.
-# Keeping a single value avoids per-gateway 400s and branch complexity.
-_MAX_OUTPUT_TOKENS = 200_000
+def _is_sensenova(base_url: str) -> bool:
+    """SenseNova (token.sensenova.cn) OpenAI-compatible gateway.
+
+    Provides deepseek-v4-flash 等 DeepSeek 模型的免费代理；其 max_tokens 上限为
+    384000（低于默认 _PRACTICAL_UNLIMITED_MAX_TOKENS），需单独限流以避免 400。
+    """
+    return "sensenova.cn" in (base_url or "").lower()
+
+
+# Packy claude-officially returns 400 if max_tokens exceeds model output cap.
+_PACKY_CLAUDE_MAX_OUTPUT_TOKENS = 128_000
+# DeepSeek API: max_tokens must be in [1, 393216].
+_DEEPSEEK_MAX_OUTPUT_TOKENS = 393_216
+# SenseNova API: max_tokens is model-specific (per /v1/models max_output_length).
+# glm-5.2: [1, 131072]; deepseek-v4-flash / sensenova-*-flash-lite: [1, 65536].
+# Global gateway hard cap observed on several OpenAI-compatible proxies (incl. SenseNova).
+_GLOBAL_MAX_OUTPUT_TOKENS = 384_000
+_SENSENOVA_GLM_MAX_OUTPUT_TOKENS = 131_072
+_SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 
 
 def _model_uses_claude_adaptive(model: str) -> bool:
@@ -230,8 +248,10 @@ def _adaptive_output_effort(reasoning_effort: str | None) -> str:
     return _EFFORT_TO_ADAPTIVE_OUTPUT.get(key, "medium")
 
 
+# Sent to OpenAI-compatible gateways; upstream may clamp below these values.
+_PRACTICAL_UNLIMITED_MAX_TOKENS = _GLOBAL_MAX_OUTPUT_TOKENS
 # Anthropic-style thinking requires budget_tokens < max_tokens.
-_PRACTICAL_UNLIMITED_THINKING_BUDGET = 524287
+_PRACTICAL_UNLIMITED_THINKING_BUDGET = _GLOBAL_MAX_OUTPUT_TOKENS - 1
 
 # Some gateways (e.g. www.cun.ai) run Cloudflare WAF rules that 403 the SDK's
 # default `User-Agent: OpenAI/Python …` ("Your request was blocked."). Send a
@@ -298,9 +318,23 @@ def _prepare_api_messages(
 
 
 def _provider_max_output_tokens(settings: AIProviderSettings) -> int:
-    """Unified completion cap; we only connect models with >= 200K output."""
-    del settings
-    return _MAX_OUTPUT_TOKENS
+    """Per-gateway completion cap (max_tokens); avoids 400 from provider limits."""
+    model = (settings.model or "").lower()
+    if _is_packyapi(settings.base_url) and "claude" in model:
+        cap = _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
+    elif _is_deepseek_native(settings.base_url):
+        cap = _DEEPSEEK_MAX_OUTPUT_TOKENS
+    elif _is_sensenova(settings.base_url):
+        _smodel = (settings.model or "").lower()
+        if "glm" in _smodel:
+            cap = _SENSENOVA_GLM_MAX_OUTPUT_TOKENS
+        else:
+            cap = _SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS
+    elif _is_mimo(settings):
+        cap = mimo_max_output_tokens(settings.model)
+    else:
+        cap = _PRACTICAL_UNLIMITED_MAX_TOKENS
+    return min(cap, _GLOBAL_MAX_OUTPUT_TOKENS)
 
 
 def _completion_max_tokens(
@@ -324,6 +358,19 @@ def _resolve_thinking_params(
     _thinking = thinking if thinking is not None else settings.thinking
     _effort = reasoning_effort if reasoning_effort is not None else settings.reasoning_effort
     model = settings.model or ""
+
+    if _is_sensenova(settings.base_url):
+        # SenseNova (token.sensenova.cn) 是商汤日日新网关，位于 OpenAI 兼容
+        # 代理，支持 deepseek-v4-flash 等模型。其 thinking.type 只接受
+        # "enabled" / "disabled" / "auto"，不接受 DeepSeek 原生的 "adaptive"。
+        # 注意：检测 base_url 优先于 _is_deepseek_model，因为用户通过
+        # SenseNova 代理调用 deepseek 模型时，参数格式随网关而非 DeepSeek 原生。
+        if _thinking:
+            extra_body = {"thinking": {"type": "enabled"}}
+            return extra_body, _effort or "medium"
+        else:
+            extra_body = {"thinking": {"type": "disabled"}}
+            return extra_body, None
 
     if _is_deepseek_native(settings.base_url) or _is_deepseek_model(model):
         # DeepSeek v4+ requires thinking.type=adaptive + output_config.effort;
@@ -611,10 +658,22 @@ class DeepSeekClient:
             raise CancelledError("Request cancelled before API call")
 
         from pa_agent.ai.cursor_connector import is_openclaw_cs_model
+        from pa_agent.ai.qoder_connector import is_openclaw_qc_model
+        from pa_agent.ai.trae_connector import is_openclaw_twc_model
 
         if is_openclaw_cs_model(self._settings.model):
             raise RuntimeError(
                 "模型 openclaw_cs 必须使用 Cursor SDK 路由，但当前仍在使用 DeepSeekClient。"
+                "请在「AI 模型」设置中重新保存，或重启应用后再分析。"
+            )
+        if is_openclaw_twc_model(self._settings.model):
+            raise RuntimeError(
+                "模型 openclaw_twc 必须使用 TRAE Work CN 路由，但当前仍在使用 DeepSeekClient。"
+                "请在「AI 模型」设置中重新保存，或重启应用后再分析。"
+            )
+        if is_openclaw_qc_model(self._settings.model):
+            raise RuntimeError(
+                "模型 openclaw_qc 必须使用 Qoder CN 路由，但当前仍在使用 DeepSeekClient。"
                 "请在「AI 模型」设置中重新保存，或重启应用后再分析。"
             )
 

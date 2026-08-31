@@ -10,7 +10,7 @@
   "general": {
     "analysis_bar_count": 100,
     "refresh_interval_ms": 1000,
-    "context_warning_threshold_pct": 80.0,
+    "context_warning_threshold_pct": 99999999.0,
     "last_data_source": "mt5",
     "last_tradingview_exchange": "OANDA",
     "last_symbol": "XAUUSDm",

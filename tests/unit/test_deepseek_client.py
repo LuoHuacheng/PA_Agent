@@ -64,7 +64,7 @@ def test_chat_does_not_send_forbidden_params():
 
 
 def test_chat_extra_body_thinking_enabled():
-    """extra_body must contain thinking.type=enabled and reasoning_effort."""
+    """DeepSeek v4+ uses thinking.type=adaptive + output_config.effort."""
     settings = _make_settings()
     settings.base_url = "https://api.deepseek.com"
     settings.model = "deepseek-v4-pro"
@@ -81,7 +81,8 @@ def test_chat_extra_body_thinking_enabled():
 
     call_kwargs = mock_openai.return_value.chat.completions.create.call_args
     kwargs = call_kwargs.kwargs
-    assert kwargs["extra_body"]["thinking"]["type"] == "enabled"
+    assert kwargs["extra_body"]["thinking"]["type"] == "adaptive"
+    assert kwargs["extra_body"]["output_config"]["effort"] == "max"
     assert kwargs["reasoning_effort"] == "max"
 
 
@@ -89,22 +90,55 @@ def test_completion_max_tokens_deepseek_cap():
     settings = _make_settings()
     settings.base_url = "https://api.deepseek.com"
     settings.model = "deepseek-v4-pro"
-    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 200_000
+    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 384_000
+
+
+def test_sensenova_thinking_uses_enabled_disabled_not_adaptive():
+    """SenseNova (token.sensenova.cn) 网关只接受 thinking.type 的
+    enabled/disabled/auto，不接受 DeepSeek 原生的 adaptive。
+    即使用户模型名是 deepseek-v4-flash，参数格式也随 SenseNova 网关。"""
+    from pa_agent.ai.deepseek_client import _resolve_thinking_params
+
+    settings = _make_settings()
+    settings.base_url = "https://token.sensenova.cn/api/llm/v1"
+    settings.model = "deepseek-v4-flash"
+    settings.thinking = True
+    settings.reasoning_effort = "high"
+
+    # 开启思考 → enabled
+    extra, effort = _resolve_thinking_params(settings, thinking=True, reasoning_effort="high")
+    assert extra["thinking"]["type"] == "enabled"
+    assert "adaptive" not in str(extra)
+    assert "output_config" not in extra
+    assert effort == "high"
+
+    # 关闭思考 → disabled
+    extra2, effort2 = _resolve_thinking_params(settings, thinking=False, reasoning_effort="high")
+    assert extra2["thinking"]["type"] == "disabled"
+    assert effort2 is None
+
+
+def test_completion_max_tokens_unknown_gateway_global_cap():
+    settings = _make_settings()
+    settings.base_url = "https://api.example-proxy.com/v1"
+    settings.model = "some-model"
+    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 384_000
 
 
 def test_completion_max_tokens_packy_claude_cap():
     settings = _make_settings()
     settings.base_url = "https://www.packyapi.com/v1"
+    settings.model = "claude-sonnet-4-6"
     extra_body = {"thinking": {"type": "enabled", "budget_tokens": 127_999}}
-    assert _completion_max_tokens(settings, extra_body=extra_body, effort="max") == 200_000
+    assert _completion_max_tokens(settings, extra_body=extra_body, effort="max") == 128_000
 
 
 def test_completion_max_tokens_cunai_deepseek_cap():
-    """cun.ai one-api gateway uses the unified 200K cap (was 393216/524288)."""
+    """cun.ai one-api gateway falls back to the 384K global cap."""
     settings = _make_settings()
     settings.base_url = "https://www.cun.ai/v1"
     settings.model = "deepseek-v4-flash"
-    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 200_000
+    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 384_000
 
 
 def test_packy_hoists_system_message_to_extra_body():
@@ -132,7 +166,7 @@ def test_packy_claude_thinking_uses_budget_not_reasoning_effort():
     extra, effort = _resolve_thinking_params(settings, thinking=True, reasoning_effort="max")
     assert effort is None
     assert extra["thinking"]["type"] == "enabled"
-    assert extra["thinking"]["budget_tokens"] == 199_999
+    assert extra["thinking"]["budget_tokens"] == 127_999
 
 
 def test_chat_sends_max_tokens_when_thinking():
@@ -151,7 +185,7 @@ def test_chat_sends_max_tokens_when_thinking():
         client.chat([{"role": "user", "content": "hi"}])
 
     kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
-    assert kwargs["max_tokens"] == 200_000
+    assert kwargs["max_tokens"] == 384_000
 
 
 def test_chat_kkai_sends_thinking_object_not_reasoning_effort():
@@ -170,7 +204,7 @@ def test_chat_kkai_sends_thinking_object_not_reasoning_effort():
         client.chat([{"role": "user", "content": "hi"}])
 
     kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
-    assert kwargs["extra_body"]["thinking"] == {"type": "enabled", "budget_tokens": 999_998}
+    assert kwargs["extra_body"]["thinking"] == {"type": "enabled", "budget_tokens": 383_999}
     assert "reasoning_effort" not in kwargs
 
 
@@ -268,7 +302,7 @@ def test_stream_kkai_passes_thinking_extra_body():
         )
 
     kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
-    assert kwargs["extra_body"]["thinking"]["budget_tokens"] == 999_998
+    assert kwargs["extra_body"]["thinking"]["budget_tokens"] == 383_999
     assert "reasoning_effort" not in kwargs
     assert reply.reasoning_content == "think"
 
@@ -390,7 +424,7 @@ def test_mimo_chat_sends_enable_thinking_extra_body() -> None:
 
     kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
     assert kwargs["extra_body"]["chat_template_kwargs"] == {"enable_thinking": True}
-    assert kwargs["max_tokens"] == 200_000
+    assert kwargs["max_tokens"] == 65_536
 
 
 def test_mimo_chat_patches_tool_call_messages_before_send() -> None:

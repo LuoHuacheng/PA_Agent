@@ -141,7 +141,7 @@ class GeneralSettingsDialog(QDialog):
         ui_form.addRow("图表:", self._auto_resume_chart_check)
 
         self._context_warning_spin = QSpinBox()
-        self._context_warning_spin.setRange(1, 100)
+        self._context_warning_spin.setRange(1, 99_999_999)
         self._context_warning_spin.setSuffix(" %")
         ui_form.addRow("上下文警告阈值:", self._context_warning_spin)
 
