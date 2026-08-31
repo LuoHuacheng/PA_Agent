@@ -1,4 +1,4 @@
-﻿"""Main application window for PA Agent."""
+"""Main application window for PA Agent."""
 from __future__ import annotations
 
 import logging

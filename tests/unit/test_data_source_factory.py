@@ -39,8 +39,15 @@ def test_normalize_data_source_kind_hidden_sources():
     assert normalize_data_source_kind("yfinance") == "yfinance"
 
 
-def test_eastmoney_not_in_ui_choices():
+def test_mt5_in_ui_choices():
+    """MT5 仅 Windows 时在 UI 可选列表中且排首位；非 Windows 时不可选。"""
     ui_kinds = {k for k, _ in DATA_SOURCE_CHOICES}
+    if factory.sys.platform == "win32":
+        assert "mt5" in ui_kinds
+        assert DATA_SOURCE_CHOICES[0][0] == "mt5"
+    else:
+        assert "mt5" not in ui_kinds
+    # eastmoney / AkShare 仍是隐藏源
     assert "eastmoney" not in ui_kinds
     assert "akshare" not in ui_kinds
 

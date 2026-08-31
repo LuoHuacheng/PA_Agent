@@ -106,7 +106,7 @@ class GeneralSettings(BaseModel):
     @classmethod
     def _coerce_legacy_data_source(cls, v: object) -> object:
         if v == "yfinance":
-            return "mt5"
+            return "eastmoney"
         if v in ("adata", "a_share"):
             return "akshare"
         if v == "eastmoney":
