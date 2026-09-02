@@ -260,7 +260,7 @@ def _shutdown_monitor_process(
 def run_monitor() -> int:
     from pa_agent.app_context import AppContext
     from pa_agent.config.paths import MONITORING_PID_PATH, MONITORING_STATE_PATH
-    from pa_agent.monitoring.service import MultiSymbolMonitor
+    from pa_agent.monitoring.service import MultiSymbolMonitor, _default_validate_symbols
     from pa_agent.util.crash_diagnostics import enable_crash_diagnostics, log_startup_diagnostics
     from pa_agent.util.logging import configure_logging
 
@@ -273,8 +273,8 @@ def run_monitor() -> int:
         logger.error("monitoring.enabled=false。请在 config/settings.json 中开启后重试。")
         return 2
     enabled_targets = [target for target in settings.monitoring.targets if target.enabled]
-    if not enabled_targets:
-        logger.error("monitoring.targets 中没有启用的品种。")
+    if not enabled_targets and not settings.monitoring.auto_discover.enabled:
+        logger.error("monitoring.targets 中没有启用的品种，且 auto_discover 未开启。")
         return 2
     if not _acquire_monitor_pid(MONITORING_PID_PATH):
         logger.error("监控已在运行，拒绝启动第二个实例。")  # noqa: RUF001
@@ -293,6 +293,9 @@ def run_monitor() -> int:
             ctx=ctx,
             settings=settings,
             state_path=MONITORING_STATE_PATH,
+            validate_symbols=(
+                lambda symbols: _default_validate_symbols(symbols, settings)
+            ),
             on_result=lambda frame, decision: logger.info(format_decision_result(frame, decision)),
             on_status=lambda _message: None,
         )
