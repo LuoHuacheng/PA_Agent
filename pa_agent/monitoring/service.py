@@ -548,6 +548,7 @@ class MultiSymbolMonitor:
 
         from pa_agent.notify.feishu_notifier import send_order_signal as send_feishu
         from pa_agent.notify.pushplus_notifier import send_order_signal as send_pushplus
+        from pa_agent.notify.telegram_notifier import send_order_signal as send_telegram
 
         feishu_sent = send_feishu(
             decision_inner=inner,
@@ -563,12 +564,20 @@ class MultiSymbolMonitor:
             timeframe=frame.timeframe,
             settings=self._settings,
         )
+        telegram_sent = send_telegram(
+            decision_inner=inner,
+            stage2_full=decision,
+            symbol=frame.symbol,
+            timeframe=frame.timeframe,
+            settings=self._settings,
+        )
         logger.info(
-            "Monitor notification outcomes for %s %s: feishu=%s pushplus=%s",
+            "Monitor notification outcomes for %s %s: feishu=%s pushplus=%s telegram=%s",
             frame.symbol,
             frame.timeframe,
             feishu_sent,
             pushplus_sent,
+            telegram_sent,
         )
         return decision
 
