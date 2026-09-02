@@ -54,6 +54,52 @@ def next_poll_at(timeframe: str, *, now: float, lead_seconds: int) -> float:
     return float(close_at + lead_seconds)
 
 
+def _default_discover(cfg: Any) -> list[str]:
+    """Production auto-discovery: top USDⓈ-M contracts from the live 24h feed."""
+    from pa_agent.monitoring.discovery import fetch_usdm_top_n
+
+    return fetch_usdm_top_n(
+        rank_by=cfg.rank_by,
+        top_n=cfg.top_n,
+        stablecoin_only=cfg.stablecoin_only,
+    )
+
+
+def _default_validate_symbols(symbols: list[str], settings: Settings) -> list[str]:
+    """Keep symbols that return at least one K-line bar from the data source.
+
+    Uses the configured data source kind and a short snapshot; any symbol that
+    raises or yields no bars is dropped (e.g. new contracts without history on
+    TradingView). Returns the subset of *symbols* that is actually fetchable.
+    """
+    if not symbols:
+        return []
+    from pa_agent.data.factory import create_data_source
+
+    source = create_data_source(settings.general.last_data_source)
+    valid: list[str] = []
+    try:
+        source.connect()
+        if settings.general.last_data_source == "tradingview":
+            set_exchange = getattr(source, "set_exchange", None)
+            if callable(set_exchange):
+                set_exchange(settings.general.last_tradingview_exchange)
+        for symbol in symbols:
+            try:
+                source.subscribe(symbol, settings.monitoring.auto_discover.timeframe)
+                bars = source.latest_snapshot(5)
+                if bars:
+                    valid.append(symbol)
+            except Exception:  # noqa: BLE001 - per-symbol validation failures
+                logger.debug("Auto-discovery validation failed for %s", symbol, exc_info=True)
+    finally:
+        try:
+            source.disconnect()
+        except Exception:
+            logger.debug("Auto-discovery validation source disconnect failed", exc_info=True)
+    return valid
+
+
 def _has_order_opportunity(decision: dict[str, Any], confidence_threshold: int) -> bool:
     """Return whether a decision is eligible for alert-only notification."""
     if str(decision.get("order_type") or "") not in _ORDER_OPPORTUNITY_TYPES:
@@ -92,6 +138,8 @@ class MultiSymbolMonitor:
         settings: Settings,
         state_path: Path,
         source_factory: Callable[[str], DataSource] | None = None,
+        discover: Callable[[], list[str]] | None = None,
+        validate_symbols: Callable[[list[str]], list[str]] | None = None,
         clock: Callable[[], float] = time.time,
         analyze: Callable[..., dict | None] | None = None,
         on_result: Callable[[Any, dict | None], None] | None = None,
@@ -102,6 +150,8 @@ class MultiSymbolMonitor:
         self._cfg = settings.monitoring
         self._state_path = state_path
         self._source_factory = source_factory
+        self._discover = discover
+        self._validate_symbols = validate_symbols
         self._clock = clock
         self._analyze = analyze or self._analyze_and_notify
         self._on_result = on_result
@@ -112,12 +162,90 @@ class MultiSymbolMonitor:
         self._executor: ThreadPoolExecutor | None = None
         self._futures: set[Future[Any]] = set()
         self._lock = threading.Lock()
+        self._next_refresh_at: float | None = None
         self._load_state()
 
         for target in self._cfg.targets:
             if target.enabled:
+                self._add_target_state(target)
+
+    def _add_target_state(self, target: MonitorTarget) -> None:
+        key = (target.symbol, target.timeframe)
+        self._states[key] = _TargetState(
+            target=target,
+            next_poll_at=next_poll_at(
+                target.timeframe,
+                now=self._clock(),
+                lead_seconds=self._cfg.poll_lead_seconds,
+            ),
+            last_processed_closed_ts=self._persisted_closed_ts.get(self._key_text(key)),
+        )
+
+    def _discover_targets(self) -> list[MonitorTarget]:
+        """Run auto-discovery, falling back to the static list on failure."""
+        if not self._cfg.auto_discover.enabled:
+            return []
+        try:
+            discover = self._discover or (lambda: _default_discover(self._cfg.auto_discover))
+            symbols = discover()
+            if not symbols:
+                self._report(
+                    "自动发现未返回品种，保留静态 targets", level=logging.WARNING
+                )
+                return []
+            self._report(
+                f"自动发现 {len(symbols)} 个品种 (rank_by="
+                f"{self._cfg.auto_discover.rank_by}, top_n={len(symbols)})"
+            )
+            tf = self._cfg.auto_discover.timeframe
+            return [
+                MonitorTarget(symbol=symbol, timeframe=tf, enabled=True)
+                for symbol in symbols
+            ]
+        except Exception as exc:  # noqa: BLE001 - fall back to static targets
+            self._report(
+                f"自动发现失败（{exc}），保留静态 targets", level=logging.WARNING
+            )
+            return []
+
+    def _apply_discovered(self) -> None:
+        """Replace monitored states with auto-discovered ones; drop vanished."""
+        targets = self._discover_targets()
+        if not targets:
+            return
+        symbols = [target.symbol for target in targets]
+        # 剔除 TradingView 无 K 线的品种（如新上架合约无历史数据）。
+        if self._validate_symbols is not None:
+            valid = self._validate_symbols(symbols)
+            dropped = [s for s in symbols if s not in valid]
+            if dropped:
+                self._report(
+                    f"自动发现剔除 {len(dropped)} 个 TradingView 无数据品种: "
+                    + ", ".join(dropped),
+                    level=logging.WARNING,
+                )
+            symbols = valid
+            targets = [
+                target for target in targets if target.symbol in symbols
+            ]
+        if not targets:
+            return
+        # 让自动发现的品种也能通过 testnet 下单的白名单检查：
+        # 合并进 symbol_whitelist（保留用户手动配置的条目）。
+        auto_cfg = self._settings.binance_usdm_testnet
+        merged = list(dict.fromkeys([*auto_cfg.symbol_whitelist, *symbols]))
+        if auto_cfg.symbol_whitelist != merged:
+            auto_cfg.symbol_whitelist = merged
+            self._report(
+                f"symbol_whitelist 已同步自动发现品种: {len(merged)} 个 "
+                f"({', '.join(merged)})"
+            )
+        with self._lock:
+            new_states: dict[tuple[str, str], _TargetState] = {}
+            for target in targets:
                 key = (target.symbol, target.timeframe)
-                self._states[key] = _TargetState(
+                existing = self._states.get(key)
+                new_states[key] = existing if existing is not None else _TargetState(
                     target=target,
                     next_poll_at=next_poll_at(
                         target.timeframe,
@@ -126,13 +254,32 @@ class MultiSymbolMonitor:
                     ),
                     last_processed_closed_ts=self._persisted_closed_ts.get(self._key_text(key)),
                 )
+            for key, state in list(self._states.items()):
+                if key in new_states:
+                    continue
+                if state.source is not None:
+                    try:
+                        state.source.disconnect()
+                    except Exception:
+                        logger.debug("Monitor source disconnect failed", exc_info=True)
+                self._states.pop(key)
+            self._states.update(new_states)
+        self._report(
+            f"自动发现刷新完成，当前监控 {len(self._states)} 个品种: "
+            + ", ".join(sorted(f"{k[0]} {k[1]}" for k in self._states))
+        )
 
     @property
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
     def start(self) -> None:
-        if not self._cfg.enabled or not self._states or self.is_running:
+        if not self._cfg.enabled or self.is_running:
+            return
+        # Auto-discovery 启用时先拉取品种，避免静态 targets 为空导致不启动。
+        if self._cfg.auto_discover.enabled:
+            self._apply_discovered()
+        if not self._states:
             return
         self._executor = ThreadPoolExecutor(
             max_workers=self._cfg.max_concurrent_analyses,
@@ -142,15 +289,19 @@ class MultiSymbolMonitor:
             target=self._run, name="symbol-monitor-scheduler", daemon=True
         )
         self._thread.start()
+        self._report(
+            f"Started multi-symbol monitor for {len(self._states)} target(s), "
+            f"max_concurrent_analyses={self._cfg.max_concurrent_analyses}"
+        )
+        self._report_targets()
+
+    def _report_targets(self) -> None:
         targets = ", ".join(
             f"{state.target.symbol} {state.target.timeframe}"
             f" (next poll {time.strftime('%H:%M:%S', time.localtime(state.next_poll_at))})"
             for state in self._states.values()
         )
-        self._report(
-            f"Started multi-symbol monitor for {len(self._states)} target(s), "
-            f"max_concurrent_analyses={self._cfg.max_concurrent_analyses}: {targets}"
-        )
+        self._report(f"当前监控品种: {targets}")
 
     def stop(self, timeout: float = 10.0) -> bool:
         self._stop.set()
@@ -189,6 +340,14 @@ class MultiSymbolMonitor:
     def _run(self) -> None:
         while not self._stop.wait(0.5):
             self.run_due_once()
+            if self._discover is not None or self._cfg.auto_discover.enabled:
+                now = self._clock()
+                interval = self._cfg.auto_discover.refresh_minutes * 60
+                if self._next_refresh_at is None:
+                    self._next_refresh_at = now + interval
+                elif now >= self._next_refresh_at:
+                    self._next_refresh_at = now + interval
+                    self._apply_discovered()
 
     def _done(self, state: _TargetState, future: Future[Any]) -> None:
         with self._lock:

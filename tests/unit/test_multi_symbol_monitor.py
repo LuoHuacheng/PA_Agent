@@ -73,6 +73,146 @@ def test_timeframe_scheduler_uses_natural_boundaries() -> None:
     assert next_poll_at("30m", now=1801, lead_seconds=5) == 3605
 
 
+def test_auto_discover_replaces_static_targets_on_apply(tmp_path: Path) -> None:
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
+    settings.monitoring.auto_discover.enabled = True
+    settings.monitoring.auto_discover.timeframe = "30m"
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        discover=lambda: ["BTCUSDT", "ETHUSDT"],
+    )
+
+    # 启动时静态 target 已存在
+    assert set(monitor._states) == {("XAUUSD", "15m")}
+
+    monitor._apply_discovered()
+
+    # 静态 target 被发现的品种替换，使用 auto_discover.timeframe
+    assert set(monitor._states) == {("BTCUSDT", "30m"), ("ETHUSDT", "30m")}
+    assert all(s.target.timeframe == "30m" for s in monitor._states.values())
+
+
+def test_auto_discover_refresh_keeps_common_and_drops_vanished(tmp_path: Path) -> None:
+    settings = _settings()
+    settings.monitoring.auto_discover.enabled = True
+    settings.monitoring.auto_discover.timeframe = "15m"
+    results = iter([["BTCUSDT", "ETHUSDT"], ["BTCUSDT", "SOLUSDT"]])
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        discover=lambda: next(results),
+    )
+
+    monitor._apply_discovered()
+    monitor._apply_discovered()
+
+    assert set(monitor._states) == {("BTCUSDT", "15m"), ("SOLUSDT", "15m")}
+
+
+def test_auto_discover_failure_keeps_existing_targets(tmp_path: Path) -> None:
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
+    settings.monitoring.auto_discover.enabled = True
+
+    def discover() -> list[str]:
+        raise RuntimeError("binance down")
+
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        discover=discover,
+    )
+
+    monitor._apply_discovered()
+
+    assert set(monitor._states) == {("XAUUSD", "15m")}
+
+
+def test_auto_discover_empty_keeps_static_targets(tmp_path: Path) -> None:
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
+    settings.monitoring.auto_discover.enabled = True
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        discover=lambda: [],
+    )
+
+    monitor._apply_discovered()
+
+    assert set(monitor._states) == {("XAUUSD", "15m")}
+
+
+def test_start_with_auto_discover_and_empty_static_targets(tmp_path: Path) -> None:
+    settings = _settings()
+    settings.monitoring.auto_discover.enabled = True
+    settings.monitoring.auto_discover.timeframe = "15m"
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        discover=lambda: ["BTCUSDT"],
+        analyze=lambda frame, **_kw: None,
+    )
+
+    monitor.start()
+    try:
+        assert set(monitor._states) == {("BTCUSDT", "15m")}
+    finally:
+        monitor.stop()
+
+
+def test_auto_discover_syncs_symbol_whitelist(tmp_path: Path) -> None:
+    settings = _settings()
+    settings.monitoring.auto_discover.enabled = True
+    settings.monitoring.auto_discover.timeframe = "15m"
+    # 预置一个手动白名单条目，验证被保留而不是覆盖
+    settings.binance_usdm_testnet.symbol_whitelist = ["XAUUSD"]
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        discover=lambda: ["BTCUSDT", "ETHUSDT"],
+    )
+
+    monitor._apply_discovered()
+
+    assert settings.binance_usdm_testnet.symbol_whitelist == ["XAUUSD", "BTCUSDT", "ETHUSDT"]
+
+
+def test_auto_discover_drops_symbols_without_kline(tmp_path: Path) -> None:
+    settings = _settings()
+    settings.monitoring.auto_discover.enabled = True
+    settings.monitoring.auto_discover.timeframe = "15m"
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        discover=lambda: ["BTCUSDT", "SKRUSDT"],
+        # SKRUSDT 无 K 线，被验证器剔除
+        validate_symbols=lambda symbols: [s for s in symbols if s != "SKRUSDT"],
+    )
+
+    monitor._apply_discovered()
+
+    assert set(monitor._states) == {("BTCUSDT", "15m")}
+    # 被剔除的品种也不进入下单白名单
+    assert "SKRUSDT" not in settings.binance_usdm_testnet.symbol_whitelist
+
+
+
+
+
 def test_monitor_subscribes_each_target_with_a_separate_source(tmp_path: Path) -> None:
     settings = _settings(
         MonitorTarget(symbol="XAUUSD", timeframe="15m"),

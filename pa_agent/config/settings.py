@@ -210,6 +210,30 @@ class MonitorTarget(BaseModel):
         return value
 
 
+class AutoDiscoverSettings(BaseModel):
+    """Auto-discover monitor targets from Binance USDM 24h tickers.
+
+    When enabled, the static ``targets`` list is replaced by the top-N
+    USDⓈ-M contracts ranked by 24h quote volume (成交额) or by the absolute
+    24h price change percentage (涨跌幅), refreshed periodically while the
+    monitor runs.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    #: USDⓈ-M futures (fapi.binance.com/fapi/v1/ticker/24hr).
+    market: Literal["usdm_futures"] = "usdm_futures"
+    #: Rank by "quote_volume" (成交额) or "price_change_pct" (涨跌幅绝对值).
+    rank_by: Literal["quote_volume", "price_change_pct"] = "quote_volume"
+    top_n: int = Field(default=10, ge=1, le=100)
+    refresh_minutes: int = Field(default=60, ge=5, le=1440)
+    #: K-line timeframe applied to auto-discovered targets.
+    timeframe: str = Field(default="15m", min_length=2)
+    #: Keep only USDT-settled pairs (excludes USDC/FDUSD/TUSD/etc. markets).
+    stablecoin_only: bool = True
+
+
 class MonitoringSettings(BaseModel):
     """Settings for close-of-bar multi-symbol analysis, alerts, and (when
     binance_usdm_testnet.enabled) Testnet auto-execution.
@@ -222,6 +246,7 @@ class MonitoringSettings(BaseModel):
 
     enabled: bool = False
     targets: list[MonitorTarget] = Field(default_factory=list)
+    auto_discover: AutoDiscoverSettings = Field(default_factory=AutoDiscoverSettings)
     max_concurrent_analyses: int = Field(default=1, ge=1, le=8)
     poll_lead_seconds: int = Field(default=5, ge=0, le=120)
     poll_retry_attempts: int = Field(default=3, ge=0, le=10)
