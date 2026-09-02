@@ -53,9 +53,26 @@
   "monitoring": {
     "enabled": false,
     "targets": [
-      {"symbol": "ETHUSDT", "timeframe": "15m", "enabled": true},
-      {"symbol": "BTCUSDT", "timeframe": "15m", "enabled": true}
+      {
+        "symbol": "ETHUSDT",
+        "timeframe": "15m",
+        "enabled": true
+      },
+      {
+        "symbol": "BTCUSDT",
+        "timeframe": "15m",
+        "enabled": true
+      }
     ],
+    "auto_discover": {
+      "enabled": false,
+      "market": "usdm_futures",
+      "rank_by": "quote_volume",
+      "top_n": 10,
+      "refresh_minutes": 60,
+      "timeframe": "15m",
+      "stablecoin_only": true
+    },
     "max_concurrent_analyses": 1,
     "poll_lead_seconds": 5,
     "poll_retry_attempts": 3,
@@ -70,13 +87,21 @@
     "emergency_stop": true,
     "require_analysis_symbol_match": true,
     "symbol": "BTCUSDT",
-    "symbol_whitelist": ["BTCUSDT", "ETHUSDT"],
-    "leverage": 1,
-    "max_notional_usdt": 20.0,
+    "symbol_whitelist": [
+      "BTCUSDT",
+      "ETHUSDT"
+    ],
+    "leverage": 20,
+    "max_notional_usdt": 100.0,
     "cooldown_minutes": 30,
     "require_trader_equation": true,
     "limit_order_enabled": true,
     "limit_fill_timeout_minutes": 60,
     "limit_poll_interval_seconds": 10
+  },
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "chat_id": ""
   }
 }
