@@ -190,8 +190,8 @@ class BinanceUSDMTestnetSettings(BaseModel):
     require_analysis_symbol_match: bool = True
     symbol: str = "BTCUSDT"
     symbol_whitelist: list[str] = Field(default_factory=lambda: ["BTCUSDT"])
-    leverage: int = Field(default=1, ge=1, le=5)
-    max_notional_usdt: float = Field(default=20.0, gt=0, le=1000.0)
+    leverage: int = Field(default=1, ge=1, le=20)
+    max_notional_usdt: float = Field(default=100.0, gt=0, le=10000.0)
     cooldown_minutes: int = Field(default=30, ge=1, le=1440)
     # Enforce the §10.3 trader's equation (win_rate×reward > (1-win_rate)×risk)
     # before automating a market order. Default on for safety.

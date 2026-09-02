@@ -114,6 +114,16 @@ class BinanceUSDMTestnetClient:
         result = self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
         return not bool(result.get("dualSidePosition"))
 
+    def set_one_way_mode(self) -> None:
+        """Switch the account to one-way position mode (dualSidePosition=false).
+
+        Binance rejects this while positions are open in hedge mode; callers
+        should check for that BinanceAPIError and surface it as rejected.
+        """
+        self._request(
+            "POST", "/fapi/v1/positionSide/dual", {"dualSidePosition": "false"}, signed=True
+        )
+
     def set_leverage(self, symbol: str, leverage: int) -> None:
         self._request(
             "POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage}, signed=True
@@ -294,17 +304,28 @@ def execute_market_signal(
             config.api_secret,
         )
         if not active_client.one_way_mode():
-            return ExecutionResult(
-                "rejected", "Hedge mode unsupported; change Testnet account to one-way mode"
-            )
+            # Program is one-way-mode only; auto-switch the account instead of
+            # rejecting the signal. Fails if hedge-mode positions are open.
+            try:
+                active_client.set_one_way_mode()
+                logger.info("Testnet account switched to one-way position mode")
+            except BinanceAPIError:
+                return ExecutionResult(
+                    "rejected",
+                    "Hedge mode unsupported and auto-switch failed; "
+                    "close hedge positions or switch to one-way mode manually",
+                )
         info = active_client.exchange_info(symbol)
         price = active_client.mark_price(symbol)
         stop = _price_for_tick(stop, info)
         target = _price_for_tick(target, info)
-        quantity = _quantity_for_notional(config.max_notional_usdt, price, info)
+        # 保证金恒定：名义价值 = 保证金(margin_usdt) × 杠杆，杠杆变化不影响保证金。
+        margin_usdt = float(config.max_notional_usdt)
+        notional = margin_usdt * config.leverage
+        quantity = _quantity_for_notional(notional, price, info)
         if quantity is None:
             return ExecutionResult(
-                "rejected", "Configured notional is below symbol minimum or invalid"
+                "rejected", "Configured margin is below symbol minimum or invalid"
             )
         if order_type == "限价单":
             return _execute_limit_signal(

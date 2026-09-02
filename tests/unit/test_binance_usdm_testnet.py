@@ -107,6 +107,27 @@ class AuthRejectedClient(FakeClient):
         )
 
 
+class HedgeModeClient(FakeClient):
+    """Account in hedge mode; auto-switch succeeds on the first call."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.switch_calls = 0
+
+    def one_way_mode(self) -> bool:
+        return self.switch_calls > 0
+
+    def set_one_way_mode(self) -> None:
+        self.switch_calls += 1
+
+
+class HedgeSwitchFailClient(HedgeModeClient):
+    """Account in hedge mode; auto-switch is rejected by Binance."""
+
+    def set_one_way_mode(self) -> None:
+        raise BinanceAPIError("position not empty")
+
+
 def _settings(*, enabled: bool = True, dry_run: bool = False) -> Settings:
     settings = Settings()
     settings.binance_usdm_testnet.enabled = enabled
@@ -139,6 +160,20 @@ def test_dry_run_never_calls_client() -> None:
     result = execute_market_signal(_long_decision(), _settings(dry_run=True), client=client)
     assert result.status == "dry_run"
     assert not client.calls
+
+
+def test_hedge_mode_auto_switches_to_one_way() -> None:
+    client = HedgeModeClient()
+    result = execute_market_signal(_long_decision(), _settings(), client=client)
+    assert client.switch_calls == 1
+    assert result.status in ("submitted", "pending")
+
+
+def test_hedge_mode_switch_failure_rejects_signal() -> None:
+    client = HedgeSwitchFailClient()
+    result = execute_market_signal(_long_decision(), _settings(), client=client)
+    assert result.status == "rejected"
+    assert "Hedge mode" in result.reason
 
 
 def test_execution_constructs_client_from_settings_credentials(monkeypatch) -> None:
@@ -224,6 +259,32 @@ def test_market_signal_submits_entry_and_both_protections() -> None:
     ]
     protections = [call[1] for call in client.calls if call[0] == "protection"]
     assert {order["order_type"] for order in protections} == {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+
+
+def test_margin_constant_across_leverage() -> None:
+    """保证金恒定：杠杆翻倍时名义价值翻倍，但 quantity 保持保证金/价格不变。"""
+
+    def entry_qty(leverage: int, entry_price: float) -> Decimal:
+        settings = _settings()
+        settings.binance_usdm_testnet.max_notional_usdt = 100  # margin USDT
+        settings.binance_usdm_testnet.leverage = leverage
+        client = FakeClient()
+        decision = _long_decision() | {"entry_price": entry_price}
+        execute_market_signal(
+            decision, settings, analysis_symbol="BTCUSDT", client=client
+        )
+        entry = [call[1] for call in client.calls if call[0] == "entry"][0]
+        return Decimal(str(entry["quantity"]))
+
+    # mark price 固定 100 → q = margin*leverage/price；不同 entry 避免冷却去重
+    q1 = entry_qty(1, 101)
+    q20 = entry_qty(20, 102)
+    # margin 100U: q1 = 100*1/100 = 1; q20 = 100*20/100 = 20
+    assert q1 == Decimal("1")
+    assert q20 == Decimal("20")
+    # 保证金 = 名义/杠杆 恒定：100*20/20 == 100*1/1
+    assert q20 / 20 == q1
+
 
 
 def test_rejects_invalid_long_protection_prices_before_entry() -> None:
