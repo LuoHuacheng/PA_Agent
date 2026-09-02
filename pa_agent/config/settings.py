@@ -164,6 +164,16 @@ class PushPlusSettings(BaseModel):
     token: str = ""
 
 
+class TelegramSettings(BaseModel):
+    """Telegram Bot notification settings (settings.json only; no GUI)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    bot_token: str = ""
+    chat_id: str = ""
+
+
 class BinanceUSDMTestnetSettings(BaseModel):
     """Binance U本位合约 Testnet automatic-execution safety controls.
 
@@ -264,6 +274,7 @@ class Settings(BaseModel):
     validation: ValidationSettings = Field(default_factory=ValidationSettings)
     feishu: FeishuSettings = Field(default_factory=FeishuSettings)
     pushplus: PushPlusSettings = Field(default_factory=PushPlusSettings)
+    telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     tushare: TushareSettings = Field(default_factory=TushareSettings)
     binance_usdm_testnet: BinanceUSDMTestnetSettings = Field(
         default_factory=BinanceUSDMTestnetSettings
