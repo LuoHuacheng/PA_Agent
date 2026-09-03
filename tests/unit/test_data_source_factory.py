@@ -68,6 +68,41 @@ def test_create_data_source_returns_expected_types():
 def test_default_symbols_per_kind():
     expected_mt5_symbol = "XAUUSDm" if factory.sys.platform == "win32" else "XAUUSD"
     assert default_symbol_for_kind("mt5") == expected_mt5_symbol
+
+
+def _fake_settings(username: str = "", password: str = "") -> object:
+    return type("S", (), {"general": type("G", (), {
+        "tradingview_username": username,
+        "tradingview_password": password,
+    })()})()
+
+
+def test_tradingview_source_gets_login_credentials_from_settings():
+    src = create_data_source("tradingview", settings=_fake_settings("tvuser", "tvpass"))
+    assert isinstance(src, TradingViewSource)
+    assert src._username == "tvuser"
+    assert src._password == "tvpass"
+
+
+def test_tradingview_credentials_fall_back_to_env(monkeypatch):
+    monkeypatch.setenv("TRADINGVIEW_USERNAME", "envuser")
+    monkeypatch.setenv("TRADINGVIEW_PASSWORD", "envpass")
+    # settings 未提供凭据 -> 走环境变量
+    src = create_data_source("tradingview", settings=_fake_settings())
+    assert src._username == "envuser"
+    assert src._password == "envpass"
+    # 不传 settings 同样读环境变量
+    src = create_data_source("tradingview")
+    assert src._username == "envuser"
+
+
+def test_tradingview_credentials_settings_beat_env(monkeypatch):
+    monkeypatch.setenv("TRADINGVIEW_USERNAME", "envuser")
+    monkeypatch.setenv("TRADINGVIEW_PASSWORD", "envpass")
+    src = create_data_source(
+        "tradingview", settings=_fake_settings("cfguser", "cfgpass")
+    )
+    assert (src._username, src._password) == ("cfguser", "cfgpass")
     assert default_symbol_for_kind("tradingview") == "XAUUSD"
     assert default_symbol_for_kind("eastmoney") == "000001"
     assert default_symbol_for_kind("tushare") == "000001"

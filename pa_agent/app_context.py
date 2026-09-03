@@ -85,7 +85,9 @@ class AppContext:
         ds_kind = normalize_data_source_kind(
             getattr(settings.general, "last_data_source", "mt5")
         )
-        data_source = create_data_source(ds_kind) if connect_data_source else None
+        data_source = (
+            create_data_source(ds_kind, settings=settings) if connect_data_source else None
+        )
 
         if connect_data_source:
             # Subscribe to the last-used symbol/timeframe from settings.

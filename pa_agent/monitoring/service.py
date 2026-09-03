@@ -82,7 +82,7 @@ def _default_validate_symbols(symbols: list[str], settings: Settings) -> list[st
         return []
     from pa_agent.data.factory import create_data_source
 
-    source = create_data_source(settings.general.last_data_source)
+    source = create_data_source(settings.general.last_data_source, settings=settings)
     valid: list[str] = []
     try:
         source.connect()
@@ -457,7 +457,9 @@ class MultiSymbolMonitor:
         if self._source_factory is None:
             from pa_agent.data.factory import create_data_source
 
-            source = create_data_source(self._settings.general.last_data_source)
+            source = create_data_source(
+                self._settings.general.last_data_source, settings=self._settings
+            )
         else:
             source = self._source_factory(self._settings.general.last_data_source)
         state.source = source

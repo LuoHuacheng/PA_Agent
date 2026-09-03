@@ -74,6 +74,11 @@ class GeneralSettings(BaseModel):
     kline_adjust: Literal["qfq", "hfq", "none"] = "qfq"
     #: TradingView 交易所；空字符串 =（自动）依次探测预设列表
     last_tradingview_exchange: str = ""
+    #: TradingView 登录凭据 (tvDatafeed 登录会话, 匿名限流宽松、部分品种仅登录可见);
+    #: 两者都非空才登录, 否则退回匿名。也可用环境变量 TRADINGVIEW_USERNAME /
+    #: TRADINGVIEW_PASSWORD (settings 为空时自动读环境变量)。
+    tradingview_username: str = ""
+    tradingview_password: str = ""
     last_symbol: str = "XAUUSD"
     last_timeframe: str = "15m"
     decision_flow_auto_play: bool = True
