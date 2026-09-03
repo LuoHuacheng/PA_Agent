@@ -23,6 +23,12 @@ from pa_agent.data.snapshot import INDICATOR_WARMUP_BARS, build_analysis_frame
 
 logger = logging.getLogger(__name__)
 
+# Auto-discovery pulls Binance USDⓈ-M perpetuals; validation probes only the
+# BINANCE venue with a short websocket budget so contracts TradingView does
+# not serve fail fast instead of stalling the full timeout per exchange.
+_TV_VALIDATION_EXCHANGE = "BINANCE"
+_TV_VALIDATION_WS_TIMEOUT_S = 4.0
+
 _TIMEFRAME_SECONDS: dict[str, int] = {
     "1m": 60,
     "3m": 180,
@@ -81,9 +87,20 @@ def _default_validate_symbols(symbols: list[str], settings: Settings) -> list[st
     try:
         source.connect()
         if settings.general.last_data_source == "tradingview":
+            # Auto-discovery feeds Binance USDⓈ-M perpetuals, so probe only the
+            # BINANCE venue. Without an explicit exchange the fetch path runs
+            # the multi-venue auto-probe crawl (up to 7 exchanges serially); a
+            # contract TradingView does not serve then stalls a full websocket
+            # timeout on each venue, freezing the scheduler thread for minutes.
             set_exchange = getattr(source, "set_exchange", None)
             if callable(set_exchange):
-                set_exchange(settings.general.last_tradingview_exchange)
+                set_exchange(_TV_VALIDATION_EXCHANGE)
+            # Existence check: a contract that answers within this budget yields
+            # bars (healthy fetches complete in ~1s); the rest fail fast instead
+            # of waiting out the default 10s timeout per venue.
+            limit_wait = getattr(source, "limit_fetch_wait", None)
+            if callable(limit_wait):
+                limit_wait(_TV_VALIDATION_WS_TIMEOUT_S)
         for symbol in symbols:
             try:
                 source.subscribe(symbol, settings.monitoring.auto_discover.timeframe)
