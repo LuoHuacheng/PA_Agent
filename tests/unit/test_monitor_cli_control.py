@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pa_agent.monitoring.cli import (
     _acquire_monitor_pid,
+    _arm_stop_watchdog,
     _is_monitor_process,
     _release_monitor_pid,
     _shutdown_monitor_process,
@@ -69,6 +70,18 @@ def test_is_monitor_process_module_entry_requires_matching_cwd(tmp_path: Path, m
     monkeypatch.setattr("pa_agent.monitoring.cli._process_cwd", lambda _pid: tmp_path)
     assert _is_monitor_process(command, root, pid=123) is False
     assert _is_monitor_process(command, root) is False
+
+
+def test_stop_watchdog_hard_exits_blocked_shutdown(monkeypatch) -> None:
+    """Even if graceful teardown never returns, the watchdog force-exits."""
+    exited: list[int] = []
+    monkeypatch.setattr("pa_agent.monitoring.cli.os._exit", exited.append)
+
+    watchdog = _arm_stop_watchdog(delay=0.05)
+    watchdog.join(timeout=1.0)
+
+    assert exited == [0]
+    assert not watchdog.is_alive()
 
 
 def test_shutdown_forces_exit_after_blocked_monitor_stop(tmp_path: Path, monkeypatch) -> None:

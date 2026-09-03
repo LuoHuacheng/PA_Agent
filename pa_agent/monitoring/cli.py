@@ -15,6 +15,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 _STOP_TIMEOUT_SECONDS = 15.0
+# Hard deadline for signal-driven shutdown. The main thread can block in an SSL
+# read with no effective timeout (startup auto-discovery validation, or a
+# stalled TradingView websocket during graceful disconnect), so stop_event is
+# only observed once that read returns. The watchdog force-exits the process
+# after the deadline so SIGTERM/SIGINT always stop it.
+_STOP_WATCHDOG_SECONDS = 4.0
 
 
 def _pid_exists(pid: int) -> bool:
@@ -165,6 +171,29 @@ def _release_monitor_pid(pid_path: Path) -> None:
         logger.warning("无法清理监控 PID 文件: %s", pid_path)
 
 
+def _arm_stop_watchdog(delay: float, pid_path: Path | None = None) -> threading.Thread:
+    """Arm a daemon hard-exit fallback for signal-driven shutdown.
+
+    Graceful teardown can block forever (e.g. the main thread stuck in a
+    TradingView SSL read while auto-discovery validates symbols during
+    startup); the watchdog force-exits so SIGTERM/SIGINT always stop the
+    process within the deadline. Releases the PID file first when given.
+    """
+
+    def _force_exit() -> None:
+        time.sleep(delay)
+        if pid_path is not None:
+            _release_monitor_pid(pid_path)
+        logger.error("监控未在信号关停时限内退出，强制结束进程。")  # noqa: RUF001
+        os._exit(0)
+
+    watchdog = threading.Thread(
+        target=_force_exit, daemon=True, name="monitor-stop-watchdog"
+    )
+    watchdog.start()
+    return watchdog
+
+
 def stop_monitor(pid_path: Path) -> int:
     pid = _read_pid(pid_path)
     if pid is None:
@@ -274,16 +303,21 @@ def run_monitor() -> int:
         return 2
     enabled_targets = [target for target in settings.monitoring.targets if target.enabled]
     if not enabled_targets and not settings.monitoring.auto_discover.enabled:
-        logger.error("monitoring.targets 中没有启用的品种，且 auto_discover 未开启。")
+        logger.error("monitoring.targets 中没有启用的品种，且 auto_discover 未开启。")  # noqa: RUF001
         return 2
     if not _acquire_monitor_pid(MONITORING_PID_PATH):
         logger.error("监控已在运行，拒绝启动第二个实例。")  # noqa: RUF001
         return 1
 
     stop_event = threading.Event()
+    watchdog_armed = threading.Event()
 
     def request_stop(_signum: int, _frame: Any) -> None:
         stop_event.set()
+        if watchdog_armed.is_set():
+            return
+        watchdog_armed.set()
+        _arm_stop_watchdog(_STOP_WATCHDOG_SECONDS, MONITORING_PID_PATH)
 
     previous_sigint = signal.signal(signal.SIGINT, request_stop)
     previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
