@@ -131,6 +131,22 @@ class TradingViewSource(DataSource):
         self._connected = False
         logger.info("TradingViewSource disconnected")
 
+    def limit_fetch_wait(self, seconds: float) -> None:
+        """Cap tvDatafeed's per-fetch websocket timeout on the live instance.
+
+        tvDatafeed reads ``__ws_timeout`` on every ``get_hist()`` (when it opens
+        a fresh socket), so this applies from the next fetch on. Used by
+        existence probes (e.g. auto-discovery validation) so a contract
+        TradingView does not serve fails fast instead of stalling the full
+        default timeout.
+        """
+        if self._tv is None:
+            return
+        try:
+            setattr(self._tv, _TV_WS_TIMEOUT_ATTR, max(1.0, float(seconds)))
+        except Exception:
+            logger.debug("Could not cap tvDatafeed ws timeout", exc_info=True)
+
     def _close_tv_socket(self) -> None:
         """Close the live tvDatafeed WebSocket, if any.
 

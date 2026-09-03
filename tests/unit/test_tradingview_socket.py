@@ -91,3 +91,18 @@ def test_subscribe_rejects_unknown_timeframe() -> None:
     src, _tv = _make_source_with_mock_tv()
     with pytest.raises(ValueError):
         src.subscribe("XAUUSD", "7m")
+
+
+def test_limit_fetch_wait_caps_tv_timeout() -> None:
+    src, tv = _make_source_with_mock_tv()
+
+    src.limit_fetch_wait(4.0)
+
+    assert getattr(tv, "_TvDatafeed__ws_timeout") == 4.0
+
+
+def test_limit_fetch_wait_noop_without_tv() -> None:
+    src = TradingViewSource()
+    src._tv = None
+    # Must not raise when not connected.
+    src.limit_fetch_wait(4.0)

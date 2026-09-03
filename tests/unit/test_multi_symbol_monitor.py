@@ -11,7 +11,12 @@ from pathlib import Path
 from pa_agent.config.settings import MonitorTarget, Settings
 from pa_agent.data.base import DataSource, KlineBar
 from pa_agent.monitoring.cli import format_decision_result
-from pa_agent.monitoring.service import MultiSymbolMonitor, next_poll_at, timeframe_seconds
+from pa_agent.monitoring.service import (
+    MultiSymbolMonitor,
+    _default_validate_symbols,
+    next_poll_at,
+    timeframe_seconds,
+)
 
 
 class FakeSource(DataSource):
@@ -210,7 +215,55 @@ def test_auto_discover_drops_symbols_without_kline(tmp_path: Path) -> None:
     assert "SKRUSDT" not in settings.binance_usdm_testnet.symbol_whitelist
 
 
+class _ProbeRecordingSource(FakeSource):
+    """TradingView-shaped fake that records exchange/timeout setup calls."""
 
+    def __init__(self, fetchable: set[str]) -> None:
+        super().__init__(_bars(1_800))
+        self._fetchable = fetchable
+        self.setup_calls: list[tuple] = []
+
+    def set_exchange(self, exchange: str) -> None:
+        self.setup_calls.append(("set_exchange", exchange))
+
+    def limit_fetch_wait(self, seconds: float) -> None:
+        self.setup_calls.append(("limit_fetch_wait", seconds))
+
+    def subscribe(self, symbol: str, timeframe: str) -> None:
+        self.setup_calls.append(("subscribe", symbol, timeframe))
+        self._symbol = symbol
+
+    def latest_snapshot(self, n: int) -> list[KlineBar]:
+        if self._symbol not in self._fetchable:
+            raise RuntimeError("no data")
+        return self.bars
+
+
+def test_default_validate_probes_binance_only_with_short_timeout(monkeypatch) -> None:
+    """Validation must not crawl 7 exchanges: force BINANCE + short wait so
+    contracts TradingView does not serve fail fast instead of stalling."""
+    settings = Settings()
+    settings.general.last_data_source = "tradingview"
+    source = _ProbeRecordingSource(fetchable={"BTCUSDT"})
+    monkeypatch.setattr("pa_agent.data.factory.create_data_source", lambda _kind: source)
+
+    valid = _default_validate_symbols(["BTCUSDT", "SKRUSDT"], settings)
+
+    assert valid == ["BTCUSDT"]
+    assert ("set_exchange", "BINANCE") in source.setup_calls
+    assert ("limit_fetch_wait", 4.0) in source.setup_calls
+    assert ("subscribe", "SKRUSDT", "15m") in source.setup_calls
+
+
+def test_default_validate_non_tradingview_skips_venue_setup(monkeypatch) -> None:
+    settings = Settings()
+    settings.general.last_data_source = "akshare"
+    source = _ProbeRecordingSource(fetchable={"000001"})
+    monkeypatch.setattr("pa_agent.data.factory.create_data_source", lambda _kind: source)
+
+    _default_validate_symbols(["000001"], settings)
+
+    assert source.setup_calls == [("subscribe", "000001", "15m")]
 
 
 def test_monitor_subscribes_each_target_with_a_separate_source(tmp_path: Path) -> None:
