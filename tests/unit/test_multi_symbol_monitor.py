@@ -245,7 +245,7 @@ def test_default_validate_probes_binance_only_with_short_timeout(monkeypatch) ->
     settings = Settings()
     settings.general.last_data_source = "tradingview"
     source = _ProbeRecordingSource(fetchable={"BTCUSDT"})
-    monkeypatch.setattr("pa_agent.data.factory.create_data_source", lambda _kind: source)
+    monkeypatch.setattr("pa_agent.data.factory.create_data_source", lambda _kind, **_kw: source)
 
     valid = _default_validate_symbols(["BTCUSDT", "SKRUSDT"], settings)
 
@@ -259,7 +259,7 @@ def test_default_validate_non_tradingview_skips_venue_setup(monkeypatch) -> None
     settings = Settings()
     settings.general.last_data_source = "akshare"
     source = _ProbeRecordingSource(fetchable={"000001"})
-    monkeypatch.setattr("pa_agent.data.factory.create_data_source", lambda _kind: source)
+    monkeypatch.setattr("pa_agent.data.factory.create_data_source", lambda _kind, **_kw: source)
 
     _default_validate_symbols(["000001"], settings)
 

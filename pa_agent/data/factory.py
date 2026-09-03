@@ -1,6 +1,7 @@
 """Construct :class:`DataSource` implementations by kind id."""
 from __future__ import annotations
 
+import os
 import sys
 from typing import Literal
 
@@ -82,13 +83,36 @@ def default_symbol_for_kind(kind: str | None) -> str:
     return _DEFAULT_SYMBOLS[normalize_data_source_kind(kind)]
 
 
-def create_data_source(kind: str | None) -> DataSource:
-    """Instantiate a fresh data source for *kind* (not connected)."""
+def _tradingview_credentials(settings: object | None) -> tuple[str, str]:
+    """TradingView login credentials: settings.general first, env fallback.
+
+    Mirrors the telegram convention (config value wins, environment variable
+    backs it up) so the password does not have to live in settings.json.
+    """
+    username = password = ""
+    if settings is not None:
+        general = getattr(settings, "general", None)
+        username = str(getattr(general, "tradingview_username", "") or "").strip()
+        password = str(getattr(general, "tradingview_password", "") or "").strip()
+    if not username:
+        username = os.environ.get("TRADINGVIEW_USERNAME", "").strip()
+    if not password:
+        password = os.environ.get("TRADINGVIEW_PASSWORD", "").strip()
+    return username, password
+
+
+def create_data_source(kind: str | None, settings: object | None = None) -> DataSource:
+    """Instantiate a fresh data source for *kind* (not connected).
+
+    *settings* is optional; for TradingView it supplies the login credentials
+    (only used when both username and password are non-empty).
+    """
     normalized = normalize_data_source_kind(kind)
     if normalized == "tradingview":
         from pa_agent.data.tradingview import TradingViewSource
 
-        return TradingViewSource()
+        username, password = _tradingview_credentials(settings)
+        return TradingViewSource(username=username, password=password)
     if normalized == "eastmoney":
         from pa_agent.data.eastmoney_source import EastMoneySource
 
