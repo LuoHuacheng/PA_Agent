@@ -10,7 +10,7 @@
 【重要：Mac 与 Windows 的核心差异】
 1. MT5（MetaTrader 5）没有 macOS 原生版本，Mac 版使用 TradingView 作为默认数据源
 2. pywin32 / MetaTrader5 包不支持 macOS，无需安装
-3. 不需要 bat 文件，Mac 用 .command 文件（双击即可运行）
+3. 不需要 bat / .command 启动器，直接用终端 cli 命令启动（见第五步）
 4. pyproject.toml 中 MetaTrader5 和 pywin32 标记了 sys_platform == 'win32'，macOS 下 pip 会自动跳过
 5. 项目代码已做了平台兼容：数据源通过 factory.py 工厂创建，Mac 下默认使用 TradingView
 
@@ -24,7 +24,7 @@
 
 【重要：不使用虚拟环境】
 本方案直接将依赖安装到系统 Python，不创建虚拟环境。
-原因：用户双击 .command 文件运行程序，虚拟环境会增加不必要的复杂度和闪退风险。
+原因：启动命令直接使用系统 Python（python3 ...），不依赖虚拟环境路径，交付与维护更简单。
 只要系统 Python 是专门给本程序用的，就不会有冲突问题。
 
 【重要：Shell 说明】
@@ -194,7 +194,8 @@
   这些修复已包含在项目代码中，pip install -e . 后即生效，无需额外操作。
 
   注意：即使有上述修复，TradingView 匿名（nologin）模式下仍受 IP 速率限制。
-  若经常拉取失败，最有效的解决方案是在 GUI 设置中填入 TradingView 账号用于登录。
+  若经常拉取失败，最有效的解决方案是配置 TradingView 账号登录
+  （配置方式见文末「附：TradingView 数据源使用说明」第 4 条）。
 
 问题 4：pyqtgraph 与 PyQt6 版本不兼容
 解决：指定兼容版本：
@@ -212,75 +213,23 @@
     系统偏好设置 → 安全性与隐私 → 允许从以下位置下载的 App → 允许 Python
 
 ================================================================
-  第四步：修改项目代码适配 macOS
+  第四步：确认平台适配（代码已内置，无需修改）
 ================================================================
 
-Mac 版需要修改以下文件，使程序默认使用 TradingView 数据源而非 MT5。
+Mac 平台适配已全部内置在当前代码中，无需修改任何代码文件：
+- pa_agent/data/factory.py：非 Windows 平台数据源下拉框仅保留 TradingView，
+  normalize_data_source_kind() 默认返回 "tradingview"
+- pa_agent/config/settings.py：last_data_source 默认值已是 "tradingview"，
+  last_symbol 默认 "XAUUSD"（TradingView 标准品种名，而非 MT5 的 XAUUSDm）
+- pa_agent/gui/main_window.py：MT5 相关 UI 提示文本已按平台自适应
+- pyproject.toml：MetaTrader5 / pywin32 已标记 sys_platform == 'win32'，
+  macOS 下 pip 自动跳过这两个包
 
-4.1 修改 pyproject.toml — 无需修改
-  pyproject.toml 中 MetaTrader5 和 pywin32 已标记 sys_platform == 'win32'，
-  macOS 下 pip install -e . 会自动跳过这两个包。无需手动修改。
+（历史版本的部署文档曾要求手工修改 factory.py / settings.py / main_window.py
+  把默认数据源从 MT5 改为 TradingView；当前代码已内置这些改动，
+  旧的手改步骤已失效，请勿再执行。）
 
-4.2 修改 pa_agent/config/settings.py — 无需修改
-  settings.py 中 last_data_source 的默认值 "mt5" 在 Mac 上会导致启动时报错，
-  但程序已在 app_context.py 中做了 try-except 处理：
-  MT5 连接失败时会打印警告但不会崩溃。
-  不过为了更好的体验，需要修改默认配置，见 4.3。
-
-4.3 修改 pa_agent/data/factory.py — 关键修改
-  将 normalize_data_source_kind() 的默认返回值从 "mt5" 改为 "tradingview"，
-  以及 DATA_SOURCE_CHOICES 的顺序调整为 TradingView 在前。
-
-  编辑 PROJECT_ROOT/pa_agent/data/factory.py：
-
-  找到：
-    DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
-        ("mt5", "MT5"),
-        ("tradingview", "TradingView"),
-    )
-
-  改为：
-    DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
-        ("tradingview", "TradingView"),
-        ("mt5", "MT5"),
-    )
-
-  找到 normalize_data_source_kind 函数中的：
-    return "mt5"
-
-  改为：
-    return "tradingview"
-
-4.4 修改 pa_agent/config/settings.py — 关键修改
-  将 GeneralSettings 中 last_data_source 的默认值从 "mt5" 改为 "tradingview"。
-
-  编辑 PROJECT_ROOT/pa_agent/config/settings.py：
-
-  找到：
-    last_data_source: DataSourceKind = "mt5"
-
-  改为：
-    last_data_source: DataSourceKind = "tradingview"
-
-  同时将默认品种从 MT5 品种改为 TradingView 品种：
-
-  找到：
-    last_symbol: str = "XAUUSDm"
-
-  改为：
-    last_symbol: str = "XAUUSD"
-
-  （注意：MT5 品种名通常带 "m" 后缀如 XAUUSDm，TradingView 用标准名 XAUUSD）
-
-4.5 修改 pa_agent/gui/main_window.py — UI 提示文本
-  编辑 PROJECT_ROOT/pa_agent/gui/main_window.py：
-
-  找到所有 "MT5" 相关的提示文本并适当修改（可选，不影响功能）：
-  - "输入 MT5 品种名，如 XAUUSDm…" → "输入品种名，如 XAUUSD…"
-  - "K 线数据来源：MT5（需终端登录）、TradingView（tvDatafeed）" →
-    "K 线数据来源：TradingView（tvDatafeed）、MT5（仅 Windows）"
-
-4.6 确认项目目录结构完整性
+4.1 确认项目目录结构完整性
 
   cd PROJECT_ROOT
   test -f pa_agent/main.py && echo "main.py OK" || echo "main.py MISSING"
@@ -292,52 +241,36 @@ Mac 版需要修改以下文件，使程序默认使用 TradingView 数据源而
 config/settings.json 若不存在，程序首次启动会自动创建，可忽略。
 
 ================================================================
-  第五步：生成运行智能体.command 到项目根目录
+  第五步：确认 cli 启动命令（纯命令交付，不生成 .command）
 ================================================================
 
-在 PROJECT_ROOT 目录下生成"运行智能体.command"文件。
-.command 文件是 macOS 双击即可运行的脚本文件，必须放在项目根目录（与 run.py 同级）。
+本版本不再生成"双击启动器"，GUI 与监控均通过终端 cli 命令启动。
 
-执行以下命令生成：
+启动图形界面（GUI，主程序）：
 
-  cat > "PROJECT_ROOT/运行智能体.command" << 'EOF'
-#!/bin/bash
-cd "$(dirname "$0")"
-python3 run.py
-if [ $? -ne 0 ]; then
-    echo ""
-    echo "[错误] 程序异常退出，请查看上方错误信息。"
-    echo "按回车键关闭窗口..."
-    read
-fi
-EOF
-  chmod +x "PROJECT_ROOT/运行智能体.command"
+  cd PROJECT_ROOT
+  python3 -m pa_agent.main
 
-说明：
-- cd "$(dirname "$0")" 会自动切换到 .command 文件自身所在的目录
-- 无论用户把项目放在哪个路径，只要 .command 在项目根目录就能正确运行
-- 不需要激活虚拟环境，因为依赖直接装在系统 Python 中
-- chmod +x 使 .command 文件可执行
-- macOS 首次双击 .command 文件可能会提示"无法验证开发者"：
-  右键 → 打开 → 仍要打开（或者：系统偏好设置 → 安全性与隐私 → 允许）
+启动无头监控（按 K 线收盘自动分析/推送，Ctrl+C 优雅停止）：
 
-验收：确认文件已生成且内容正确
+  cd PROJECT_ROOT
+  python3 run.py --monitor   # 等价于 python3 -m pa_agent.monitoring.cli start
 
-  test -f "PROJECT_ROOT/运行智能体.command" && echo "File exists" || echo "File missing"
-  test -x "PROJECT_ROOT/运行智能体.command" && echo "Executable" || echo "Not executable"
-  cat "PROJECT_ROOT/运行智能体.command"
+若执行过 pip install -e .，也可直接使用安装的命令入口（效果相同）：
 
-预期输出：
-- File exists
-- Executable
-- 显示上述 .command 文件完整内容
+  pa-agent           # GUI
+  pa-monitor start   # 监控；另有 pa-monitor status / stop / pnl 子命令
+
+给用户交付时可建议把常用命令存成 shell 别名（可选，不做也可）：
+
+  echo 'alias pa="cd PROJECT_ROOT && python3 -m pa_agent.main"' >> ~/.zshrc
+
+验收：无需生成任何 .command 文件，命令可正常启动即可（见第六步 6.2）。
 
 【故障排查】
-- 若双击 .command 文件提示"无法验证开发者"：
-  右键点击 .command 文件 → 打开 → 仍要打开
-  或终端执行：xattr -d com.apple.quarantine "PROJECT_ROOT/运行智能体.command"
-- 若双击闪退：终端中手动运行观察输出：
-  bash "PROJECT_ROOT/运行智能体.command"
+- 终端输入 python3 提示找不到：先安装 Python 3.11+，并确认 PATH 包含 python3
+- 窗口启动后立即消失：回到终端看报错输出（前台运行不会吞掉错误）
+- 若用户不熟悉终端：把上面两行启动命令写进桌面备忘录/提醒，或由交付方远程代启动
 
 ================================================================
   第六步：验收 — 运行程序并确认无错误
@@ -356,7 +289,7 @@ EOF
 6.2 启动程序（命令行方式，确认能正常初始化）
 
   cd PROJECT_ROOT
-  python3 run.py
+  python3 -m pa_agent.main
 
 验收标准：
 - 程序窗口成功弹出（PyQt6 GUI 窗口出现）
@@ -366,13 +299,7 @@ EOF
 
 若窗口正常弹出，关闭窗口即可（点 X 退出）。
 
-6.3 双击 .command 文件验收
-
-  open "PROJECT_ROOT/运行智能体.command"
-
-验收标准：同 6.2，窗口正常弹出且无致命错误
-
-6.4 最终验收清单
+6.3 最终验收清单
 
   [ ] python3 --version 输出 3.11+
   [ ] 所有核心包导入测试通过（13 个 OK，不含 MetaTrader5 和 pywin32）
@@ -380,8 +307,7 @@ EOF
       python3 -c "from tvDatafeed import TvDatafeed, Interval; df = TvDatafeed().get_hist('XAUUSD', 'OANDA', Interval.in_daily, n_bars=2); print('TV OK:', len(df), 'bars')"
       预期输出：TV OK: 2 bars（若失败，见第三步故障排查 问题 3.5 / 3.6）
   [ ] python3 -c "from pa_agent.main import main; print('Import OK')" 输出 Import OK
-  [ ] python3 run.py 窗口正常弹出
-  [ ] 运行智能体.command 双击窗口正常弹出
+  [ ] python3 -m pa_agent.main 窗口正常弹出
   [ ] 控制台无 ImportError / ModuleNotFoundError
   [ ] 数据源默认为 TradingView（非 MT5）
 
@@ -425,8 +351,11 @@ API Key 会被存储在 config/settings.json 中。
 4. 匿名模式限速说明
    未配置 TradingView 账号时使用匿名（nologin）模式，TradingView 会对匿名 IP
    施加请求限制，尤其是小周期（1m、5m）拉取更容易触发。
-   若频繁出现超时，最有效的解决方案是在设置界面填入 TradingView 账号：
-   设置 → TradingView → 用户名 / 密码（凭证加密存储，不会明文保存）。
+   频繁超时时可配置 TradingView 账号走登录会话（限流更宽松、部分品种仅登录可见）：
+   - 方式一：编辑 config/settings.json 的 general 段，填 tradingview_username 与
+     tradingview_password（该文件被 Git 忽略、明文保存，勿提交或分享）
+   - 方式二：设置环境变量 TRADINGVIEW_USERNAME / TRADINGVIEW_PASSWORD
+   两者都非空才启用登录，否则自动使用匿名模式。
 
 ================================================================
   附：Mac 特有问题
@@ -443,23 +372,20 @@ A: 如果使用 Retina 显示器，PyQt6 通常会自动适配。若仍然模糊
    export QT_SCALE_FACTOR=1
    python3 run.py
 
-Q: macOS 上双击 .command 文件提示权限被拒绝
-A: 终端执行：
-   chmod +x "PROJECT_ROOT/运行智能体.command"
-   若提示"无法验证开发者"：
-   xattr -d com.apple.quarantine "PROJECT_ROOT/运行智能体.command"
+Q: macOS 上启动后窗口闪退 / 立即消失
+A: 保持在前台运行观察输出（错误不会被吞掉）：
+   cd PROJECT_ROOT && python3 -m pa_agent.main
 
 Q: macOS 上 Python 路径问题（python vs python3）
 A: macOS 自带 Python 2（python 命令），安装 Python 3 后命令为 python3。
-   run.py 中使用的是 sys.executable，会自动使用正确的 Python。
-   .command 文件中写的是 python3 run.py，确保调用 Python 3。
+   启动命令统一使用 python3 -m pa_agent.main，确保调用 Python 3。
 
 Q: TradingView 数据拉取超时
 A: 常见原因和处理顺序：
    1. 先确认 tvDatafeed headers bug 已修复（见第三步 问题 3.5）
    2. 检查网络能否访问 TradingView（国内直连可能需要代理）
    3. 小周期（1m/5m）更容易触发 TradingView 匿名限速，切换到 15m 以上测试
-   4. 长期超时的根本解决方案：在设置界面配置 TradingView 账号登录
+   4. 长期超时的根本解决方案：配置 TradingView 账号登录（见上方「匿名模式限速说明」）
 
 Q: API 调用报网络错误
 A: 检查网络连接；若使用代理需确认代理可用；确认 API Key 和 Base URL 配置正确。
@@ -475,8 +401,11 @@ Q: 如何更新程序
 A:
    cd PROJECT_ROOT
    git pull
-   pip3 install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+   优先使用 uv（仓库默认工作流，依赖版本由 uv.lock 锁定）：
+     uv sync --extra dev
+   若未安装 uv 且按本文档用系统 Python 部署，可用 pip：
+     pip3 install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
 
-Q: 双击 .command 文件闪退
-A: 终端中手动运行观察输出：
-   bash "PROJECT_ROOT/运行智能体.command"
+Q: 双击启动器（若有）闪退
+A: 不再分发 .command 启动器；若用户自行保留了旧启动器，改为在终端前台运行：
+   cd PROJECT_ROOT && python3 -m pa_agent.main
