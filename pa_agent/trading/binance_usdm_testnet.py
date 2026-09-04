@@ -32,6 +32,14 @@ _RUNTIME_STATE_PATH = "trade_records/binance_usdm_testnet_state.json"
 _STATE_LOCK = threading.Lock()
 _ENTRY_CLIENT_PREFIX = "pa-entry-"
 
+# Bounded retry for transient transport failures (torn TLS connections, stale
+# timestamps under high latency). Only idempotent-safe requests are retried:
+# every GET, and POSTs that carry an explicit idempotency key
+# (newClientOrderId / clientAlgoId). Business errors are never retried.
+_REQUEST_RETRIES = 2
+_REQUEST_RETRY_SLEEP_S = 1.0
+_RETRY_MARKERS = ("network error", "-1021", "invalid JSON")
+
 
 class BinanceAPIError(RuntimeError):
     """A rejected or unavailable Binance API request."""
@@ -44,6 +52,31 @@ class ExecutionResult:
     symbol: str = ""
     quantity: str = ""
     entry_order_id: str = ""
+
+
+def _is_retryable(exc: BinanceAPIError, method: str, params: dict[str, Any] | None) -> bool:
+    """True when a transient transport failure may be retried safely.
+
+    Limited to markers of network/clock-skew problems, restricted to idempotent
+    requests: all GETs, and POSTs that carry an explicit idempotency key
+    (newClientOrderId / clientAlgoId) so a retried write cannot duplicate.
+    """
+    message = str(exc)
+    if not any(marker in message for marker in _RETRY_MARKERS):
+        return False
+    if method == "GET":
+        return True
+    payload = {k: str(v) for k, v in (params or {}).items() if v is not None}
+    return "newClientOrderId" in payload or "clientAlgoId" in payload
+
+
+def _entry_client_id(signal_id: str) -> str:
+    """Deterministic clientOrderId per signal.
+
+    A retried placement reuses the same id so Binance deduplicates instead of
+    creating a second entry order for the same signal.
+    """
+    return f"{_ENTRY_CLIENT_PREFIX}{signal_id}"[:36]
 
 
 class BinanceUSDMTestnetClient:
@@ -67,10 +100,22 @@ class BinanceUSDMTestnetClient:
     def _request(
         self, method: str, path: str, params: dict[str, Any] | None = None, *, signed: bool = False
     ) -> dict[str, Any] | list[Any]:
+        for attempt in range(_REQUEST_RETRIES + 1):
+            try:
+                return self._request_once(method, path, params, signed=signed)
+            except BinanceAPIError as exc:
+                if attempt >= _REQUEST_RETRIES or not _is_retryable(exc, method, params):
+                    raise
+                time.sleep(_REQUEST_RETRY_SLEEP_S * (attempt + 1))
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _request_once(
+        self, method: str, path: str, params: dict[str, Any] | None = None, *, signed: bool = False
+    ) -> dict[str, Any] | list[Any]:
         payload = {k: str(v) for k, v in (params or {}).items() if v is not None}
         if signed:
             payload.setdefault("timestamp", str(self._now_ms()))
-            payload.setdefault("recvWindow", "5000")
+            payload.setdefault("recvWindow", "10000")
             query = urlencode(payload)
             payload["signature"] = hmac.new(
                 self._api_secret, query.encode("utf-8"), hashlib.sha256
@@ -350,7 +395,7 @@ def execute_market_signal(
             symbol=symbol,
             side=side,
             quantity=quantity,
-            client_id=f"{_ENTRY_CLIENT_PREFIX}{uuid.uuid4().hex[:22]}",
+            client_id=_entry_client_id(signal_id),
         )
         try:
             _attach_protection(active_client, symbol, side, stop, target)
@@ -411,7 +456,7 @@ def _execute_limit_signal(
             symbol=symbol,
             side=side,
             quantity=quantity,
-            client_id=f"{_ENTRY_CLIENT_PREFIX}{uuid.uuid4().hex[:22]}",
+            client_id=_entry_client_id(signal_id),
         )
         try:
             _attach_protection(client, symbol, side, stop, target)
@@ -434,7 +479,7 @@ def _execute_limit_signal(
     if replacement is not None:
         return replacement
     client.set_leverage(symbol, config.leverage)
-    entry_client_id = f"{_ENTRY_CLIENT_PREFIX}{uuid.uuid4().hex[:22]}"
+    entry_client_id = _entry_client_id(signal_id)
     pending_record = {
         "client_id": entry_client_id,
         "signal_id": signal_id,

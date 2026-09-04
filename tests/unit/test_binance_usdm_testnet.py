@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import time
 from decimal import Decimal
 from http.client import RemoteDisconnected
+from urllib.error import HTTPError
 
 import pytest
 
@@ -214,6 +216,126 @@ def test_request_wraps_remote_disconnect_as_binance_api_error() -> None:
 
     with pytest.raises(BinanceAPIError, match="Binance network error"):
         client.order_status(symbol="BTCUSDT", client_id="pa-entry-test")
+
+
+class _OkResponse:
+    def __init__(self, payload: dict) -> None:
+        self._raw = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self) -> _OkResponse:
+        return self
+
+    def __exit__(self, *args: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._raw
+
+
+def _http_error(code: int, payload: dict) -> HTTPError:
+    return HTTPError("https://testnet.binancefuture.com", code, "err", None, io.BytesIO(json.dumps(payload).encode()))
+
+
+def test_request_retries_transient_network_error_then_succeeds() -> None:
+    calls: list[int] = []
+
+    def flaky_opener(*_args: object, **_kwargs: object) -> _OkResponse:
+        calls.append(1)
+        if len(calls) <= 2:
+            raise RemoteDisconnected("tls ripped mid-flight")
+        return _OkResponse({"serverTime": 1})
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "test-key", "test-secret", opener=flaky_opener
+    )
+
+    assert client._request("GET", "/fapi/v1/time") == {"serverTime": 1}
+    assert len(calls) == 3
+
+
+def test_request_retries_order_post_with_idempotency_key() -> None:
+    calls: list[int] = []
+
+    def flaky_opener(*_args: object, **_kwargs: object) -> _OkResponse:
+        calls.append(1)
+        if len(calls) <= 1:
+            raise RemoteDisconnected("tls ripped")
+        return _OkResponse({"orderId": 42})
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "test-key", "test-secret", opener=flaky_opener
+    )
+
+    result = client._request(
+        "POST",
+        "/fapi/v1/order",
+        {"symbol": "BTCUSDT", "newClientOrderId": "pa-entry-x"},
+        signed=True,
+    )
+    assert result == {"orderId": 42}
+    assert len(calls) == 2
+
+
+def test_request_retries_clock_skew_1021() -> None:
+    calls: list[int] = []
+
+    def skew_opener(*_args: object, **_kwargs: object) -> _OkResponse:
+        calls.append(1)
+        if len(calls) == 1:
+            raise _http_error(400, {"code": -1021, "msg": "Timestamp outside recvWindow."})
+        return _OkResponse({"order": {"orderId": 7}})
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "test-key", "test-secret", opener=skew_opener
+    )
+
+    result = client._request(
+        "GET", "/fapi/v1/order", {"symbol": "BTCUSDT", "clientOrderId": "pa-entry-x"}, signed=True
+    )
+    assert result == {"order": {"orderId": 7}}
+    assert len(calls) == 2
+
+
+def test_request_does_not_retry_business_error() -> None:
+    calls: list[int] = []
+
+    def err_opener(*_args: object, **_kwargs: object) -> _OkResponse:
+        calls.append(1)
+        raise _http_error(400, {"code": -2013, "msg": "Order does not exist."})
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "test-key", "test-secret", opener=err_opener
+    )
+
+    with pytest.raises(BinanceAPIError, match="-2013"):
+        client._request("GET", "/fapi/v1/order", {"symbol": "BTCUSDT"}, signed=True)
+    assert len(calls) == 1
+
+
+def test_request_does_not_retry_post_without_idempotency_key() -> None:
+    calls: list[int] = []
+
+    def net_opener(*_args: object, **_kwargs: object) -> _OkResponse:
+        calls.append(1)
+        raise RemoteDisconnected("tls ripped")
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "test-key", "test-secret", opener=net_opener
+    )
+
+    with pytest.raises(BinanceAPIError, match="network error"):
+        client._request(
+            "POST", "/fapi/v1/leverage", {"symbol": "BTCUSDT", "leverage": 1}, signed=True
+        )
+    assert len(calls) == 1
+
+
+def test_entry_client_id_deterministic_and_bounded() -> None:
+    first = binance_usdm_testnet._entry_client_id("sig-abc")
+    assert first == binance_usdm_testnet._entry_client_id("sig-abc")
+    assert first.startswith("pa-entry-")
+    assert len(first) <= 36
+    assert first != binance_usdm_testnet._entry_client_id("sig-abd")
 
 
 def test_trader_equation_risk_is_entry_to_stop() -> None:
