@@ -1,7 +1,5 @@
 # PA Agent — AI K线分析辅助工具（桌面端）
 
-**交流 QQ 群：1063897401**
-
 ---
 
 面向主观交易者的 **价格行为（Price Action）** AI 辅助决策工具。从 **MT5 / TradingView / yfinance / AkShare** 读取 K 线，将结构化 K 线数据与预计算特征送入大模型做**两阶段分析**（市场诊断 → 交易决策），不是截图识图。默认不连接交易所、不执行下单；可显式开启受限的 Binance U 本位 Futures Testnet 市价自动执行。
@@ -20,18 +18,18 @@
 - 📝 **完整落盘**：Prompt、原始响应、诊断/决策 JSON、Token 用量、追问记录
 - 🛡️ **可配置校验体系**：JSON 校验、一致性检查、语义校验、截断修复、失败自动重试
 - 🔒 **API Key** 本地加密存储
-- 🧪 **可选 Testnet 自动交易**：仅 Binance U 本位 Testnet、仅市价信号，默认熔断和 dry-run；入场成功后强制创建止损与止盈保护单
+- 🧪 **可选 Testnet 自动交易**：仅 Binance U 本位 Testnet、市价单/限价单信号（突破单需人工复核），默认熔断和 dry-run；入场成功后强制创建止损与止盈保护单
 
 ---
 
 ## 环境要求
 
-| 项目     | 要求                                                                    |
-| -------- | ----------------------------------------------------------------------- |
-| 操作系统 | Windows 10 / 11（主支持）、macOS 12+（TradingView 数据源）              |
-| Python   | 3.11+                                                                    |
-| 数据源   | MT5 / TradingView / yfinance / AkShare **至少配置一种**                  |
-| 网络     | 可访问所配置的 AI API（如 DeepSeek、PackyAPI 等）                        |
+| 项目     | 要求                                                       |
+| -------- | ---------------------------------------------------------- |
+| 操作系统 | Windows 10 / 11（主支持）、macOS 12+（TradingView 数据源） |
+| Python   | 3.11+                                                      |
+| 数据源   | MT5 / TradingView / yfinance / AkShare **至少配置一种**    |
+| 网络     | 可访问所配置的 AI API（如 DeepSeek、PackyAPI 等）          |
 
 ---
 
@@ -41,6 +39,8 @@
 
 ```cmd
 pip install -e .
+# 启动图形界面（两种方式等价，任选其一）
+pa-agent
 python -m pa_agent.main
 ```
 
@@ -79,92 +79,30 @@ make uv-run
 
 ### Binance U 本位 Futures Testnet 自动交易
 
-默认关闭。此功能不支持实盘 URL，且只处理 `市价单`。在 `config/settings.json` 的 `binance_usdm_testnet` 中，确认：
+默认关闭。此功能不支持实盘 URL，自动处理 `市价单` 与 `限价单`（`limit_order_enabled` 可关限价；`突破单` 需人工复核）。在 `config/settings.json` 的 `binance_usdm_testnet` 中，确认：
 
 1. `enabled: true`，`emergency_stop: false`，先保持 `dry_run: true` 验证流程。
 2. 分析品种与 `symbol` 完全一致，且在 `symbol_whitelist` 内。
 3. 仅完成 dry-run 验证后，才将 `dry_run` 改为 `false`。
 
-密钥保存在本机、被 Git 忽略的 `config/settings.json` 的 `binance_usdm_testnet.api_key` 与 `api_secret` 中，绝不写入日志。不要分享、上传或提交该文件。API Key 应只启用交易权限，禁止提现。自动执行使用单向持仓模式；单笔名义价值受 `max_notional_usdt` 限制，杠杆最大 5 倍。
+密钥保存在本机、被 Git 忽略的 `config/settings.json` 的 `binance_usdm_testnet.api_key` 与 `api_secret` 中，绝不写入日志。不要分享、上传或提交该文件。API Key 应只启用交易权限，禁止提现。自动执行使用单向持仓模式；单笔名义价值受 `max_notional_usdt` 限制，杠杆上限 20 倍（`leverage` 可配置，默认 20）。
+
+### 无头监控（headless monitor，`pa-monitor`）
+
+不打开图形界面、按 K 线收盘自动运行的监控模式，直接执行 `pa-monitor start`：
+
+```cmd
+pa-monitor start      # 启动监控
+pa-monitor status     # 查看运行状态
+pa-monitor stop       # 停止（优雅关停，超时兜底强退）
+pa-monitor pnl        # 每日实现盈亏只读统计
+pa-monitor pnl --days 30 --csv pnl.csv   # 自定义天数 / 导出 CSV
+```
+
+监控品种来自 `config/settings.json` → `monitoring.targets`（静态）或 `auto_discover`（按成交额自动选 Binance U 本位 Top N）。每个 K 线收盘时点自动拉取数据并做两阶段分析：信号达标（类型为市价/限价/突破单且置信度 ≥ `decision_confidence_threshold`）时推送 Telegram 通知，并在启用时于 Binance U 本位 Testnet 自动下单（限价单含止损止盈保护）。日志见 `logs/pa_agent.log`，数据源为 TradingView（可在 `general` 配置登录凭据缓解匿名限流）。
 
 ---
 
 **免责声明**：本工具仅供学习与研究，不构成投资建议。交易有风险，决策后果自负。
 
 本项目采用 [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE) 发布。
-
----
-
-## 群友反馈榜单
-
-感谢群友的使用反馈与鼓励，以下为群友评价截图（按时间从早到晚排列）：
-
-<p align="center">
-  <img src="qunyou/BD58CB2D6E4F45CC17CF832C506A982C.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/653EC872A0D6883A34B7B37B692C8B1D.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ20260619-205140.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ20260619-235505.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ20260620-150714.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ20260620-150833.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ20260620-220824.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ20260623-125929.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/91003065F07407E92B50964AE7F8A944.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ20260624-191001.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ20260628-014043.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ20260628-213700.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ20260629-163821.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ20260701-212522.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/BB4AE8110A7011426BD29D5CE8B5F73B.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/F383D366F2254692418DB18AAA617ACE.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/AD48DF6289CB6A9D51FE0B8EE2EC38C2.jpg" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/F61C8DCDB67924B64B33403D20047E0B.png" alt="群友反馈" width="480" />
-</p>
-<p align="center">
-  <img src="qunyou/QQ_1783089951396.png" alt="群友反馈" width="480" />
-</p>
-
----
-
-## 打赏与支持
-
-如果你觉得这个程序对你有帮助的话，可以打赏激励作者继续优化程序，感谢你的支持和鼓励！
-
-（作者会优先解决打赏人的问题，因为人太多了！回复不过来！）
-
-<p align="center">
-  <img src="赞助码.jpeg" alt="打赏二维码" width="420" />
-</p>

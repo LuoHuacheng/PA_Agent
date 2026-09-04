@@ -17,7 +17,7 @@ Agent 在执行任何部署步骤之前，必须先检测当前操作系统：
 
   若输出不是 Win32NT（例如 Unix 或 Darwin），说明当前不是 Windows 系统：
   → 停止执行本文档，改用项目中的 "MAC版本智能体部署方法.txt"
-  → Mac 版文档会指导 Agent 修改项目代码适配 macOS（默认数据源改为 TradingView 等）
+  → Mac 平台适配已内置在项目代码中（默认数据源 TradingView），Mac 版文档不再要求修改代码
   → Mac 版部署完成后，Agent 必须自动运行检测确认无错误
 
 【重要：项目路径】
@@ -32,7 +32,7 @@ Agent 执行时可用以下命令自动定位：
 
 【重要：不使用虚拟环境】
 本方案直接将依赖安装到系统 Python，不创建虚拟环境。
-原因：用户双击 bat 运行程序，虚拟环境会增加不必要的复杂度和闪退风险。
+原因：启动命令直接使用系统 Python（python ...），不依赖虚拟环境路径，交付与维护更简单。
 只要系统 Python 是专门给本程序用的，就不会有冲突问题。
 
 【重要：Shell 说明】
@@ -187,7 +187,8 @@ MT5 必须在运行部署和启动智能体时保持打开且已登录状态。
   这些修复已包含在项目代码中，pip install -e . 后即生效，无需额外操作。
 
   注意：即使有上述修复，TradingView 匿名（nologin）模式下仍受 IP 速率限制。
-  若经常拉取失败，最有效的解决方案是在 GUI 设置中填入 TradingView 账号用于登录。
+  若经常拉取失败，最有效的解决方案是配置 TradingView 账号登录
+  （配置方式见文末「附：TradingView 数据源使用说明」第 4 条）。
 
 问题 5：pywin32 安装后报 ImportError
 解决：安装后需执行 post-install 脚本：
@@ -218,49 +219,34 @@ MT5 必须在运行部署和启动智能体时保持打开且已登录状态。
 config\settings.json 若不存在，程序首次启动会自动创建，可忽略。
 
 ================================================================
-  第五步：生成运行智能体.bat 到项目根目录
+  第五步：确认 cli 启动命令（纯命令交付，不生成 bat）
 ================================================================
 
-在 PROJECT_ROOT 目录下生成"运行智能体.bat"文件。
-bat 文件必须放在项目根目录（与 run.py 同级），且使用 GBK 编码保存。
+本版本不再生成"双击启动器"，GUI 与监控均通过 cli 命令启动（PowerShell）。
 
-执行以下命令生成（PowerShell）：
+启动图形界面（GUI，主程序）：
 
-  $batContent = @"
-@echo off
-chcp 936 >nul 2>&1
-title PA Agent - AI K线分析助手
-cd /d "%~dp0"
-python run.py
-if errorlevel 1 (
-    echo.
-    echo [错误] 程序异常退出，请查看上方错误信息。
-    pause
-)
-"@
-  [System.IO.File]::WriteAllText((Join-Path "PROJECT_ROOT" "运行智能体.bat"), $batContent, [System.Text.Encoding]::GetEncoding("gbk"))
+  Set-Location PROJECT_ROOT
+  python -m pa_agent.main
 
-说明：
-- cd /d "%~dp0" 会自动切换到 bat 文件自身所在的目录，所以 bat 必须放在项目根目录
-- 无论用户把项目放在哪个路径，只要 bat 在项目根目录就能正确运行
-- 不需要激活虚拟环境，因为依赖直接装在系统 Python 中
-- 使用 GBK 编码是因为 bat 文件含中文，cmd.exe 默认用 GBK 解释
-- chcp 936 设置代码页为 GBK，与 GBK 编码的 bat 文件一致，避免中文乱码
-- 注意：PowerShell here-string 的结束 "@ 必须顶格写（前面不能有空格）
+启动无头监控（按 K 线收盘自动分析/推送，Ctrl+C 优雅停止）：
 
-验收：确认文件已生成且内容正确
+  Set-Location PROJECT_ROOT
+  python run.py --monitor   # 等价于 python -m pa_agent.monitoring.cli start
 
-  Test-Path "PROJECT_ROOT\运行智能体.bat"
-  Get-Content "PROJECT_ROOT\运行智能体.bat" -Encoding Default
+若执行过 pip install -e .，也可直接使用安装的命令入口（效果相同）：
 
-预期输出：
-- Test-Path 返回 True
-- Get-Content 显示上述 bat 文件完整内容
+  pa-agent           # GUI
+  pa-monitor start   # 监控；另有 pa-monitor status / stop / pnl 子命令
+
+给用户交付时可建议把常用命令保存为 PowerShell 函数或桌面快捷方式（可选，不做也可）。
+
+验收：无需生成任何 bat 文件，命令可正常启动即可（见第六步 6.2）。
 
 【故障排查】
-- 若 bat 文件中文乱码：确认用 GBK 编码保存（上述命令已使用 GBK），且 chcp 设为 936
-- 若双击闪退：bat 末尾已有 pause，异常退出时会暂停窗口显示错误信息
-- 若 PowerShell here-string 缩进问题：确保结束的 "@ 顶格无多余空格，bat 内容不要有前导空格
+- 输入 python 提示找不到：先安装 Python 3.11+ 并确认 PATH 包含 python
+- 窗口启动后立即消失：保持前台运行看报错输出（不会吞掉错误）
+- 若用户不熟悉终端：把上面两行启动命令写进桌面备忘录，或由交付方远程代启动
 
 ================================================================
   第六步：验收 — 运行程序并确认无错误
@@ -279,7 +265,7 @@ if errorlevel 1 (
 6.2 启动程序（命令行方式，确认能正常初始化）
 
   Set-Location PROJECT_ROOT
-  python run.py
+  python -m pa_agent.main
 
 验收标准：
 - 程序窗口成功弹出（PyQt6 GUI 窗口出现）
@@ -290,13 +276,7 @@ if errorlevel 1 (
 
 若窗口正常弹出，关闭窗口即可（点 X 退出）。
 
-6.3 双击 bat 文件验收
-
-  Start-Process "PROJECT_ROOT\运行智能体.bat"
-
-验收标准：同 6.2，窗口正常弹出且无致命错误
-
-6.4 最终验收清单
+6.3 最终验收清单
 
   [ ] python --version 输出 3.11+
   [ ] 所有核心包导入测试通过（15 个 OK）
@@ -304,8 +284,7 @@ if errorlevel 1 (
       python -c "from tvDatafeed import TvDatafeed, Interval; df = TvDatafeed().get_hist('XAUUSD', 'OANDA', Interval.in_daily, n_bars=2); print('TV OK:', len(df), 'bars')"
       预期输出：TV OK: 2 bars（若失败，见第三步故障排查 问题 4.5 / 4.6）
   [ ] python -c "from pa_agent.main import main; print('Import OK')" 输出 Import OK
-  [ ] python run.py 窗口正常弹出
-  [ ] 运行智能体.bat 双击窗口正常弹出
+  [ ] python -m pa_agent.main 窗口正常弹出
   [ ] 控制台无 ImportError / ModuleNotFoundError
 
 全部通过 → 部署成功，可交付用户。
@@ -348,8 +327,11 @@ API Key 会被 DPAPI 加密存储在 config/settings.json 中，不会明文保�
 4. 匿名模式限速说明
    未配置 TradingView 账号时使用匿名（nologin）模式，TradingView 会对匿名 IP
    施加请求限制，尤其是小周期（1m、5m）拉取更容易触发。
-   若频繁出现超时，最有效的解决方案是在设置界面填入 TradingView 账号：
-   设置 → TradingView → 用户名 / 密码（凭证加密存储，不会明文保存）。
+   频繁超时时可配置 TradingView 账号走登录会话（限流更宽松、部分品种仅登录可见）：
+   - 方式一：编辑 config\settings.json 的 general 段，填 tradingview_username 与
+     tradingview_password（该文件被 Git 忽略、明文保存，勿提交或分享）
+   - 方式二：设置环境变量 TRADINGVIEW_USERNAME / TRADINGVIEW_PASSWORD
+   两者都非空才启用登录，否则自动使用匿名模式。
 
 ================================================================
   附：常见运行时问题
@@ -363,7 +345,7 @@ A: 常见原因和处理顺序：
    1. 先确认 tvDatafeed headers bug 已修复（见第三步 问题 4.5），否则所有请求都会失败
    2. 检查网络能否访问 TradingView（国内直连可能需要代理）
    3. 小周期（1m/5m）更容易触发 TradingView 匿名限速，切换到 15m 以上测试
-   4. 长期超时的根本解决方案：在设置界面配置 TradingView 账号登录
+   4. 长期超时的根本解决方案：配置 TradingView 账号登录（见上方「匿名模式限速说明」）
 
 Q: 切换品种/周期后数据迟迟不更新
 A: 项目已修复 tvDatafeed socket 泄漏问题（见 问题 4.6），切换操作会立即中断上一个
@@ -383,10 +365,11 @@ Q: 如何更新程序
 A:
    Set-Location PROJECT_ROOT
    git pull
-   pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+   优先使用 uv（仓库默认工作流，依赖版本由 uv.lock 锁定）：
+     uv sync --extra dev
+   若未安装 uv 且按本文档用系统 Python 部署，可用 pip：
+     pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
 
-Q: 双击 bat 闪退
-A: bat 文件已经包含异常暂停逻辑。如果仍然闪退，说明是 cmd 窗口本身没弹出来：
-   - 右键 bat → 编辑，确认内容正确
-   - 改用命令行运行 bat 观察输出：
-     cmd /k "PROJECT_ROOT\运行智能体.bat"
+Q: 启动后窗口闪退 / 立即消失
+A: 保持在前台运行观察输出（错误不会被吞掉）：
+   Set-Location PROJECT_ROOT; python -m pa_agent.main
