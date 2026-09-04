@@ -754,9 +754,18 @@ def _is_recent_signal(signal_id: str, cooldown_minutes: int) -> bool:
 
 
 def _is_missing_order_error(exc: BinanceAPIError) -> bool:
-    """Return whether Binance explicitly reported error code -2013."""
+    """Return whether Binance explicitly reported error code -2013.
+
+    -2013 arrives in two shapes depending on the endpoint: an HTTP 400 with a
+    JSON body (``Binance HTTP 400: {"code":-2013,...}``) for order queries, or
+    a 200 body with an error code (``Binance error -2013: ...``). Match either.
+    """
     message = str(exc).lower()
-    return "binance error -2013" in message
+    return (
+        "binance error -2013" in message
+        or '"code":-2013' in message
+        or '"code": -2013' in message
+    )
 
 
 def _remember_signal(signal_id: str) -> None:
