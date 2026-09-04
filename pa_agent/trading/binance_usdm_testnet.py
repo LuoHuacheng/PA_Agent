@@ -4,6 +4,7 @@ This module intentionally supports Testnet only. Credentials are read from the
 local gitignored ``settings.json`` file and never written to application logs.
 """
 
+import csv
 import hashlib
 import hmac
 import json
@@ -15,6 +16,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -229,6 +231,32 @@ class BinanceUSDMTestnetClient:
             {"symbol": symbol, "origClientOrderId": client_id},
             signed=True,
         )
+
+    def income_history(
+        self, *, start_ms: int, end_ms: int | None = None, limit: int = 1000
+    ) -> list[dict[str, Any]]:
+        """Fetch account income ledger rows, paging forward by last row time.
+
+        /fapi/v1/income pages by startTime (no cursor): advance it past the last
+        returned row until a short page confirms the end.
+        """
+        rows: list[dict[str, Any]] = []
+        cursor = start_ms
+        while True:
+            params: dict[str, Any] = {"startTime": cursor, "limit": limit}
+            if end_ms is not None:
+                params["endTime"] = end_ms
+            batch = self._request("GET", "/fapi/v1/income", params, signed=True)
+            if not isinstance(batch, list):
+                break
+            rows.extend(batch)
+            if len(batch) < limit:
+                break
+            last_ms = int(batch[-1]["time"])
+            if last_ms + 1 <= cursor:
+                break
+            cursor = last_ms + 1
+        return rows
 
     def place_close_algo_order(
         self, *, symbol: str, side: str, order_type: str, stop_price: Decimal, client_algo_id: str
@@ -701,6 +729,94 @@ def _watch_limit_entry(
         if remaining <= 0:
             continue
         time.sleep(min(poll_interval, remaining))
+
+
+def _daily_pnl_aggregate(
+    rows: list[dict[str, Any]], tz_hours: float = 8
+) -> list[dict[str, float | str]]:
+    """Group raw /fapi/v1/income rows by local day (UTC+*tz_hours*).
+
+    Returns per-day totals of REALIZED_PNL / COMMISSION / FUNDING_FEE plus the
+    net sum, ordered oldest-first. Days without any income rows are omitted.
+    """
+    tz = timezone(timedelta(hours=tz_hours))
+    by_day: dict[str, dict[str, float]] = {}
+    for row in rows:
+        day = datetime.fromtimestamp(int(row["time"]) / 1000, tz).strftime("%Y-%m-%d")
+        by_day.setdefault(day, {})
+        bucket = by_day[day]
+        kind = str(row.get("incomeType") or "")
+        if kind in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
+            bucket[kind] = bucket.get(kind, 0.0) + float(row.get("income") or 0.0)
+    out: list[dict[str, float | str]] = []
+    for day in sorted(by_day):
+        bucket = by_day[day]
+        realized = bucket.get("REALIZED_PNL", 0.0)
+        commission = bucket.get("COMMISSION", 0.0)
+        funding = bucket.get("FUNDING_FEE", 0.0)
+        out.append(
+            {
+                "date": day,
+                "realized_pnl": realized,
+                "commission": commission,
+                "funding_fee": funding,
+                "net": realized + commission + funding,
+            }
+        )
+    return out
+
+
+def report_daily_pnl(
+    *,
+    days: int = 10,
+    tz_hours: float = 8,
+    csv_path: str | None = None,
+    client: BinanceUSDMTestnetClient | None = None,
+    settings: Settings | None = None,
+) -> list[dict[str, float | str]]:
+    """Print (and optionally export) realized P&L per local day.
+
+    Read-only: pulls the account income ledger and groups it by day. *net* is
+    realized + commission + funding (actual bottom line). Returns the rows for
+    programmatic use.
+    """
+    active_client = client
+    if active_client is None:
+        config = (
+            settings.binance_usdm_testnet
+            if settings is not None
+            else BinanceUSDMTestnetSettings()
+        )
+        if not config.api_key or not config.api_secret:
+            raise ValueError("Binance Testnet API key/secret missing in settings.json")
+        active_client = BinanceUSDMTestnetClient(config.api_key, config.api_secret)
+    tz = timezone(timedelta(hours=tz_hours))
+    now = datetime.now(tz)
+    day_start = datetime(now.year, now.month, now.day, tzinfo=tz)
+    start_ms = int((day_start - timedelta(days=days - 1)).timestamp() * 1000)
+    rows = active_client.income_history(start_ms=start_ms)
+    summary = _daily_pnl_aggregate(rows, tz_hours=tz_hours)
+
+    header = ["date", "realized_pnl", "commission", "funding_fee", "net"]
+    if csv_path:
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=header)
+            writer.writeheader()
+            for item in summary:
+                writer.writerow(item)
+        print(f"已导出 CSV: {csv_path}")
+    print(
+        f"{'日期':<12}{'实现盈亏':>14}{'手续费':>12}{'资金费':>12}{'净合计':>14}"
+    )
+    for item in summary:
+        print(
+            f"{item['date']:<12}"
+            f"{item['realized_pnl']:>+14.4f}"
+            f"{item['commission']:>+12.4f}"
+            f"{item['funding_fee']:>+12.4f}"
+            f"{item['net']:>+14.4f}"
+        )
+    return summary
 
 
 def _signal_id(symbol: str, decision: dict[str, Any]) -> str:

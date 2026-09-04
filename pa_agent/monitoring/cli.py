@@ -360,8 +360,44 @@ def main(argv: list[str] | None = None) -> int:
         return stop_monitor(MONITORING_PID_PATH)
     if command == "status":
         return monitor_status(MONITORING_PID_PATH)
-    print("用法: pa-monitor [start|stop|status]", file=sys.stderr)
+    if command == "pnl":
+        return _pnl_command(args[1:])
+    print("用法: pa-monitor [start|stop|status|pnl]", file=sys.stderr)
     return 2
+
+
+def _pnl_command(args: list[str]) -> int:
+    """pa-monitor pnl [--days N] [--csv PATH] [--tz H] — read-only P&L report."""
+    days = 10
+    csv_path: str | None = None
+    tz_hours = 8.0
+    index = 0
+    while index < len(args):
+        flag = args[index]
+        if flag == "--days" and index + 1 < len(args):
+            days = max(1, int(args[index + 1]))
+            index += 2
+        elif flag == "--csv" and index + 1 < len(args):
+            csv_path = args[index + 1]
+            index += 2
+        elif flag == "--tz" and index + 1 < len(args):
+            tz_hours = float(args[index + 1])
+            index += 2
+        else:
+            print(f"未知参数: {flag}", file=sys.stderr)
+            print("用法: pa-monitor pnl [--days N] [--csv PATH] [--tz H]", file=sys.stderr)
+            return 2
+    try:
+        from pa_agent.config.paths import SETTINGS_JSON_PATH
+        from pa_agent.config.settings import load_settings
+        from pa_agent.trading.binance_usdm_testnet import report_daily_pnl
+
+        settings = load_settings(SETTINGS_JSON_PATH)
+        report_daily_pnl(days=days, tz_hours=tz_hours, csv_path=csv_path, settings=settings)
+    except Exception as exc:
+        print(f"[盈亏统计失败] {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
