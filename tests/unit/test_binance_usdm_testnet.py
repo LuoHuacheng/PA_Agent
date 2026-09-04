@@ -641,9 +641,48 @@ def test_only_binance_2013_marks_missing_order() -> None:
     assert binance_usdm_testnet._is_missing_order_error(
         BinanceAPIError("Binance error -2013: Order does not exist")
     )
+    assert binance_usdm_testnet._is_missing_order_error(
+        BinanceAPIError('Binance HTTP 400: {"code":-2013,"msg":"Order does not exist."}')
+    )
+    assert binance_usdm_testnet._is_missing_order_error(
+        BinanceAPIError('Binance HTTP 400: {"code": -2013, "msg": "Order does not exist."}')
+    )
     assert not binance_usdm_testnet._is_missing_order_error(
         BinanceAPIError("upstream proxy: order does not exist")
     )
     assert not binance_usdm_testnet._is_missing_order_error(
         BinanceAPIError("Binance error -2014: Order does not exist")
     )
+
+
+def test_stale_pending_with_http_400_2013_clears_and_proceeds() -> None:
+    """Regression: order queries surface -2013 as HTTP 400; stale-pending
+    cleanup must recognize it as 'order gone' and return None (caller proceeds
+    with a fresh entry) instead of failing the whole signal."""
+    client = FakeClient()
+    old_client_id = "pa-entry-deadbeefdeadbeefdeadbeef"
+    with binance_usdm_testnet._STATE_LOCK:
+        state = binance_usdm_testnet._load_state()
+        state.setdefault("pending", {})["SOLUSDT"] = {
+            "client_id": old_client_id,
+            "signal_id": "old-signal",
+            "side": "SELL",
+            "quantity": "1.0",
+            "stop": "104.1",
+            "target": "102.8",
+            "placed_at": time.time() - 3600,
+        }
+        binance_usdm_testnet._save_state(state)
+
+    # order_status for the stale id raises the real HTTP-400 shape of -2013.
+    def missing_order_status(*, symbol: str, client_id: str) -> str:
+        raise BinanceAPIError('Binance HTTP 400: {"code":-2013,"msg":"Order does not exist."}')
+
+    client.order_status = missing_order_status  # type: ignore[method-assign]
+
+    result = binance_usdm_testnet._replace_pending_limit(client, "SOLUSDT")
+
+    assert result is None, "stale pending must not block a fresh entry"
+    with binance_usdm_testnet._STATE_LOCK:
+        pending = (binance_usdm_testnet._load_state().get("pending") or {}).get("SOLUSDT")
+    assert pending is None or pending.get("client_id") != old_client_id
