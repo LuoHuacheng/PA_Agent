@@ -338,6 +338,31 @@ def test_entry_client_id_deterministic_and_bounded() -> None:
     assert first != binance_usdm_testnet._entry_client_id("sig-abd")
 
 
+def test_daily_pnl_aggregate_groups_and_sums_per_day() -> None:
+    # 1788546600000 / 1788634200000 ms 落在 UTC+8 的 2026-09-05 / 09-06
+    rows = [
+        {"time": 1788546600000, "incomeType": "REALIZED_PNL", "income": "12.5"},
+        {"time": 1788546600001, "incomeType": "COMMISSION", "income": "-0.5"},
+        {"time": 1788634200000, "incomeType": "REALIZED_PNL", "income": "8.0"},
+        {"time": 1788634200001, "incomeType": "FUNDING_FEE", "income": "-0.2"},
+    ]
+    summary = binance_usdm_testnet._daily_pnl_aggregate(rows, tz_hours=8)
+    assert [item["date"] for item in summary] == ["2026-09-05", "2026-09-06"]
+    assert summary[0]["net"] == 12.5 - 0.5
+    assert summary[1]["realized_pnl"] == 8.0
+    assert summary[1]["net"] == 8.0 - 0.2
+
+
+def test_daily_pnl_aggregate_ignores_unknown_types_and_sorts_days() -> None:
+    rows = [
+        {"time": 1788634200000, "incomeType": "TRANSFER", "income": "999"},
+        {"time": 1788634200001, "incomeType": "REALIZED_PNL", "income": "1.0"},
+    ]
+    summary = binance_usdm_testnet._daily_pnl_aggregate(rows, tz_hours=8)
+    assert summary[0]["net"] == 1.0
+    assert summary[0]["realized_pnl"] == 1.0
+
+
 def test_trader_equation_risk_is_entry_to_stop() -> None:
     """Risk in the §10.3 equation is entry→SL distance, not stop↔target span.
 

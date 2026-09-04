@@ -114,3 +114,35 @@ def test_main_stop_dispatches_to_stop_monitor(monkeypatch, tmp_path: Path) -> No
 
     assert main(["stop"]) == 0
     assert calls == [tmp_path / "monitoring.pid"]
+
+
+def test_main_pnl_dispatches_with_days(monkeypatch, tmp_path: Path) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_report(**kwargs: object) -> None:
+        calls.update(kwargs)
+
+    monkeypatch.setattr(
+        "pa_agent.trading.binance_usdm_testnet.report_daily_pnl", fake_report
+    )
+    monkeypatch.setattr(
+        "pa_agent.config.paths.SETTINGS_JSON_PATH", tmp_path / "settings.json"
+    )
+    monkeypatch.setattr(
+        "pa_agent.config.settings.load_settings",
+        lambda _path: type("S", (), {"binance_usdm_testnet": object()})(),
+    )
+
+    from pa_agent.monitoring.cli import main
+
+    assert main(["pnl", "--days", "3", "--csv", "/tmp/x.csv"]) == 0
+    assert calls["days"] == 3
+    assert calls["csv_path"] == "/tmp/x.csv"
+
+
+def test_main_pnl_rejects_unknown_flag(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("pa_agent.config.paths.SETTINGS_JSON_PATH", tmp_path / "settings.json")
+
+    from pa_agent.monitoring.cli import main
+
+    assert main(["pnl", "--bogus"]) == 2
