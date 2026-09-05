@@ -85,6 +85,22 @@ class FakeClient:
     def close_market_position(self, **kwargs: object) -> None:
         self.calls.append(("rollback", kwargs))
 
+    def net_position(self, symbol: str) -> Decimal:
+        self.calls.append(("net_position", symbol))
+        return Decimal("0")
+
+
+class OpenPositionClient(FakeClient):
+    """Account that already holds an open position for the target symbol."""
+
+    def __init__(self, amount: str = "0.001") -> None:
+        super().__init__()
+        self._amount = amount
+
+    def net_position(self, symbol: str) -> Decimal:
+        self.calls.append(("net_position", symbol))
+        return Decimal(self._amount)
+
 
 def _state() -> dict:
     return json.load(open(binance_usdm_testnet._RUNTIME_STATE_PATH, encoding="utf-8"))
@@ -397,6 +413,7 @@ def test_market_signal_submits_entry_and_both_protections() -> None:
     assert result.status == "submitted"
     assert result.entry_order_id == "123"
     assert [call[0] for call in client.calls] == [
+        "net_position",
         "exchange_info",
         "mark_price",
         "set_leverage",
@@ -503,6 +520,7 @@ def test_limit_entry_above_mark_submits_market_entry_with_protection() -> None:
     assert result.status == "submitted", result.reason
     assert "crossed mark price" in result.reason
     assert [call[0] for call in client.calls] == [
+        "net_position",
         "exchange_info",
         "mark_price",
         "set_leverage",
@@ -711,3 +729,159 @@ def test_stale_pending_with_http_400_2013_clears_and_proceeds() -> None:
     with binance_usdm_testnet._STATE_LOCK:
         pending = (binance_usdm_testnet._load_state().get("pending") or {}).get("SOLUSDT")
     assert pending is None or pending.get("client_id") != old_client_id
+
+
+# ── P0-1: 防双开 — 账户已有持仓时拒绝新入场 ────────────────────────────
+
+def test_net_position_parses_open_amount() -> None:
+    """GET /fapi/v2/positionRisk returns the signed position amount."""
+
+    class _ListResp:
+        def __init__(self, payload: list) -> None:
+            self._raw = json.dumps(payload).encode("utf-8")
+
+        def __enter__(self) -> _ListResp:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return self._raw
+
+    calls: list[str] = []
+
+    def opener(*args: object, **_kwargs: object) -> _ListResp:
+        request = args[0]
+        calls.append(str(getattr(request, "full_url", request)))
+        return _ListResp([{"symbol": "BTCUSDT", "positionAmt": "-0.2479"}])
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient("k", "s", opener=opener)
+
+    assert client.net_position("BTCUSDT") == Decimal("-0.2479")
+    assert any("positionRisk" in call for call in calls)
+
+
+def test_net_position_empty_response_means_flat() -> None:
+    """No open position rows → flat (0)."""
+
+    class _EmptyResp:
+        def __enter__(self) -> _EmptyResp:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return b"[]"
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "k", "s", opener=lambda *_a, **_k: _EmptyResp()
+    )
+
+    assert client.net_position("BTCUSDT") == Decimal("0")
+
+
+def test_open_position_rejects_market_signal_before_any_entry() -> None:
+    """Regression: bot must never stack a new entry on an existing position."""
+    client = OpenPositionClient("0.001")
+    result = execute_market_signal(
+        _long_decision(), _settings(), analysis_symbol="BTCUSDT", client=client
+    )
+    assert result.status == "rejected"
+    assert "Position already open" in result.reason
+    assert "entry" not in [call[0] for call in client.calls]
+    assert "protection" not in [call[0] for call in client.calls]
+    assert [call[0] for call in client.calls] == ["net_position"]
+
+
+def test_open_position_rejects_limit_signal_too() -> None:
+    """Both market and resting-limit entries must respect an open position."""
+    client = OpenPositionClient("-1.5")
+    decision = _long_decision() | {"order_type": "限价单", "entry_price": 95}
+    result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "rejected"
+    assert "Position already open" in result.reason
+    assert "limit_entry" not in [call[0] for call in client.calls]
+    with binance_usdm_testnet._STATE_LOCK:
+        state = binance_usdm_testnet._load_state()
+    assert not (state.get("pending") or {})
+
+
+# ── P0-2: 止损距入场过近时拒绝下单 ─────────────────────────────────────
+
+def test_stop_too_close_to_market_price_rejects_entry() -> None:
+    client = FakeClient()
+    # mark = 100; stop 99.95 → 0.05% gap < 0.2% minimum
+    decision = _long_decision() | {"stop_loss_price": 99.95}
+    result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "rejected"
+    assert "Stop loss too close" in result.reason
+    assert "entry" not in [call[0] for call in client.calls]
+
+
+def test_stop_at_minimum_distance_proceeds_market_entry() -> None:
+    client = FakeClient()
+    # gap 0.3% >= 0.2% minimum → allowed
+    decision = _long_decision() | {"stop_loss_price": 99.7}
+    result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "submitted", result.reason
+    assert "entry" in [call[0] for call in client.calls]
+
+
+def test_stop_too_close_rejects_resting_limit_entry() -> None:
+    client = FakeClient()
+    # resting long limit at 95, stop 94.9 → 0.105% gap < 0.2%
+    decision = _long_decision() | {
+        "order_type": "限价单",
+        "entry_price": 95,
+        "stop_loss_price": 94.9,
+        "take_profit_price": 120,
+    }
+    result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "rejected"
+    assert "Stop loss too close" in result.reason
+    assert "limit_entry" not in [call[0] for call in client.calls]
+    with binance_usdm_testnet._STATE_LOCK:
+        state = binance_usdm_testnet._load_state()
+    assert not (state.get("pending") or {})
+
+
+def test_crossed_limit_with_close_stop_rejected_before_market_fallback() -> None:
+    """A limit that would cross (fill immediately) must still be gated on stop distance."""
+    client = FakeClient()
+    decision = _long_decision() | {
+        "order_type": "限价单",
+        "entry_price": 120,
+        "stop_loss_price": 99.95,  # vs mark 100 → 0.05% gap
+        "take_profit_price": 150,
+    }
+    result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "rejected"
+    assert "Stop loss too close" in result.reason
+    assert "entry" not in [call[0] for call in client.calls]
+
+
+def test_crossed_limit_with_safe_stop_keeps_market_fallback() -> None:
+    client = FakeClient()
+    decision = _long_decision() | {
+        "order_type": "限价单",
+        "entry_price": 120,
+        "stop_loss_price": 99.7,  # vs mark 100 → 0.3% gap >= minimum
+        "take_profit_price": 150,
+    }
+    result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "submitted", result.reason
+    assert "crossed mark price" in result.reason
+    assert "entry" in [call[0] for call in client.calls]
+
+
+def test_stop_distance_minimum_is_configurable() -> None:
+    settings = _settings()
+    settings.binance_usdm_testnet.min_stop_distance_pct = 1.0
+    client = FakeClient()
+    decision = _long_decision() | {"stop_loss_price": 99.5}  # 0.5% gap
+    result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "rejected"
+    assert "Stop loss too close" in result.reason
+

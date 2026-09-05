@@ -72,6 +72,18 @@ def _is_retryable(exc: BinanceAPIError, method: str, params: dict[str, Any] | No
     return "newClientOrderId" in payload or "clientAlgoId" in payload
 
 
+def _stop_gap_pct(reference: Decimal, stop: Decimal) -> Decimal:
+    """Distance from *reference* (entry/mark price) to the stop, in percent.
+
+    Used to reject decisions whose structural stop is too close to the entry:
+    fills land straight on the protective stop and lock in the loss plus both
+    legs of fees (P0-2).
+    """
+    if reference is None or reference == 0 or stop is None:
+        return Decimal("100")
+    return (abs(reference - stop) / reference) * 100
+
+
 def _entry_client_id(signal_id: str) -> str:
     """Deterministic clientOrderId per signal.
 
@@ -232,6 +244,25 @@ class BinanceUSDMTestnetClient:
             signed=True,
         )
 
+    def net_position(self, symbol: str) -> Decimal:
+        """Signed open position amount for ``symbol`` (0.0 when flat).
+
+        Read-only guard used before any automated entry so the bot never stacks
+        a new position on an open one (P0-1).
+        """
+        rows = self._request(
+            "GET", "/fapi/v2/positionRisk", {"symbol": symbol}, signed=True
+        )
+        if not isinstance(rows, list) or not rows:
+            return Decimal("0")
+        raw = rows[0].get("positionAmt")
+        try:
+            return Decimal(str(raw))
+        except Exception as exc:
+            raise BinanceAPIError(
+                f"Unexpected position payload for {symbol}: {exc}"
+            ) from exc
+
     def income_history(
         self, *, start_ms: int, end_ms: int | None = None, limit: int = 1000
     ) -> list[dict[str, Any]]:
@@ -388,6 +419,14 @@ def execute_market_signal(
                     "Hedge mode unsupported and auto-switch failed; "
                     "close hedge positions or switch to one-way mode manually",
                 )
+        position = active_client.net_position(symbol)
+        if position != 0:
+            return ExecutionResult(
+                "rejected",
+                f"Position already open for {symbol} "
+                f"({_decimal_text(position)}); refusing duplicate entry",
+                symbol,
+            )
         info = active_client.exchange_info(symbol)
         price = active_client.mark_price(symbol)
         stop = _price_for_tick(stop, info)
@@ -418,6 +457,14 @@ def execute_market_signal(
             return ExecutionResult("rejected", "Long requires stop < mark price < target")
         if side == "SELL" and not (target < price < stop):
             return ExecutionResult("rejected", "Short requires target < mark price < stop")
+        gap = _stop_gap_pct(price, stop)
+        if gap < Decimal(str(config.min_stop_distance_pct)):
+            return ExecutionResult(
+                "rejected",
+                f"Stop loss too close to market price "
+                f"({gap:.3f}% < {config.min_stop_distance_pct}% minimum)",
+                symbol,
+            )
         active_client.set_leverage(symbol, config.leverage)
         entry = active_client.place_market_order(
             symbol=symbol,
@@ -476,6 +523,14 @@ def _execute_limit_signal(
         if not entry_price < stop:
             return ExecutionResult("rejected", "Short limit requires limit price < stop")
         crosses_mark = entry_price <= mark_price
+    gap = _stop_gap_pct(mark_price if crosses_mark else entry_price, stop)
+    if gap < Decimal(str(config.min_stop_distance_pct)):
+        return ExecutionResult(
+            "rejected",
+            f"Stop loss too close to entry "
+            f"({gap:.3f}% < {config.min_stop_distance_pct}% minimum)",
+            symbol,
+        )
     if crosses_mark:
         # A crossed limit would fill immediately. Submit a market entry instead
         # so protection is attached through the same rollback-safe path.

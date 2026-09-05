@@ -97,7 +97,8 @@
     "require_trader_equation": true,
     "limit_order_enabled": true,
     "limit_fill_timeout_minutes": 60,
-    "limit_poll_interval_seconds": 10
+    "limit_poll_interval_seconds": 10,
+    "min_stop_distance_pct": 0.2
   },
   "telegram": {
     "enabled": false,
