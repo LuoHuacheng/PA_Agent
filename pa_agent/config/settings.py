@@ -205,6 +205,10 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # Resting limit entries use a fill watcher and attach TP/SL after fill.
     limit_fill_timeout_minutes: int = Field(default=60, ge=1, le=1440)
     limit_poll_interval_seconds: int = Field(default=10, ge=2, le=300)
+    # Stop loss minimum distance from the entry price (percent). Decisions whose
+    # structural stop sits closer than this are rejected before any order is
+    # placed, preventing "filled straight into the stop" losses (P0-2).
+    min_stop_distance_pct: float = Field(default=0.2, ge=0.0, le=10.0)
 
 
 class MonitorTarget(BaseModel):
