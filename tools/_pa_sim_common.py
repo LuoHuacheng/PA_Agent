@@ -9,7 +9,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# make pa_agent importable when run from anywhere
+HERE = Path(__file__).resolve().parent.parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 
 from pa_agent.config.settings import load_settings
 from pa_agent.trading.binance_usdm_testnet import BinanceUSDMTestnetClient
