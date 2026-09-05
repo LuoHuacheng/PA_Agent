@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003
 """Trading decision stance profiles for Stage 2 prompt injection."""
 from __future__ import annotations
 
@@ -10,6 +11,14 @@ STANCE_LABELS_ZH: dict[str, str] = {
     "balanced": "均衡",
     "aggressive": "激进",
     "extreme_aggressive": "极度激进",
+}
+
+#: 执行端下单置信度门槛（监控自动执行/机会判定），与各档提示词许可区间对齐：stance 越激进放行的最低 trade_confidence 越低。
+STANCE_CONFIDENCE_THRESHOLDS: dict[str, int] = {
+    "conservative": 55,
+    "balanced": 45,
+    "aggressive": 35,
+    "extreme_aggressive": 25,
 }
 
 _STANCE_ALIASES: dict[str, DecisionStance] = {
@@ -37,6 +46,13 @@ def normalize_stance(value: str | None) -> DecisionStance:
         return _STANCE_ALIASES[raw]
     return "conservative"
 
+
+def confidence_threshold_for_stance(stance: str | None) -> int:
+    """Minimum trade_confidence for auto-execution under a stance.
+    Mirrors the prompt tiers in build_decision_stance_guidance so the
+    monitor gate and the AI licence to issue orders stay aligned.
+    Unknown stances fall back to the conservative threshold."""
+    return STANCE_CONFIDENCE_THRESHOLDS.get(normalize_stance(stance), 55)
 
 def stance_label_zh(stance: str | None) -> str:
     """Return Chinese label for UI."""
@@ -87,7 +103,7 @@ def build_decision_stance_guidance(stance: str | None) -> str:
             "- §10：止损必须明确且不过大；10.3 交易者方程边际情况倾向判「否」。"
             "RR 须 ≥1.0 且方程通过。\n"
             "- §14：从严扫描；有疑虑即不下单。\n"
-            "- trade_confidence：40–59 或结构存在明显歧义时，优先 order_type=不下单。\n"
+            "- trade_confidence：**低于 55 时不下单**（40–54 须结构证据充分且 reasoning 写明破例理由）。\n"
             "- 交易区间/通道 **中部**、方向中性、信号棒质量一般时，默认观望；"
             "靠近支撑/阻力/通道边界时不在此列。\n"
         )
@@ -107,7 +123,7 @@ def build_decision_stance_guidance(stance: str | None) -> str:
             "- §10：10.3 边际可通过时，若方程为正且结构清晰，可判「是」；"
             "须在 trade_confidence_reasoning 写明假设。\n"
             "- §14：仅明确触犯才不下单；不要因「不够完美」单独放弃。\n"
-            "- trade_confidence：35–49 且入场逻辑完整时，可给出下单方案（在 reasoning 说明风险克制）。\n"
+            "- trade_confidence：**低于 45 优先不下单**；45–49 且入场逻辑完整时可给出下单方案（reasoning 说明风险克制）。\n"
             "- 顺势通道/尖峰延续、区间边界反弹：方向与周期一致时可优先考虑限价单，而非默认等待。\n"
         )
     elif normalized == "aggressive":
@@ -118,7 +134,7 @@ def build_decision_stance_guidance(stance: str | None) -> str:
             "- §10：10.3 在 entry/stop/target 已明确时，若方程略偏边际但方向与周期位置一致，"
             "可判「是」；须在 reasoning 强调风险克制。\n"
             "- §14：仅硬性禁止项触发不下单；不要因为「理想目标位更远」而放弃可执行方案。\n"
-            "- trade_confidence：30–44 且逻辑链完整时，仍可输出具体下单类型；"
+            "- trade_confidence：**低于 35 不下单**；35–44 且逻辑链完整时可输出具体下单类型；"
             "用 watch_points / invalidation_condition 补足不确定性。\n"
             "- 趋势延续、突破回踩、区间边界：只要阶段一 gate_result=proceed，"
             "应主动寻找可下单方案，而不是先找理由观望。\n"
@@ -144,7 +160,7 @@ def build_decision_stance_guidance(stance: str | None) -> str:
             "- 突破单不可行时，优先评估限价单结构位方案，方程通过即可下单。\n"
             "- 可在 10.3 通过时合理估算胜率（约 45–55%），"
             "边际通过须在 trade_confidence_reasoning 说明。\n"
-            "- trade_confidence 可低至 25–40，但仅适用于 **10.3=是** 的下单方案。\n"
+            "- trade_confidence **低于 25 时不下单**；25–40 可下单，但仅适用于 **10.3=是** 的方案。\n"
         )
 
     return (
