@@ -546,7 +546,8 @@ class MultiSymbolMonitor:
         if not isinstance(decision, dict):
             return None
         inner = decision.get("decision") or {}
-        threshold = int(self._settings.general.decision_confidence_threshold)
+        from pa_agent.ai.decision_stance import confidence_threshold_for_stance
+        threshold = confidence_threshold_for_stance(self._settings.general.decision_stance)
         if not _has_order_opportunity(inner, threshold):
             return decision
 

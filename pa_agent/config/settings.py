@@ -101,6 +101,8 @@ class GeneralSettings(BaseModel):
     #: 重试后取消持续跟踪分析：校验失败触发重试后自动关闭 keep_analysis
     cancel_keep_analysis_on_retry: bool = False
     #: 交易决策置信度门槛：仅当 trade_confidence >= 此值时，才视为有下单机会（弹窗警报并提供决策详情）
+    # GUI/manual-decision confidence gate. Monitoring auto-execution derives
+    # its threshold from the stance tiers (see decision_stance).
     decision_confidence_threshold: int = Field(default=40, ge=0, le=100)
     #: 开启下根K线预期功能；关闭时不向模型请求该预测，节省 token
     enable_next_bar_prediction: bool = False

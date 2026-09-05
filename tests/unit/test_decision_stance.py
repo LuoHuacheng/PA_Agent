@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pa_agent.ai.decision_stance import (
     build_decision_stance_guidance,
+    confidence_threshold_for_stance,
     normalize_stance,
     stance_label_zh,
 )
@@ -30,8 +31,8 @@ def test_stance_guidance_balanced_more_aggressive_than_conservative():
 def test_stance_guidance_aggressive_more_than_balanced():
     balanced = build_decision_stance_guidance("balanced")
     aggressive = build_decision_stance_guidance("aggressive")
-    assert "30–44" in aggressive
-    assert "30–44" not in balanced
+    assert "35–44" in aggressive
+    assert "35–44" not in balanced
 
 
 def test_stance_guidance_extreme_aggressive_forces_trade():
@@ -46,3 +47,30 @@ def test_stance_guidance_extreme_aggressive_forces_trade():
 def test_stance_label_zh():
     assert stance_label_zh("balanced") == "均衡"
     assert stance_label_zh("extreme_aggressive") == "极度激进"
+
+
+
+def test_confidence_threshold_follows_stance_tiers() -> None:
+    """Execution gate mirrors the prompt tiers: conservative most strict."""
+    assert confidence_threshold_for_stance("conservative") == 55
+    assert confidence_threshold_for_stance("balanced") == 45
+    assert confidence_threshold_for_stance("aggressive") == 35
+    assert confidence_threshold_for_stance("extreme_aggressive") == 25
+
+
+def test_confidence_threshold_accepts_aliases_and_falls_back() -> None:
+    assert confidence_threshold_for_stance("保守") == 55
+    assert confidence_threshold_for_stance("均衡") == 45
+    assert confidence_threshold_for_stance("极度激进") == 25
+    assert confidence_threshold_for_stance("unknown_mode") == 55
+    assert confidence_threshold_for_stance(None) == 55
+
+
+def test_stance_guidance_names_execution_thresholds() -> None:
+    conservative = build_decision_stance_guidance("conservative")
+    balanced = build_decision_stance_guidance("balanced")
+    extreme = build_decision_stance_guidance("extreme_aggressive")
+    assert "低于 55" in conservative
+    assert "低于 45" in balanced
+    assert "低于 35" in build_decision_stance_guidance("aggressive")
+    assert "低于 25" in extreme
