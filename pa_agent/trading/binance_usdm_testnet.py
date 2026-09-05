@@ -42,6 +42,16 @@ _REQUEST_RETRIES = 2
 _REQUEST_RETRY_SLEEP_S = 1.0
 _RETRY_MARKERS = ("network error", "-1021", "invalid JSON")
 
+# Whole-signal retry on Binance rate-limit bans (HTTP 418 -1003 / 429). The
+# request layer never retries these: a banned IP needs seconds of rest, so the
+# retry lives at signal level with exponential backoff (see execute_market_signal).
+_RATE_LIMIT_MARKERS = ("http 418", "-1003", "http 429", "too many requests")
+
+
+def _is_rate_limit_reason(reason: str) -> bool:
+    low = (reason or "").lower()
+    return any(marker in low for marker in _RATE_LIMIT_MARKERS)
+
 
 class BinanceAPIError(RuntimeError):
     """A rejected or unavailable Binance API request."""
@@ -336,6 +346,59 @@ class BinanceUSDMTestnetClient:
 
 
 def execute_market_signal(
+    decision: dict[str, Any],
+    settings: Settings | None,
+    *,
+    analysis_symbol: str = "",
+    client: BinanceUSDMTestnetClient | None = None,
+) -> ExecutionResult:
+    """Execute one validated market signal, retrying after Testnet rate-limit bans.
+
+    Binance Testnet shares public egress IPs and frequently answers HTTP 418
+    (code -1003, IP banned) for a few minutes. Only rate-limit failures are
+    retried, with exponential backoff; every other failure stays one-shot.
+    Re-entry is safe because the first attempt never records the signal on a
+    failed path and the open-position guard blocks duplicate entries.
+    """
+    config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
+    max_attempts = max(1, int(getattr(config, "execution_retry_max_attempts", 3) or 1))
+    backoff = max(5, int(getattr(config, "execution_retry_backoff_seconds", 30) or 30))
+
+    result = _execute_market_signal_once(
+        decision, settings, analysis_symbol=analysis_symbol, client=client
+    )
+    attempts, retried = 1, 0
+    while (
+        result.status == "failed"
+        and _is_rate_limit_reason(result.reason)
+        and attempts < max_attempts
+    ):
+        attempts += 1
+        retried += 1
+        delay = backoff * (2 ** (retried - 1))
+        logger.warning(
+            "Testnet rate-limit error (%s); retry %d/%d after %ds sleep",
+            result.reason[:160],
+            attempts,
+            max_attempts,
+            delay,
+        )
+        time.sleep(delay)
+        result = _execute_market_signal_once(
+            decision, settings, analysis_symbol=analysis_symbol, client=client
+        )
+    if retried and result.status == "failed":
+        result = ExecutionResult(
+            "failed",
+            f"{result.reason} (rate-limit retries exhausted after {retried} retry{'s' if retried > 1 else ''})",
+            result.symbol,
+            result.quantity,
+            result.entry_order_id,
+        )
+    return result
+
+
+def _execute_market_signal_once(
     decision: dict[str, Any],
     settings: Settings | None,
     *,

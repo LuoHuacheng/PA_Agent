@@ -121,6 +121,8 @@ API Key 与 Secret Key 保存在本机、已被 Git 忽略的 `config/settings.j
 | `leverage` | `1` | 逐品种设定杠杆，范围 1–5 |
 | `max_notional_usdt` | `20.0` | 单笔最大名义价值，范围 0–1000 USDT |
 | `cooldown_minutes` | `30` | 相同计划的去重冷却期 |
+| `execution_retry_max_attempts` | `3` | 限流失败(HTTP 418/-1003/429)时整单指数退避重试，含首次尝试；`1` = 关闭重试 |
+| `execution_retry_backoff_seconds` | `30` | 退避基数秒（30s、60s、…），范围 5–300 |
 
 当前仅自动处理带完整 TP/SL 的 `市价单`，限价单和突破单只保留原有提醒。执行前校验 Testnet 品种规则、数量步长、最小名义价值、单向持仓模式和保护价方向；入场后任一保护单创建失败，立即尝试市价平仓。无实盘 URL 或实盘开关。
 

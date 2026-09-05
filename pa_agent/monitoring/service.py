@@ -634,6 +634,27 @@ class MultiSymbolMonitor:
             result.symbol,
             result.reason,
         )
+        # A failed execution must not be silent: notify besides the signal message.
+        if result.status == "failed":
+            try:
+                from pa_agent.notify.telegram_notifier import send_execution_failure
+
+                failed_sent = send_execution_failure(
+                    symbol=frame.symbol,
+                    timeframe=getattr(frame, "timeframe", ""),
+                    status=result.status,
+                    reason=result.reason,
+                    settings=self._settings,
+                )
+                logger.info(
+                    "Monitor execution-failure notification for %s: telegram=%s",
+                    frame.symbol,
+                    failed_sent,
+                )
+            except Exception:  # noqa: BLE001 - best-effort alerting
+                logger.exception(
+                    "Execution-failure notification failed for %s", frame.symbol
+                )
 
     @staticmethod
     def _key_text(key: tuple[str, str]) -> str:

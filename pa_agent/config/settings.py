@@ -211,6 +211,13 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # structural stop sits closer than this are rejected before any order is
     # placed, preventing "filled straight into the stop" losses (P0-2).
     min_stop_distance_pct: float = Field(default=0.2, ge=0.0, le=10.0)
+    # Rate-limit recovery: when Binance rejects a signal with HTTP 418/-1003/429
+    # (shared Testnet IP bans), the whole signal is retried with exponential
+    # backoff. execution_retry_max_attempts counts the initial attempt, so 1
+    # disables retries. Applies only to rate-limit errors; other failures stay
+    # one-shot.
+    execution_retry_max_attempts: int = Field(default=3, ge=1, le=5)
+    execution_retry_backoff_seconds: int = Field(default=30, ge=5, le=300)
 
 
 class MonitorTarget(BaseModel):

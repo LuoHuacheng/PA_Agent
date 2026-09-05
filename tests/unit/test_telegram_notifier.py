@@ -5,6 +5,7 @@ from __future__ import annotations
 from pa_agent.config.settings import Settings
 from pa_agent.notify.telegram_notifier import (
     _build_order_text,
+    send_execution_failure,
     send_telegram_message,
     telegram_is_active,
 )
@@ -96,3 +97,36 @@ def test_send_telegram_message_success(monkeypatch) -> None:
     assert send_telegram_message("hi", token="123:abc", chat_id="1") is True
     assert sent[0]["json"] == {"chat_id": "1", "text": "hi"}
     assert "123:abc" in sent[0]["url"]
+
+def test_send_execution_failure_alert_text(monkeypatch) -> None:
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+    sent: list[dict] = []
+
+    class _FakeRequests:
+        @staticmethod
+        def post(url, json, timeout):
+            sent.append(json)
+            return _Resp()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "requests", _FakeRequests)
+    settings = Settings()
+    settings.telegram.enabled = True
+    settings.telegram.bot_token = "123:abc"
+    settings.telegram.chat_id = "1"
+    sent_ok = send_execution_failure(
+        symbol="BNBUSDT",
+        timeframe="15m",
+        status="failed",
+        reason="Binance HTTP 418: Way too many requests",
+        settings=settings,
+    )
+    assert sent_ok is True
+    text = sent[0]["text"]
+    assert "自动执行失败" in text
+    assert "BNBUSDT" in text and "15m" in text
+    assert "HTTP 418" in text

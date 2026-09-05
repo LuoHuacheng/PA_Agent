@@ -179,6 +179,62 @@ def test_dry_run_never_calls_client() -> None:
     assert result.status == "dry_run"
     assert not client.calls
 
+class RateLimitClient(FakeClient):
+    """Fails with Binance HTTP 418 (rate-limit ban) for the first N calls."""
+
+    def __init__(self, failures: int = 1) -> None:
+        super().__init__()
+        self._failures = failures
+
+    def one_way_mode(self) -> bool:
+        if self._failures > 0:
+            self._failures -= 1
+            raise BinanceAPIError(
+                "Binance HTTP 418: {\"code\":-1003,\"msg\":\"Way too many requests; IP(1.2.3.4) banned until 1\"}"
+            )
+        return True
+
+
+def _retry_settings() -> Settings:
+    settings = _settings()
+    settings.binance_usdm_testnet.execution_retry_max_attempts = 3
+    settings.binance_usdm_testnet.execution_retry_backoff_seconds = 5
+    return settings
+
+
+def test_rate_limit_failure_retries_with_backoff_then_submits(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    client = RateLimitClient(failures=2)
+    result = execute_market_signal(
+        _long_decision(), _retry_settings(), analysis_symbol="BTCUSDT", client=client
+    )
+    assert result.status == "submitted", result.reason
+    assert sleeps == [5.0, 10.0]
+
+
+def test_rate_limit_exhaustion_reports_failed_with_retry_note(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    client = RateLimitClient(failures=99)
+    result = execute_market_signal(
+        _long_decision(), _retry_settings(), analysis_symbol="BTCUSDT", client=client
+    )
+    assert result.status == "failed"
+    assert "retries exhausted" in result.reason
+    assert sleeps == [5.0, 10.0]
+
+
+def test_non_rate_limit_failure_is_one_shot(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    client = AuthRejectedClient()
+    result = execute_market_signal(
+        _long_decision(), _retry_settings(), analysis_symbol="BTCUSDT", client=client
+    )
+    assert result.status == "failed"
+    assert sleeps == []
+
 
 def test_hedge_mode_auto_switches_to_one_way() -> None:
     client = HedgeModeClient()
