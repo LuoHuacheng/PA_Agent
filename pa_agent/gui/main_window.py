@@ -4023,6 +4023,19 @@ class MainWindow(QMainWindow):
                     result.symbol,
                     result.reason,
                 )
+                if result.status == "failed":
+                    try:
+                        from pa_agent.notify.telegram_notifier import send_execution_failure
+
+                        send_execution_failure(
+                            symbol=meta_symbol,
+                            timeframe=meta_timeframe,
+                            status=result.status,
+                            reason=result.reason,
+                            settings=settings,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Execution-failure notification failed")
             except Exception as exc:  # noqa: BLE001
                 # Execution must never disrupt analysis, records, or notifications.
                 logger.exception("Binance U本位 Testnet 自动执行异常: %s", exc)

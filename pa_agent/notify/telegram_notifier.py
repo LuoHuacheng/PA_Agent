@@ -156,3 +156,32 @@ def send_order_signal(
         timeframe=timeframe,
     )
     return send_telegram_message(text, settings=settings)
+
+def send_execution_failure(
+    *,
+    symbol: str,
+    timeframe: str = "",
+    status: str,
+    reason: str,
+    settings: Settings | None = None,
+) -> bool:
+    """Push a Telegram alert when Testnet auto-execution fails.
+
+    Sent in addition to the order-signal message so an unfilled signal is never
+    silently dropped: the operator sees both the decision and its failure
+    (e.g. HTTP 418 rate-limit bans).
+    """
+    if not telegram_is_active(settings):
+        return False
+    suffix = f"  周期：{timeframe}" if timeframe else ""
+    lines = [
+        "⚠️ PA Agent Testnet 自动执行失败",
+        "",
+        f"品种：{_fmt(symbol)}{suffix}",
+        f"执行状态：{_fmt(status)}",
+        f"原因：{_truncate(reason, 900)}",
+        "",
+        "提示：限流(HTTP 418/-1003)多为 Testnet 共享 IP 封禁，已自动指数退避重试；"
+        "仍失败则本信号不会补发，需人工复核。",
+    ]
+    return send_telegram_message("\n".join(lines), settings=settings)
