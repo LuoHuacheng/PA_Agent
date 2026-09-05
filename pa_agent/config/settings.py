@@ -243,8 +243,9 @@ class AutoDiscoverSettings(BaseModel):
     enabled: bool = False
     #: USDⓈ-M futures (fapi.binance.com/fapi/v1/ticker/24hr).
     market: Literal["usdm_futures"] = "usdm_futures"
-    #: Rank by "quote_volume" (成交额) or "price_change_pct" (涨跌幅绝对值).
-    rank_by: Literal["quote_volume", "price_change_pct"] = "quote_volume"
+    #: Rank by "quote_volume" (24h成交额), "price_change_pct" (涨跌幅绝对值)
+    #: or "market_cap" (CoinGecko 市值排名, 候选池稳定、近似固定).
+    rank_by: Literal["quote_volume", "price_change_pct", "market_cap"] = "quote_volume"
     top_n: int = Field(default=10, ge=1, le=100)
     refresh_minutes: int = Field(default=60, ge=5, le=1440)
     #: K-line timeframe applied to auto-discovered targets.
