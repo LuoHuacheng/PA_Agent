@@ -597,6 +597,142 @@ def test_incremental_stage1_raises_without_previous_response(
         assembler.build_incremental_stage1(frame, previous, 2)
 
 
+def test_can_build_incremental_stage1_true_with_reply(assembler: PromptAssembler):
+    """Successful Stage 1 record (reply content present) is incremental-able."""
+    from pa_agent.records.schema import AnalysisRecord, RecordMeta
+
+    frame = _make_frame(5)
+    full_s1_messages = assembler.build_stage1(frame)
+    previous = AnalysisRecord(
+        meta=RecordMeta(
+            timestamp_local_iso="2026-01-01T00:00:00.000",
+            timestamp_local_ms=1,
+            symbol="XAUUSD",
+            timeframe="1h",
+            bar_count=5,
+            ai_provider={},
+        ),
+        kline_data=[],
+        htf_text="",
+        stage1_messages=full_s1_messages,
+        stage1_response={"content": '{"gate_result":"proceed"}'},
+        stage1_diagnosis={"cycle_position": "normal_channel"},
+        stage2_messages=[],
+        stage2_response=None,
+        stage2_decision={"decision": {"order_type": "不下单"}},
+        strategy_files_used=[],
+        experience_loaded=[],
+        exception=None,
+        usage_total={},
+    )
+    assert assembler.can_build_incremental_stage1(previous) is True
+
+
+def test_can_build_incremental_stage1_true_with_diagnosis_only(
+    assembler: PromptAssembler,
+):
+    """Validated diagnosis alone supports incremental chaining (no raw reply)."""
+    from pa_agent.records.schema import AnalysisRecord, RecordMeta
+
+    frame = _make_frame(5)
+    full_s1_messages = assembler.build_stage1(frame)
+    previous = AnalysisRecord(
+        meta=RecordMeta(
+            timestamp_local_iso="2026-01-01T00:00:00.000",
+            timestamp_local_ms=1,
+            symbol="XAUUSD",
+            timeframe="1h",
+            bar_count=5,
+            ai_provider={},
+        ),
+        kline_data=[],
+        htf_text="",
+        stage1_messages=full_s1_messages,
+        stage1_response={},  # no content
+        stage1_diagnosis={"cycle_position": "normal_channel"},
+        stage2_messages=[],
+        stage2_response=None,
+        stage2_decision={"decision": {"order_type": "不下单"}},
+        strategy_files_used=[],
+        experience_loaded=[],
+        exception=None,
+        usage_total={},
+    )
+    assert assembler.can_build_incremental_stage1(previous) is True
+
+
+def test_can_build_incremental_stage1_false_on_failed_record(
+    assembler: PromptAssembler,
+):
+    """Record whose Stage 1 died (network_error, reply None) is NOT incremental-able.
+
+    Regression for the monitor deadlock: a failed record must not be chained
+    onto, otherwise every later poll raises and the symbol never recovers.
+    """
+    from pa_agent.records.schema import AnalysisRecord, RecordMeta
+
+    frame = _make_frame(5)
+    full_s1_messages = assembler.build_stage1(frame)
+    previous = AnalysisRecord(
+        meta=RecordMeta(
+            timestamp_local_iso="2026-01-01T00:00:00.000",
+            timestamp_local_ms=1,
+            symbol="XAUUSD",
+            timeframe="1h",
+            bar_count=5,
+            ai_provider={},
+        ),
+        kline_data=[],
+        htf_text="",
+        stage1_messages=full_s1_messages,
+        stage1_response=None,  # Stage 1 never replied
+        stage1_diagnosis=None,
+        stage2_messages=[],
+        stage2_response=None,
+        stage2_decision=None,
+        strategy_files_used=[],
+        experience_loaded=[],
+        exception={
+            "type": "network_error",
+            "stage": "stage1",
+            "message": "incomplete chunked read",
+        },
+        usage_total={},
+    )
+    assert assembler.can_build_incremental_stage1(previous) is False
+
+
+def test_can_build_incremental_stage1_false_without_messages(
+    assembler: PromptAssembler,
+):
+    """Record with no Stage 1 messages is not incremental-able."""
+    from pa_agent.records.schema import AnalysisRecord, RecordMeta
+
+    previous = AnalysisRecord(
+        meta=RecordMeta(
+            timestamp_local_iso="2026-01-01T00:00:00.000",
+            timestamp_local_ms=1,
+            symbol="XAUUSD",
+            timeframe="1h",
+            bar_count=5,
+            ai_provider={},
+        ),
+        kline_data=[],
+        htf_text="",
+        stage1_messages=[],
+        stage1_response={"content": "x"},  # content alone is not enough
+        stage1_diagnosis=None,
+        stage2_messages=[],
+        stage2_response=None,
+        stage2_decision=None,
+        strategy_files_used=[],
+        experience_loaded=[],
+        exception=None,
+        usage_total={},
+    )
+    assert assembler.can_build_incremental_stage1(previous) is False
+
+
 def test_stage1_prompt_has_kline_indicator_disclaimer(assembler: PromptAssembler) -> None:
     """Stage 1 user prompt and tables warn that indicators are window-recomputed."""
     frame = _make_frame()

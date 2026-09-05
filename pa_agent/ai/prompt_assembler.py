@@ -1049,6 +1049,32 @@ class PromptAssembler:
             {"role": "user", "content": user_content},
         ]
 
+    def can_build_incremental_stage1(self, previous_record: AnalysisRecord) -> bool:
+        """Return True when ``previous_record`` has a usable prior Stage 1 reply.
+
+        Incremental continuation chains off the previous full user prompt AND an
+        assistant reply (or a validated diagnosis). A record whose Stage 1 died
+        mid-call (AI network error, empty/parse-failed response —
+        ``stage1_response`` is None/{}) is NOT incremental-able: callers must
+        fall back to a full Stage 1 rebuild instead of chaining off the failed
+        record forever.
+
+        Keep in sync with the guards at the top of
+        :meth:`build_incremental_stage1` (those remain as defensive raises).
+        """
+        prev_s1_messages = getattr(previous_record, "stage1_messages", None) or []
+        has_user_prompt = any(
+            msg.get("role") == "user" and msg.get("content")
+            for msg in prev_s1_messages
+        )
+        if not has_user_prompt:
+            return False
+        prev_s1_response = getattr(previous_record, "stage1_response", None) or {}
+        if isinstance(prev_s1_response, dict) and prev_s1_response.get("content"):
+            return True
+        prev_diag = getattr(previous_record, "stage1_diagnosis", None) or {}
+        return bool(isinstance(prev_diag, dict) and prev_diag)
+
     @staticmethod
     def _normalize_prev_stage1_assistant_for_incremental(
         previous_record: AnalysisRecord,

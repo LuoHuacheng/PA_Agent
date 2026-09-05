@@ -408,7 +408,16 @@ class TwoStageOrchestrator:
             )
 
         # ── Step 4: Build Stage 1 messages ───────────────────────────────────
-        if previous_record is not None and incremental_new_bar_count is not None:
+        # Incremental continuation needs a previous record that actually reached
+        # a Stage 1 reply. A failed record (e.g. network_error leaves
+        # stage1_response=None) must fall back to a full Stage 1 rebuild;
+        # otherwise every later poll raises and the symbol is stuck forever.
+        can_incremental = bool(
+            previous_record is not None
+            and incremental_new_bar_count is not None
+            and self._assembler.can_build_incremental_stage1(previous_record)
+        )
+        if can_incremental:
             messages_s1 = self._assembler.build_incremental_stage1(
                 frame,
                 previous_record,
