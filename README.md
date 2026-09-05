@@ -101,6 +101,56 @@ pa-monitor pnl --days 30 --csv pnl.csv   # 自定义天数 / 导出 CSV
 
 监控品种来自 `config/settings.json` → `monitoring.targets`（静态）或 `auto_discover`（按成交额自动选 Binance U 本位 Top N）。每个 K 线收盘时点自动拉取数据并做两阶段分析：信号达标（类型为市价/限价/突破单且置信度 ≥ `decision_confidence_threshold`）时推送 Telegram 通知，并在启用时于 Binance U 本位 Testnet 自动下单（限价单含止损止盈保护）。日志见 `logs/pa_agent.log`，数据源为 TradingView（可在 `general` 配置登录凭据缓解匿名限流）。
 
+### 复盘分析 CLI 工具（`tools/`）
+
+针对 Testnet 自动交易结果的**只读**复盘工具：用 `config/settings.json` 中 Binance U 本位 Testnet 的 API Key/Secret 拉取账户订单与成交，再与落盘的 pa-entry 决策信号配对重建交易；**不创建任何订单、不修改任何交易状态**。需先在 `binance_usdm_testnet` 配置好密钥（见上文），并在仓库根目录、项目 Python 环境（.venv 激活或已 `pip install -e .`）下运行。`tools/_pa_sim_common.py` 是两者共用的取数与配对逻辑（不应直接运行）。
+
+#### 逐笔盈亏报告 `tools/trade_pnl_report.py`
+
+按 pa-entry 信号重建每笔交易（按成交 LIFO 配对），附上决策置信度，输出按 **置信度分段 / 开仓日 / 方向 / 币种** 的盈亏统计（已平净盈亏、手续费、浮盈、胜率等），并与账户 income 流水（已实现盈亏 + 手续费 + 资金费）对账，另汇总入场订单状态分布：
+
+```cmd
+python tools/trade_pnl_report.py                          # 最近 5 天，置信度分界 55
+python tools/trade_pnl_report.py --days 14 --symbols ETHUSDT,ZECUSDT
+python tools/trade_pnl_report.py --conf-cut 60 --detail --out report.json
+```
+
+| 参数 | 默认 | 说明 |
+| ---- | ---- | ---- |
+| `--days` | 5 | 分析窗口（本地自然日） |
+| `--symbols` | BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,ZECUSDT | 逗号分隔的币种列表 |
+| `--conf-cut` | 55 | 置信度分界：输出 ≥cut、<cut、无信号（手动/外部）与全部 4 组统计 |
+| `--detail` | 关 | 逐笔打印交易明细 |
+| `--out` | 无 | 分组/按日/按币种统计写入 JSON 文件 |
+
+#### 止损规则模拟 `tools/sim_trailing_stop.py`
+
+将每笔**已平仓**交易（由成交重建并匹配到带止损/止盈的决策）在真实 K 线上逐 bar 回放，对比「入场即挂固定止损/止盈、持有到触发」的基线，与下列保护规则的实际净值差异（R = 初始风险 `|entry − stop|`）：
+
+| 规则 | 含义 |
+| ---- | ---- |
+| `be05r` / `be1r` | 浮盈达 0.5R / 1R 后止损移至成本价（保本） |
+| `trail05r` / `trail1r` | 止损随最高浮盈回撤 0.5R / 1R 上移（追踪止损） |
+| `be_tp` | 行情触达止盈价位后将止损移至成本价 |
+
+```cmd
+python tools/sim_trailing_stop.py                 # 最近 5 天、默认全部规则
+python tools/sim_trailing_stop.py --days 14 --rules be1r,be_tp
+python tools/sim_trailing_stop.py --interval 5m --out result.json
+```
+
+| 参数 | 默认 | 说明 |
+| ---- | ---- | ---- |
+| `--days` | 5 | 回放窗口（本地自然日） |
+| `--symbols` | BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,ZECUSDT | 逗号分隔的币种列表 |
+| `--interval` | 1m | K 线周期：`1m` / `5m` / `15m` |
+| `--rules` | be05r,be1r,trail05r,trail1r,be_tp | 待模拟规则（逗号分隔） |
+| `--big-win-usdt` | 8.0 | 「大赢家」判定阈值：实际净盈亏超过该 USDT 数的交易 |
+| `--detail` | 关 | 打印逐笔与基线差异的分布（前 12 笔） |
+| `--out` | 无 | 逐规则汇总写入 JSON 文件 |
+
+输出表格列：`rule` 规则、`net` 模拟净盈亏、`tp` / `sl` 止盈/止损触发笔数、`miss` 无法回放笔数（实际平仓并非静态 SL/TP 触发）、`kept` 模拟后仍盈利的大赢家笔数、`vs-actual` 相对基线实际净值的差额。
+
 ---
 
 **免责声明**：本工具仅供学习与研究，不构成投资建议。交易有风险，决策后果自负。
