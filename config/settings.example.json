@@ -54,12 +54,52 @@
     "enabled": false,
     "targets": [
       {
+        "symbol": "BTCUSDT",
+        "timeframe": "15m",
+        "enabled": true
+      },
+      {
         "symbol": "ETHUSDT",
         "timeframe": "15m",
         "enabled": true
       },
       {
-        "symbol": "BTCUSDT",
+        "symbol": "BNBUSDT",
+        "timeframe": "15m",
+        "enabled": true
+      },
+      {
+        "symbol": "XRPUSDT",
+        "timeframe": "15m",
+        "enabled": true
+      },
+      {
+        "symbol": "SOLUSDT",
+        "timeframe": "15m",
+        "enabled": true
+      },
+      {
+        "symbol": "TRXUSDT",
+        "timeframe": "15m",
+        "enabled": true
+      },
+      {
+        "symbol": "ZECUSDT",
+        "timeframe": "15m",
+        "enabled": true
+      },
+      {
+        "symbol": "DOGEUSDT",
+        "timeframe": "15m",
+        "enabled": true
+      },
+      {
+        "symbol": "LINKUSDT",
+        "timeframe": "15m",
+        "enabled": true
+      },
+      {
+        "symbol": "ADAUSDT",
         "timeframe": "15m",
         "enabled": true
       }
@@ -67,7 +107,7 @@
     "auto_discover": {
       "enabled": false,
       "market": "usdm_futures",
-      "rank_by": "quote_volume",
+      "rank_by": "market_cap",
       "top_n": 10,
       "refresh_minutes": 60,
       "timeframe": "15m",
@@ -89,7 +129,15 @@
     "symbol": "BTCUSDT",
     "symbol_whitelist": [
       "BTCUSDT",
-      "ETHUSDT"
+      "ETHUSDT",
+      "BNBUSDT",
+      "XRPUSDT",
+      "SOLUSDT",
+      "TRXUSDT",
+      "ZECUSDT",
+      "DOGEUSDT",
+      "LINKUSDT",
+      "ADAUSDT"
     ],
     "leverage": 20,
     "max_notional_usdt": 100.0,
