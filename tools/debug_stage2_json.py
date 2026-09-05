@@ -2,6 +2,7 @@
 import json
 import re
 import sys
+from pathlib import Path
 
 RAW = r''' {
   "decision": {
@@ -17,6 +18,10 @@ RAW = r''' {
 # User pasted full JSON in query - read from stdin file if provided
 if len(sys.argv) > 1:
     RAW = open(sys.argv[1], encoding="utf-8").read()
+
+# make pa_agent importable when run from anywhere
+if str(Path(__file__).resolve().parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pa_agent.ai.json_validator import _strip_fences
 
