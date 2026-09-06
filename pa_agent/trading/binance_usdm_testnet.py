@@ -292,6 +292,31 @@ class BinanceUSDMTestnetClient:
                 f"Unexpected position payload for {symbol}: {exc}"
             ) from exc
 
+    def position_info(self, symbol: str) -> dict[str, Any]:
+        """Signed open amount and average entry price for ``symbol``.
+
+        Returns ``{"amount": Decimal, "entry": Decimal | None}`` (amount 0 when
+        flat). Used by the breakeven guard to track real fill prices.
+        """
+        rows = self._request(
+            "GET", "/fapi/v2/positionRisk", {"symbol": symbol}, signed=True
+        )
+        if not isinstance(rows, list) or not rows:
+            return {"amount": Decimal("0"), "entry": None}
+        row = rows[0]
+        try:
+            amount = Decimal(str(row.get("positionAmt") or 0))
+        except Exception as exc:
+            raise BinanceAPIError(f"Unexpected position payload for {symbol}: {exc}") from exc
+        entry: Decimal | None = None
+        try:
+            raw_entry = row.get("entryPrice")
+            if raw_entry not in (None, "", "0"):
+                entry = Decimal(str(raw_entry))
+        except Exception:
+            entry = None
+        return {"amount": amount, "entry": entry}
+
     def income_history(
         self, *, start_ms: int, end_ms: int | None = None, limit: int = 1000
     ) -> list[dict[str, Any]]:
@@ -503,7 +528,7 @@ def _execute_market_signal_once(
         # open-position guard: a watcher that died between fill and protection
         # (process restart) or a partial fill is repaired here with the SL/TP
         # recorded at placement time.
-        replacement = _replace_pending_limit(active_client, symbol)
+        replacement = _replace_pending_limit(active_client, symbol, config)
         if replacement is not None:
             return replacement
         if not active_client.one_way_mode():
@@ -533,6 +558,7 @@ def _execute_market_signal_once(
         # 30d daily-trend guard (whitelisted symbols only): a signal against the
         # daily-close trend of the symbol over the last trend_30d_days needs higher
         # confidence and, when allowed, runs at reduced leverage/size.
+        signal_conf = _parse_win_rate(decision.get("trade_confidence"))
         leverage = config.leverage
         trend_note = ""
         guard_active = (
@@ -545,7 +571,7 @@ def _execute_market_signal_once(
             bucket = _trend_bucket(trend_pct, config.trend_30d_neutral_pct)
             counter = (side == "BUY" and bucket == "bear") or (side == "SELL" and bucket == "bull")
             if counter:
-                conf = _parse_win_rate(decision.get("trade_confidence"))
+                conf = signal_conf
                 if config.counter_trend_min_confidence > 0 and (
                     conf is None or conf < config.counter_trend_min_confidence
                 ):
@@ -583,6 +609,7 @@ def _execute_market_signal_once(
                 signal_id,
                 leverage,
                 trend_note,
+                signal_conf,
             )
         if side == "BUY" and not (stop < price < target):
             return ExecutionResult("rejected", "Long requires stop < mark price < target")
@@ -604,7 +631,9 @@ def _execute_market_signal_once(
             client_id=_entry_client_id(signal_id),
         )
         try:
-            _attach_protection(active_client, symbol, side, stop, target)
+            sl_algo_id, _tp_algo_id = _attach_protection(
+                active_client, symbol, side, stop, target
+            )
         except BinanceAPIError:
             # Never leave an unprotected automatically-created position.
             active_client.close_market_position(
@@ -612,6 +641,16 @@ def _execute_market_signal_once(
             )
             raise
         _remember_signal(signal_id)
+        _maybe_guard(
+            active_client,
+            config,
+            symbol,
+            side,
+            stop,
+            target,
+            sl_algo_id,
+            signal_conf,
+        )
         return ExecutionResult(
             "submitted",
             "Testnet entry and protective orders submitted" + trend_note,
@@ -641,6 +680,7 @@ def _execute_limit_signal(
     signal_id: str,
     leverage: int,
     trend_note: str = "",
+    conf: float | None = None,
 ) -> ExecutionResult:
     if not config.limit_order_enabled:
         return ExecutionResult("skipped", "Limit order automation disabled", symbol)
@@ -675,7 +715,7 @@ def _execute_limit_signal(
             client_id=_entry_client_id(signal_id),
         )
         try:
-            _attach_protection(client, symbol, side, stop, target)
+            sl_algo_id, _tp_algo_id = _attach_protection(client, symbol, side, stop, target)
         except BinanceAPIError:
             client.close_market_position(
                 symbol=symbol,
@@ -684,6 +724,9 @@ def _execute_limit_signal(
             )
             raise
         _remember_signal(signal_id)
+        _maybe_guard(
+            client, config, symbol, side, stop, target, sl_algo_id, conf
+        )
         return ExecutionResult(
             "submitted",
             "Limit entry crossed mark price; submitted market entry and protective orders"
@@ -692,7 +735,7 @@ def _execute_limit_signal(
             _decimal_text(quantity),
             str(entry.get("orderId", "")),
         )
-    replacement = _replace_pending_limit(client, symbol)
+    replacement = _replace_pending_limit(client, symbol, config)
     if replacement is not None:
         return replacement
     client.set_leverage(symbol, leverage)
@@ -704,6 +747,7 @@ def _execute_limit_signal(
         "quantity": _decimal_text(quantity),
         "stop": _decimal_text(stop),
         "target": _decimal_text(target),
+        "conf": "" if conf is None else str(conf),
         "placed_at": time.time(),
     }
     _persist_pending(symbol, pending_record)
@@ -729,6 +773,8 @@ def _execute_limit_signal(
             "target": target,
             "quantity": quantity,
             "signal_id": signal_id,
+            "conf": conf,
+            "config": config,
             "timeout_seconds": config.limit_fill_timeout_minutes * 60,
             "poll_interval": config.limit_poll_interval_seconds,
         },
@@ -751,7 +797,11 @@ def _execute_limit_signal(
     )
 
 
-def _replace_pending_limit(client: BinanceUSDMTestnetClient, symbol: str) -> ExecutionResult | None:
+def _replace_pending_limit(
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    config: BinanceUSDMTestnetSettings | None = None,
+) -> ExecutionResult | None:
     """Cancel any resting limit entry for ``symbol``; protect a filled one.
 
     Returns an ExecutionResult when the previous entry already filled (the
@@ -769,6 +819,7 @@ def _replace_pending_limit(client: BinanceUSDMTestnetClient, symbol: str) -> Exe
     stop = _positive_decimal(old.get("stop"))
     target = _positive_decimal(old.get("target"))
     quantity = _positive_decimal(old.get("quantity"))
+    old_conf = _parse_win_rate(old.get("conf"))
     if not old_client_id or side not in ("BUY", "SELL") or stop is None or target is None:
         _drop_pending(symbol, old_client_id)
         return None
@@ -784,7 +835,9 @@ def _replace_pending_limit(client: BinanceUSDMTestnetClient, symbol: str) -> Exe
     if status == "FILLED":
         # The watcher died (process restart) before attaching protection: repair.
         try:
-            _attach_protection(client, symbol, side, stop, target)
+            sl_algo_id, _tp_algo_id = _attach_protection(
+                client, symbol, side, stop, target
+            )
         except BinanceAPIError as exc:
             logger.error("Filled limit entry for %s left unprotected: %s", symbol, exc)
             return ExecutionResult(
@@ -792,6 +845,10 @@ def _replace_pending_limit(client: BinanceUSDMTestnetClient, symbol: str) -> Exe
             )
         if old_signal_id:
             _remember_signal(old_signal_id)
+        if config is not None:
+            _maybe_guard(
+                client, config, symbol, side, stop, target, sl_algo_id, old_conf
+            )
         _drop_pending(symbol, old_client_id)
         return ExecutionResult("skipped", "Previously filled limit entry now protected", symbol)
     if status in ("NEW", "PARTIALLY_FILLED"):
@@ -813,6 +870,8 @@ def _replace_pending_limit(client: BinanceUSDMTestnetClient, symbol: str) -> Exe
                 old_client_id,
                 old_signal_id,
                 context="replaced pending entry",
+                config=config,
+                conf=old_conf,
             )
     else:
         _drop_pending(symbol, old_client_id)
@@ -825,9 +884,10 @@ def _attach_protection(
     side: str,
     stop: Decimal,
     target: Decimal,
-) -> None:
+) -> tuple[str, str]:
     """Attach close-position STOP_MARKET and TAKE_PROFIT_MARKET orders.
 
+    Returns the generated client algo ids of the (stop, target) orders.
     On failure, cancels any orders already placed and re-raises so the caller
     can roll back the position.
     """
@@ -860,6 +920,270 @@ def _attach_protection(
             except BinanceAPIError:
                 logger.exception("Failed to cancel orphaned Testnet protective order")
         raise
+    return stop_algo_id, target_algo_id
+
+
+# --- 保本移动止损 (breakeven stop guard) --------------------------------
+# Registry lives in the runtime state file under key "guards":
+#   symbol -> {stop_algo_id, target_algo_id, stop0, target, side, conf,
+#              ts, moved}
+
+def _guard_enabled(config: BinanceUSDMTestnetSettings, conf: float | None) -> bool:
+    """True when the breakeven feature applies to a signal with ``conf``."""
+    if str(config.breakeven_stop_trigger) == "off":
+        return False
+    if conf is None:
+        return config.breakeven_min_confidence <= 0
+    return conf >= config.breakeven_min_confidence
+
+
+def _guard_trigger_reached(
+    *,
+    mark: Decimal,
+    entry: Decimal,
+    stop0: Decimal,
+    target: Decimal,
+    side: str,
+    trigger: str,
+) -> bool:
+    """True when float profit reaches the configured breakeven trigger.
+
+    1r: |mark - entry| >= |entry - stop0| (risk R).
+    tp: price reached the TP1 target.
+    """
+    risk = abs(entry - stop0)
+    if risk <= 0:
+        return False
+    direction = 1 if side == "BUY" else -1
+    progress = (mark - entry) * direction
+    if trigger == "1r":
+        return progress >= risk
+    if trigger == "tp":
+        return progress >= (target - entry) * direction
+    if trigger == "1r_or_tp":
+        return progress >= risk or progress >= (target - entry) * direction
+    return False
+
+
+def _register_guard(symbol: str, record: dict[str, Any]) -> None:
+    with _STATE_LOCK:
+        state = _load_state()
+        guards = state.get("guards")
+        if not isinstance(guards, dict):
+            guards = {}
+            state["guards"] = guards
+        guards[symbol] = record
+        _save_state(state)
+
+
+def _read_guard(symbol: str) -> dict[str, Any] | None:
+    with _STATE_LOCK:
+        guards = _load_state().get("guards")
+    if not isinstance(guards, dict):
+        return None
+    record = guards.get(symbol)
+    return dict(record) if isinstance(record, dict) else None
+
+
+def _patch_guard(symbol: str, **patch: Any) -> None:
+    with _STATE_LOCK:
+        state = _load_state()
+        guards = state.get("guards")
+        if not isinstance(guards, dict):
+            return
+        record = guards.get(symbol)
+        if not isinstance(record, dict):
+            return
+        record.update(patch)
+        _save_state(state)
+
+
+def _breakeven_guard_loop(
+    *,
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    trigger: str,
+    poll_seconds: float,
+) -> None:
+    """Poll an open position; once float profit reaches the trigger, replace
+    the resting STOP algo order with one at the entry price (breakeven).
+    Exits when the position is closed or the stop has been moved.
+    """
+    consecutive_errors = 0
+    while True:
+        record = _read_guard(symbol)
+        if record is None or record.get("moved"):
+            return
+        side = str(record.get("side") or "")
+        stop0 = _positive_decimal(record.get("stop0"))
+        target = _positive_decimal(record.get("target"))
+        stop_algo_id = str(record.get("stop_algo_id") or "")
+        if side not in ("BUY", "SELL") or stop0 is None or target is None or not stop_algo_id:
+            return
+        try:
+            info = client.position_info(symbol)
+            amount = info["amount"]
+            entry = info["entry"]
+            if amount == 0 or entry is None:
+                return  # position closed (TP/SL/manual) - nothing to protect
+            if (side == "BUY" and amount < 0) or (side == "SELL" and amount > 0):
+                return  # not our position anymore
+            mark = client.mark_price(symbol)
+        except BinanceAPIError as exc:
+            consecutive_errors += 1
+            logger.warning(
+                "Breakeven guard poll failed for %s (attempt %d): %s",
+                symbol,
+                consecutive_errors,
+                exc,
+            )
+            if consecutive_errors >= 5:
+                logger.error(
+                    "Breakeven guard gave up for %s after repeated API errors; "
+                    "original stop stays in place",
+                    symbol,
+                )
+                return
+            time.sleep(poll_seconds)
+            continue
+        consecutive_errors = 0
+        if not _guard_trigger_reached(
+            mark=mark,
+            entry=entry,
+            stop0=stop0,
+            target=target,
+            side=side,
+            trigger=trigger,
+        ):
+            time.sleep(poll_seconds)
+            continue
+        exit_side = "SELL" if side == "BUY" else "BUY"
+        try:
+            client.cancel_algo_order(client_algo_id=stop_algo_id)
+            new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
+            client.place_close_algo_order(
+                symbol=symbol,
+                side=exit_side,
+                order_type="STOP_MARKET",
+                stop_price=entry,
+                client_algo_id=new_stop_id,
+            )
+        except BinanceAPIError as exc:
+            consecutive_errors += 1
+            logger.error(
+                "Breakeven stop move failed for %s (kept original stop at %s): %s",
+                symbol,
+                _decimal_text(stop0),
+                exc,
+            )
+            if consecutive_errors >= 5:
+                return
+            time.sleep(poll_seconds)
+            continue
+        _patch_guard(symbol, moved=True, stop_algo_id=new_stop_id)
+        logger.info(
+            "Breakeven stop moved to entry for %s %s (trigger=%s mark=%s)",
+            symbol,
+            side,
+            trigger,
+            _decimal_text(mark),
+        )
+        return
+
+
+def _maybe_guard(
+    client: BinanceUSDMTestnetClient,
+    config: BinanceUSDMTestnetSettings,
+    symbol: str,
+    side: str,
+    stop: Decimal,
+    target: Decimal,
+    stop_algo_id: str,
+    conf: float | None,
+) -> None:
+    """Register and start a breakeven guard when enabled for this signal."""
+    if not _guard_enabled(config, conf):
+        return
+    _register_guard(
+        symbol,
+        {
+            "stop_algo_id": stop_algo_id,
+            "stop0": _decimal_text(stop),
+            "target": _decimal_text(target),
+            "side": side,
+            "conf": conf,
+            "ts": time.time(),
+            "moved": False,
+        },
+    )
+    watcher = threading.Thread(
+        target=_breakeven_guard_loop,
+        kwargs={
+            "client": client,
+            "symbol": symbol,
+            "trigger": str(config.breakeven_stop_trigger),
+            "poll_seconds": float(config.breakeven_poll_seconds),
+        },
+        daemon=True,
+    )
+    watcher.start()
+    logger.info(
+        "Breakeven guard started for %s %s (conf=%s)",
+        symbol,
+        side,
+        conf if conf is not None else "-",
+    )
+
+
+def resume_breakeven_guards(
+    settings: Settings | None = None,
+    *,
+    client: BinanceUSDMTestnetClient | None = None,
+) -> int:
+    """Re-arm breakeven guard loops for registered open positions after restart.
+
+    Returns the number of guards resumed. Guards that already moved their stop
+    (or whose position is gone) exit immediately on their first poll.
+    """
+    config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
+    if not config.enabled or config.dry_run or config.emergency_stop:
+        return 0
+    if str(config.breakeven_stop_trigger) == "off":
+        return 0
+    with _STATE_LOCK:
+        guards = _load_state().get("guards")
+        records = (
+            {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
+            if isinstance(guards, dict)
+            else {}
+        )
+    if not records:
+        return 0
+    try:
+        active = client or BinanceUSDMTestnetClient(config.api_key, config.api_secret)
+    except ValueError as exc:
+        logger.error("Cannot resume breakeven guards: %s", exc)
+        return 0
+    resumed = 0
+    for symbol, record in records.items():
+        if record.get("moved"):
+            continue
+        conf = record.get("conf")
+        if not _guard_enabled(config, conf):
+            continue
+        watcher = threading.Thread(
+            target=_breakeven_guard_loop,
+            kwargs={
+                "client": active,
+                "symbol": symbol,
+                "trigger": str(config.breakeven_stop_trigger),
+                "poll_seconds": float(config.breakeven_poll_seconds),
+            },
+            daemon=True,
+        )
+        watcher.start()
+        resumed += 1
+    return resumed
 
 
 def _settle_after_entry_gone(
@@ -873,6 +1197,8 @@ def _settle_after_entry_gone(
     signal_id: str,
     *,
     context: str,
+    config: BinanceUSDMTestnetSettings | None = None,
+    conf: float | None = None,
 ) -> None:
     """A limit entry is gone (timed out / cancelled / ended) but may still
     hold a partial position. Protect whatever is open using the recorded
@@ -903,7 +1229,7 @@ def _settle_after_entry_gone(
         _drop_pending(symbol, client_id)
         return
     try:
-        _attach_protection(client, symbol, side, stop, target)
+        sl_algo_id, _tp_algo_id = _attach_protection(client, symbol, side, stop, target)
     except BinanceAPIError as exc:
         _drop_pending(symbol, client_id)
         try:
@@ -919,6 +1245,10 @@ def _settle_after_entry_gone(
         return
     if signal_id:
         _remember_signal(signal_id)
+    if config is not None:
+        _maybe_guard(
+            client, config, symbol, side, stop, target, sl_algo_id, conf
+        )
     _drop_pending(symbol, client_id)
     logger.info(
         "Testnet %s; open %s position (%s) protected with SL/TP",
@@ -939,6 +1269,8 @@ def _cancel_and_settle(
     signal_id: str,
     *,
     context: str,
+    config: BinanceUSDMTestnetSettings | None = None,
+    conf: float | None = None,
 ) -> None:
     """Cancel the resting remainder of a timed-out entry, then protect or
     roll back any partial fill. When the cancel itself fails the pending
@@ -968,6 +1300,8 @@ def _cancel_and_settle(
         client_id,
         signal_id,
         context=context,
+        config=config,
+        conf=conf,
     )
 
 
@@ -983,6 +1317,8 @@ def _watch_limit_entry(
     signal_id: str,
     timeout_seconds: float,
     poll_interval: float,
+    conf: float | None = None,
+    config: BinanceUSDMTestnetSettings | None = None,
 ) -> None:
     """Poll a resting limit entry; attach TP/SL on full fill, and protect or
     roll back any partial fill when the order ends (timeout / cancel).
@@ -1004,6 +1340,8 @@ def _watch_limit_entry(
                     quantity,
                     signal_id,
                     context="timed out after status failures",
+                    config=config,
+                    conf=conf,
                 )
                 return
             remaining = deadline - time.monotonic()
@@ -1013,7 +1351,9 @@ def _watch_limit_entry(
             continue
         if status == "FILLED":
             try:
-                _attach_protection(client, symbol, side, stop, target)
+                sl_algo_id, _tp_algo_id = _attach_protection(
+                    client, symbol, side, stop, target
+                )
             except BinanceAPIError as exc:
                 _drop_pending(symbol, client_id)
                 try:
@@ -1027,6 +1367,10 @@ def _watch_limit_entry(
                 logger.error("Limit entry filled but protection failed for %s: %s", symbol, exc)
                 return
             _remember_signal(signal_id)
+            if config is not None:
+                _maybe_guard(
+                    client, config, symbol, side, stop, target, sl_algo_id, conf
+                )
             _drop_pending(symbol, client_id)
             logger.info("Testnet limit entry filled and protected: %s %s", symbol, client_id)
             return
@@ -1043,6 +1387,8 @@ def _watch_limit_entry(
                 client_id,
                 signal_id,
                 context=f"order ended ({status})",
+                config=config,
+                conf=conf,
             )
             return
         if time.monotonic() >= deadline:
@@ -1056,6 +1402,8 @@ def _watch_limit_entry(
                 quantity,
                 signal_id,
                 context="timed out",
+                config=config,
+                conf=conf,
             )
             return
         remaining = deadline - time.monotonic()
@@ -1104,6 +1452,7 @@ def resume_pending_limit_watchers(
         stop = _positive_decimal(record.get("stop"))
         target = _positive_decimal(record.get("target"))
         quantity = _positive_decimal(record.get("quantity"))
+        conf = _parse_win_rate(record.get("conf"))
         placed_at = record.get("placed_at")
         if (
             not client_id
@@ -1129,6 +1478,8 @@ def resume_pending_limit_watchers(
                 "target": target,
                 "quantity": quantity,
                 "signal_id": signal_id,
+                "conf": conf,
+                "config": config,
                 "timeout_seconds": timeout_seconds,
                 "poll_interval": config.limit_poll_interval_seconds,
             },

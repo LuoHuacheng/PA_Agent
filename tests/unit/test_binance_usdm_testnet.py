@@ -93,6 +93,11 @@ class FakeClient:
         # Not configured in the fake: the 30d-trend guard fails open.
         raise BinanceAPIError("daily klines not configured in fake")
 
+    def position_info(self, symbol: str) -> dict:
+        # Flat by default: breakeven guard threads exit on their first poll.
+        self.calls.append(("position_info", symbol))
+        return {"amount": Decimal("0"), "entry": None}
+
 
 class OpenPositionClient(FakeClient):
     """Account that already holds an open position for the target symbol."""
@@ -1124,6 +1129,148 @@ def test_resume_pending_limit_watchers_after_restart() -> None:
         settings, client=PartialOpenClient()
     ) == 0
     assert started == []
+    monkeypatch.undo()
+
+# ---- 保本移动止损 (breakeven guard) ------------------------------------
+
+class MarkSeqClient(FakeClient):
+    """Open long position at 100 with a mark-price sequence."""
+
+    def __init__(self, marks: list[float]) -> None:
+        super().__init__()
+        self._marks = [Decimal(str(m)) for m in marks]
+        self.pos = {"amount": Decimal("100"), "entry": Decimal("100")}
+
+    def position_info(self, symbol: str) -> dict:
+        self.calls.append(("position_info", symbol))
+        return dict(self.pos)
+
+    def mark_price(self, symbol: str) -> Decimal:
+        self.calls.append(("mark_price", symbol))
+        return self._marks.pop(0) if self._marks else Decimal("100")
+
+
+def _register_test_guard() -> None:
+    binance_usdm_testnet._register_guard(
+        "BTCUSDT",
+        {"stop_algo_id": "pa-sl-old0001", "stop0": "90", "target": "120",
+         "side": "BUY", "conf": 60, "ts": time.time(), "moved": False},
+    )
+
+
+def test_guard_trigger_1r_moves_stop_to_entry(monkeypatch) -> None:
+    """浮盈达 1R 后: 撤销旧 STOP 并在入场价重挂, 注册表标记 moved。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    client = MarkSeqClient([95, 105, 111])  # 95/105 未达 1R, 111 达 1.1R
+    _register_test_guard()
+    binance_usdm_testnet._breakeven_guard_loop(
+        client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0
+    )
+    cancels = [c[1] for c in client.calls if c[0] == "cancel_protection"]
+    assert cancels, "must cancel the original stop"
+    assert cancels[0]["client_algo_id"] == "pa-sl-old0001"
+    places = [c[1] for c in client.calls if c[0] == "protection"]
+    assert places, "must place a replacement stop"
+    assert places[-1]["stop_price"] == Decimal("100")
+    assert places[-1]["order_type"] == "STOP_MARKET"
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["moved"] is True
+    assert record["stop_algo_id"] != "pa-sl-old0001"
+
+
+def test_guard_tp_trigger_needs_target_touch(monkeypatch) -> None:
+    """tp 触发: 浮盈 0.5R 不动, 触 TP1 才移。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    client = MarkSeqClient([105, 121])
+    _register_test_guard()
+    binance_usdm_testnet._breakeven_guard_loop(
+        client=client, symbol="BTCUSDT", trigger="tp", poll_seconds=1.0
+    )
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["moved"] is True
+    assert len(sleeps) == 1  # first poll not armed, second armed
+
+
+def test_guard_trigger_reached_math() -> None:
+    trig = binance_usdm_testnet._guard_trigger_reached
+    long = dict(entry=Decimal("100"), stop0=Decimal("90"),
+                target=Decimal("120"), side="BUY")
+    assert trig(mark=Decimal("111"), trigger="1r", **long)
+    assert not trig(mark=Decimal("105"), trigger="1r", **long)
+    assert not trig(mark=Decimal("105"), trigger="tp", **long)
+    assert trig(mark=Decimal("121"), trigger="tp", **long)
+    assert trig(mark=Decimal("121"), trigger="1r_or_tp", **long)
+    short = dict(entry=Decimal("100"), stop0=Decimal("110"),
+                 target=Decimal("80"), side="SELL")
+    assert trig(mark=Decimal("89"), trigger="1r", **short)
+    assert not trig(mark=Decimal("91"), trigger="1r", **short)
+
+
+def test_maybe_guard_policy_and_registration(monkeypatch) -> None:
+    started: list[dict] = []
+
+    class FakeThread:
+        def __init__(self, *, target, kwargs, daemon=True) -> None:
+            self.kwargs = kwargs
+
+        def start(self) -> None:
+            started.append(self.kwargs)
+
+    monkeypatch.setattr(binance_usdm_testnet.threading, "Thread", FakeThread)
+    settings = _settings()  # defaults: trigger 1r, min conf 55
+    client = FakeClient()
+    # conf below floor -> no registry, no thread
+    binance_usdm_testnet._maybe_guard(
+        client, settings.binance_usdm_testnet, "BTCUSDT", "BUY",
+        Decimal("90"), Decimal("120"), "pa-sl-x", 50,
+    )
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+    assert started == []
+    # conf above floor -> registered and thread started
+    binance_usdm_testnet._maybe_guard(
+        client, settings.binance_usdm_testnet, "BTCUSDT", "BUY",
+        Decimal("90"), Decimal("120"), "pa-sl-x", 58,
+    )
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["conf"] == 58
+    assert started and started[0]["symbol"] == "BTCUSDT"
+    # feature off -> nothing
+    settings.binance_usdm_testnet.breakeven_stop_trigger = "off"
+    started.clear()
+    binance_usdm_testnet._maybe_guard(
+        client, settings.binance_usdm_testnet, "BTCUSDT", "BUY",
+        Decimal("90"), Decimal("120"), "pa-sl-y", 90,
+    )
+    assert started == []
+    monkeypatch.undo()
+
+
+def test_resume_breakeven_guards_skips_moved(monkeypatch) -> None:
+    started: list[dict] = []
+
+    class FakeThread:
+        def __init__(self, *, target, kwargs, daemon=True) -> None:
+            self.kwargs = kwargs
+
+        def start(self) -> None:
+            started.append(self.kwargs)
+
+    monkeypatch.setattr(binance_usdm_testnet.threading, "Thread", FakeThread)
+    settings = _settings()
+    _register_test_guard()
+    # not moved + conf ok -> resumed
+    assert binance_usdm_testnet.resume_breakeven_guards(
+        settings, client=FakeClient()
+    ) == 1
+    assert started
+    started.clear()
+    # moved -> skipped
+    binance_usdm_testnet._patch_guard("BTCUSDT", moved=True)
+    assert binance_usdm_testnet.resume_breakeven_guards(
+        settings, client=FakeClient()
+    ) == 0
     monkeypatch.undo()
 
 # ---- 30d 日线大趋势护栏 ------------------------------------------------

@@ -227,6 +227,15 @@ class BinanceUSDMTestnetSettings(BaseModel):
     counter_trend_min_confidence: int = Field(default=60, ge=0, le=100)
     # 逆大趋势且通过门槛的单, 杠杆 (名义仓位随杠杆同比例) 乘以此系数, 最小 1x.
     counter_trend_size_scale: float = Field(default=0.5, ge=0.1, le=1.0)
+    # --- 保本移动止损 (breakeven stop) ---
+    # 持仓浮盈达标后把交易所 STOP 保护单移到入场价, 将"赚过又回吐"的亏损转成
+    # 保本离场. 触发条件: 1r = 浮盈 >= 1R (risk = |entry - stop|); tp = 浮盈触及
+    # TP1; 1r_or_tp = 两者先到先触发. off = 关闭该功能.
+    breakeven_stop_trigger: Literal["off", "1r", "tp", "1r_or_tp"] = "1r"
+    # 仅对 trade_confidence >= 此值的信号启用保本止损 (0 = 全部启用).
+    breakeven_min_confidence: int = Field(default=55, ge=0, le=100)
+    # 持仓守护线程轮询 mark price 的间隔秒数.
+    breakeven_poll_seconds: int = Field(default=10, ge=2, le=600)
 
 
 class MonitorTarget(BaseModel):
