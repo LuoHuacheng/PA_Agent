@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003 - Chinese config copy
 """Pydantic settings models for PA Agent."""
 
 from __future__ import annotations
@@ -244,6 +245,11 @@ class BinanceUSDMTestnetSettings(BaseModel):
     structure_exit_mode: Literal["off", "dry_run", "on"] = "dry_run"
     # 诊断反向连续确认所需已收盘K线数 (每轮分析一根新K).
     structure_exit_confirm_bars: int = Field(default=2, ge=1, le=6)
+    # --- 方向质量闸门 (direction gates) ---
+    # 下单前的程序化方向过滤: G1 限价/突破单入场价贴近最近收盘价(<=2跳,
+    # 追价而非回踩), G2 与上一轮诊断方向相反的即时新单. 模式: off = 关闭;
+    # dry_run = 只记录不拦截 (默认, 先观察); on = 拒绝并拦截执行与通知.
+    direction_gates_mode: Literal["off", "dry_run", "on"] = "dry_run"
 
 
 class MonitorTarget(BaseModel):

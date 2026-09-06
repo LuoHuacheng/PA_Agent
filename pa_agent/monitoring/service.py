@@ -183,6 +183,8 @@ class MultiSymbolMonitor:
         self._next_refresh_at: float | None = None
         #: Per-symbol structure-failure negation streak (dir + consecutive bars).
         self._structure_exit_streak: dict[str, dict[str, object]] = {}
+        #: Direction-gate rejection counters keyed by gate name (G1/G2...).
+        self._direction_gate_stats: dict[str, int] = {}
         self._load_state()
 
         for target in self._cfg.targets:
@@ -554,6 +556,8 @@ class MultiSymbolMonitor:
         threshold = confidence_threshold_for_stance(self._settings.general.decision_stance)
         if not _has_order_opportunity(inner, threshold):
             return decision
+        if self._blocked_by_direction_gates(frame, inner, previous_record):
+            return decision
 
         # Persist a trade record and (when configured) auto-execute the Testnet
         # market order. Both are best-effort: a failure never disrupts analysis
@@ -604,6 +608,59 @@ class MultiSymbolMonitor:
             telegram_sent,
         )
         return decision
+
+    def _blocked_by_direction_gates(
+        self, frame: Any, inner: dict, previous_record: Any
+    ) -> bool:
+        """Run direction-quality gates on an order decision.
+
+        Returns True when the decision must be blocked (mode=on). In dry_run
+        mode every rejection is logged and counted but the order still flows.
+        Best-effort: gate errors never block anything.
+        """
+        cfg = self._settings.binance_usdm_testnet
+        mode = str(getattr(cfg, "direction_gates_mode", "off") or "off").strip()
+        if mode == "off":
+            return False
+        try:
+            from pa_agent.trading.direction_gates import evaluate_direction_gates
+            from pa_agent.util.price_tick import infer_price_tick_from_frame
+
+            tick = infer_price_tick_from_frame(frame)
+            if tick is None:
+                return False
+            reasons = evaluate_direction_gates(
+                decision=inner,
+                bars=getattr(frame, "bars", None),
+                tick=tick,
+                previous_record=previous_record,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Direction-gate evaluation failed for %s %s: %s",
+                frame.symbol,
+                frame.timeframe,
+                exc,
+            )
+            return False
+        if not reasons:
+            return False
+        gates = ",".join(sorted({str(r).split(":", 1)[0] for r in reasons}))
+        self._direction_gate_stats[gates] = self._direction_gate_stats.get(gates, 0) + 1
+        detail = "; ".join(reasons)
+        if mode == "dry_run":
+            logger.info(
+                "[方向闸门 dry-run] %s %s 命中 %s: %s",
+                frame.symbol,
+                frame.timeframe,
+                gates,
+                detail,
+            )
+            return False
+        logger.warning(
+            "[方向闸门] %s %s 拦截 %s: %s", frame.symbol, frame.timeframe, gates, detail
+        )
+        return True
 
     def _evaluate_structure_exit(self, frame: Any, record: Any) -> None:
         """React to diagnosis negation while a pa-entry position is open.
@@ -736,6 +793,11 @@ class MultiSymbolMonitor:
                 self._structure_exit_streak = {
                     str(k): v for k, v in streak.items() if isinstance(v, dict)
                 }
+            stats = raw.get("direction_gate_stats", {})
+            if isinstance(stats, dict):
+                self._direction_gate_stats = {
+                    str(k): int(v) for k, v in stats.items() if isinstance(v, (int, float))
+                }
         except FileNotFoundError:
             pass
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -750,6 +812,7 @@ class MultiSymbolMonitor:
                     {
                         "last_processed_closed_ts": self._persisted_closed_ts,
                         "structure_exit_streak": self._structure_exit_streak,
+                        "direction_gate_stats": self._direction_gate_stats,
                     },
                     indent=2,
                 ),
