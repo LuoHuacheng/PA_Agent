@@ -940,4 +940,185 @@ def test_stop_distance_minimum_is_configurable() -> None:
     result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
     assert result.status == "rejected"
     assert "Stop loss too close" in result.reason
+# ── P0-3: 限价部分成交后绝不裸仓 ───────────────────────────────────────
+
+def _persist_pending_record(symbol: str, client_id: str, signal_id: str) -> None:
+    binance_usdm_testnet._persist_pending(
+        symbol,
+        {
+            "client_id": client_id,
+            "signal_id": signal_id,
+            "side": "BUY",
+            "quantity": "167.79",
+            "stop": "90",
+            "target": "120",
+            "placed_at": time.time() - 3600,
+        },
+    )
+
+
+class PartialOpenClient(FakeClient):
+    """Account holding the partially-filled remainder of a limit entry."""
+
+    def __init__(self, amount: str = "91.05") -> None:
+        super().__init__()
+        self._amount = amount
+
+    def net_position(self, symbol: str) -> Decimal:
+        self.calls.append(("net_position", symbol))
+        return Decimal(self._amount)
+
+
+class FailTpPartialClient(PartialOpenClient):
+    """Partial-fill account whose TAKE_PROFIT protection leg is rejected."""
+
+    def place_close_algo_order(self, **kwargs: object) -> None:
+        super().place_close_algo_order(**kwargs)
+        if len([call for call in self.calls if call[0] == "protection"]) == 2:
+            raise BinanceAPIError("take-profit rejected")
+
+
+def _run_watcher_on_partial(
+    client: FakeClient,
+    monkeypatch,
+    *,
+    statuses: list[str],
+    jump_past_deadline: bool,
+) -> None:
+    client.statuses["pa-entry-partial"] = list(statuses)
+    if jump_past_deadline:
+        clock = iter((0.0, 2.0))
+
+        def fake_monotonic() -> float:
+            return next(clock, 2.0)
+
+        monkeypatch.setattr(binance_usdm_testnet.time, "monotonic", fake_monotonic)
+    binance_usdm_testnet._watch_limit_entry(
+        client=client,
+        symbol="BTCUSDT",
+        client_id="pa-entry-partial",
+        side="BUY",
+        stop=Decimal("90"),
+        target=Decimal("120"),
+        quantity=Decimal("167.79"),
+        signal_id="partial-signal",
+        timeout_seconds=1.0,
+        poll_interval=0.1,
+    )
+
+
+def test_watcher_timeout_after_partial_fill_attaches_protection(monkeypatch) -> None:
+    """Regression (LINKUSDT incident): a timed-out partially-filled entry must
+    cancel the resting remainder and protect the partial position instead of
+    leaving it naked."""
+    client = PartialOpenClient()
+    _persist_pending_record("BTCUSDT", "pa-entry-partial", "partial-signal")
+    _run_watcher_on_partial(client, monkeypatch, statuses=["PARTIALLY_FILLED"], jump_past_deadline=True)
+
+    assert ("cancel_limit", "pa-entry-partial") in client.calls
+    protections = [call[1] for call in client.calls if call[0] == "protection"]
+    assert {order["order_type"] for order in protections} == {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+    seen = _state().get("seen") or {}
+    assert seen.get("partial-signal"), "protected partial fill must count as a signal"
+    assert not _pending_state()
+
+
+def test_watcher_timeout_partial_fill_protection_failure_rolls_back(monkeypatch) -> None:
+    """TP leg rejected on a partial fill: roll the position back, never naked."""
+    client = FailTpPartialClient()
+    _persist_pending_record("BTCUSDT", "pa-entry-partial", "partial-signal")
+    _run_watcher_on_partial(client, monkeypatch, statuses=["PARTIALLY_FILLED"], jump_past_deadline=True)
+
+    rollbacks = [call[1] for call in client.calls if call[0] == "rollback"]
+    assert rollbacks, "protection failure must close the partial position"
+    assert rollbacks[0]["quantity"] == Decimal("91.05")
+    assert not _pending_state()
+    seen = _state().get("seen") or {}
+    assert "partial-signal" not in seen
+
+
+def test_watcher_terminal_cancel_with_partial_fill_still_protects() -> None:
+    """Order cancelled elsewhere (UI/manual) after partial fill -> protect."""
+    client = PartialOpenClient()
+    _persist_pending_record("BTCUSDT", "pa-entry-partial", "partial-signal")
+    _run_watcher_on_partial(client, None, statuses=["CANCELED"], jump_past_deadline=False)
+
+    protections = [call[1] for call in client.calls if call[0] == "protection"]
+    assert {order["order_type"] for order in protections} == {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+    assert "cancel_limit" not in [call[0] for call in client.calls]
+    assert not _pending_state()
+
+
+def test_partial_stale_pending_protected_before_duplicate_rejection() -> None:
+    """New signal must not discard a previous partial fill without protection."""
+    client = PartialOpenClient("91.05")
+    _persist_pending_record("BTCUSDT", "pa-entry-partial", "partial-signal")
+    client.statuses["pa-entry-partial"] = ["PARTIALLY_FILLED"]
+    decision = _long_decision() | {"order_type": "限价单", "entry_price": 95}
+    result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "rejected"
+    assert "Position already open" in result.reason
+    protections = [call for call in client.calls if call[0] == "protection"]
+    assert len(protections) == 2
+    assert "limit_entry" not in [call[0] for call in client.calls]
+    assert not _pending_state()
+    seen = _state().get("seen") or {}
+    assert seen.get("partial-signal")
+
+
+def test_resume_pending_limit_watchers_after_restart() -> None:
+    """Restart must re-arm fill watchers for resting limit entries."""
+    started: list[dict] = []
+
+    class FakeThread:
+        def __init__(self, *, target, kwargs, daemon=True) -> None:
+            self.kwargs = kwargs
+
+        def start(self) -> None:
+            started.append(self.kwargs)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(binance_usdm_testnet.threading, "Thread", FakeThread)
+    settings = _settings()
+    settings.binance_usdm_testnet.limit_fill_timeout_minutes = 60
+    with binance_usdm_testnet._STATE_LOCK:
+        state = binance_usdm_testnet._load_state()
+        state.setdefault("pending", {})["BTCUSDT"] = {
+            "client_id": "pa-entry-fresh",
+            "signal_id": "fresh-signal",
+            "side": "BUY",
+            "quantity": "0.2",
+            "stop": "90",
+            "target": "120",
+            "placed_at": time.time() - 600,
+        }
+        state["pending"]["ETHUSDT"] = {
+            "client_id": "pa-entry-expired",
+            "signal_id": "expired-signal",
+            "side": "BUY",
+            "quantity": "0.2",
+            "stop": "90",
+            "target": "120",
+            "placed_at": time.time() - 7200,
+        }
+        binance_usdm_testnet._save_state(state)
+
+    count = binance_usdm_testnet.resume_pending_limit_watchers(
+        settings, client=PartialOpenClient()
+    )
+    assert count == 2
+    by_symbol = {record["symbol"]: record for record in started}
+    assert by_symbol["BTCUSDT"]["client_id"] == "pa-entry-fresh"
+    assert by_symbol["BTCUSDT"]["timeout_seconds"] == pytest.approx(3000.0, abs=2.0)
+    assert by_symbol["ETHUSDT"]["client_id"] == "pa-entry-expired"
+    assert by_symbol["ETHUSDT"]["timeout_seconds"] == 0.0
+
+    # Disabled automation must not spawn watchers.
+    settings.binance_usdm_testnet.enabled = False
+    started.clear()
+    assert binance_usdm_testnet.resume_pending_limit_watchers(
+        settings, client=PartialOpenClient()
+    ) == 0
+    assert started == []
+    monkeypatch.undo()
 

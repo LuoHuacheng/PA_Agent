@@ -470,6 +470,13 @@ def _execute_market_signal_once(
             config.api_key,
             config.api_secret,
         )
+        # Resolve any previous resting entry for this symbol before the
+        # open-position guard: a watcher that died between fill and protection
+        # (process restart) or a partial fill is repaired here with the SL/TP
+        # recorded at placement time.
+        replacement = _replace_pending_limit(active_client, symbol)
+        if replacement is not None:
+            return replacement
         if not active_client.one_way_mode():
             # Program is one-way-mode only; auto-switch the account instead of
             # rejecting the signal. Fails if hedge-mode positions are open.
@@ -697,6 +704,7 @@ def _replace_pending_limit(client: BinanceUSDMTestnetClient, symbol: str) -> Exe
     side = str(old.get("side") or "")
     stop = _positive_decimal(old.get("stop"))
     target = _positive_decimal(old.get("target"))
+    quantity = _positive_decimal(old.get("quantity"))
     if not old_client_id or side not in ("BUY", "SELL") or stop is None or target is None:
         _drop_pending(symbol, old_client_id)
         return None
@@ -728,7 +736,22 @@ def _replace_pending_limit(client: BinanceUSDMTestnetClient, symbol: str) -> Exe
         except BinanceAPIError as exc:
             return ExecutionResult("failed", f"Cannot replace pending limit entry: {exc}", symbol)
         logger.info("Replaced stale Testnet limit entry %s for %s", old_client_id, symbol)
-    _drop_pending(symbol, old_client_id)
+        if status == "PARTIALLY_FILLED":
+            # Never discard a partial fill while replacing the entry: protect
+            # it with the recorded SL/TP (or roll it back) first.
+            _settle_after_entry_gone(
+                client,
+                symbol,
+                side,
+                stop,
+                target,
+                quantity,
+                old_client_id,
+                old_signal_id,
+                context="replaced pending entry",
+            )
+    else:
+        _drop_pending(symbol, old_client_id)
     return None
 
 
@@ -775,6 +798,115 @@ def _attach_protection(
         raise
 
 
+def _settle_after_entry_gone(
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    side: str,
+    stop: Decimal,
+    target: Decimal,
+    quantity: Decimal | None,
+    client_id: str,
+    signal_id: str,
+    *,
+    context: str,
+) -> None:
+    """A limit entry is gone (timed out / cancelled / ended) but may still
+    hold a partial position. Protect whatever is open using the recorded
+    SL/TP; when protection cannot be attached, roll the position back so an
+    automatically-created position is never left unprotected (P0-4).
+    """
+    try:
+        open_qty = client.net_position(symbol)
+    except BinanceAPIError as exc:
+        logger.error(
+            "Cannot inspect %s position after %s (%s): %s", symbol, context, client_id, exc
+        )
+        _drop_pending(symbol, client_id)
+        return
+    if open_qty == 0:
+        _drop_pending(symbol, client_id)
+        return
+    # Only protect a position whose direction matches this entry's side: a
+    # same-symbol position opened by some other order must keep its own levels.
+    if (side == "BUY" and open_qty < 0) or (side == "SELL" and open_qty > 0):
+        logger.info(
+            "Testnet %s: open %s position (%s) is opposite to %s; leaving it to its own protection",
+            context,
+            symbol,
+            _decimal_text(open_qty),
+            side,
+        )
+        _drop_pending(symbol, client_id)
+        return
+    try:
+        _attach_protection(client, symbol, side, stop, target)
+    except BinanceAPIError as exc:
+        _drop_pending(symbol, client_id)
+        try:
+            close_qty = abs(open_qty) if quantity is None else min(quantity, abs(open_qty))
+            client.close_market_position(
+                symbol=symbol,
+                side="SELL" if side == "BUY" else "BUY",
+                quantity=close_qty,
+            )
+        except BinanceAPIError:
+            logger.exception("Failed to close %s position left by %s", symbol, context)
+        logger.error("%s left an open %s position (%s) without protection: %s", context, symbol, client_id, exc)
+        return
+    if signal_id:
+        _remember_signal(signal_id)
+    _drop_pending(symbol, client_id)
+    logger.info(
+        "Testnet %s; open %s position (%s) protected with SL/TP",
+        context,
+        symbol,
+        client_id,
+    )
+
+
+def _cancel_and_settle(
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    client_id: str,
+    side: str,
+    stop: Decimal,
+    target: Decimal,
+    quantity: Decimal | None,
+    signal_id: str,
+    *,
+    context: str,
+) -> None:
+    """Cancel the resting remainder of a timed-out entry, then protect or
+    roll back any partial fill. When the cancel itself fails the pending
+    record is kept so a later signal or a restart resume can still recover.
+    """
+    try:
+        client.cancel_order(symbol=symbol, client_id=client_id)
+    except BinanceAPIError as exc:
+        logger.error(
+            "Cancel %s limit entry failed for %s (%s): %s; pending record kept",
+            context,
+            symbol,
+            client_id,
+            exc,
+        )
+        return
+    logger.info(
+        "Testnet limit entry %s; resting remainder canceled: %s %s", context, symbol, client_id
+    )
+    _settle_after_entry_gone(
+        client,
+        symbol,
+        side,
+        stop,
+        target,
+        quantity,
+        client_id,
+        signal_id,
+        context=context,
+    )
+
+
 def _watch_limit_entry(
     *,
     client: BinanceUSDMTestnetClient,
@@ -788,7 +920,9 @@ def _watch_limit_entry(
     timeout_seconds: float,
     poll_interval: float,
 ) -> None:
-    """Poll a resting limit entry; attach TP/SL on fill, cancel on timeout."""
+    """Poll a resting limit entry; attach TP/SL on full fill, and protect or
+    roll back any partial fill when the order ends (timeout / cancel).
+    """
     deadline = time.monotonic() + timeout_seconds
     while True:
         try:
@@ -796,15 +930,16 @@ def _watch_limit_entry(
         except BinanceAPIError as exc:
             logger.warning("Testnet limit fill check failed for %s: %s", symbol, exc)
             if time.monotonic() >= deadline:
-                try:
-                    client.cancel_order(symbol=symbol, client_id=client_id)
-                except BinanceAPIError as cancel_exc:
-                    logger.warning(
-                        "Cancel timed-out limit entry failed for %s: %s", symbol, cancel_exc
-                    )
-                _drop_pending(symbol, client_id)
-                logger.info(
-                    "Testnet limit entry timed out and was canceled: %s %s", symbol, client_id
+                _cancel_and_settle(
+                    client,
+                    symbol,
+                    client_id,
+                    side,
+                    stop,
+                    target,
+                    quantity,
+                    signal_id,
+                    context="timed out after status failures",
                 )
                 return
             remaining = deadline - time.monotonic()
@@ -832,21 +967,118 @@ def _watch_limit_entry(
             logger.info("Testnet limit entry filled and protected: %s %s", symbol, client_id)
             return
         if status in ("CANCELED", "EXPIRED", "REJECTED"):
-            _drop_pending(symbol, client_id)
-            logger.info("Testnet limit entry ended (%s): %s %s", status, symbol, client_id)
+            # The entry may already have filled partially before it ended
+            # (e.g. cancelled from the exchange UI): never abandon that.
+            _settle_after_entry_gone(
+                client,
+                symbol,
+                side,
+                stop,
+                target,
+                quantity,
+                client_id,
+                signal_id,
+                context=f"order ended ({status})",
+            )
             return
         if time.monotonic() >= deadline:
-            try:
-                client.cancel_order(symbol=symbol, client_id=client_id)
-            except BinanceAPIError as exc:
-                logger.warning("Cancel timed-out limit entry failed for %s: %s", symbol, exc)
-            _drop_pending(symbol, client_id)
-            logger.info("Testnet limit entry timed out and was canceled: %s %s", symbol, client_id)
+            _cancel_and_settle(
+                client,
+                symbol,
+                client_id,
+                side,
+                stop,
+                target,
+                quantity,
+                signal_id,
+                context="timed out",
+            )
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             continue
         time.sleep(min(poll_interval, remaining))
+
+
+def resume_pending_limit_watchers(
+    settings: Settings | None = None,
+    *,
+    client: BinanceUSDMTestnetClient | None = None,
+) -> int:
+    """Re-arm fill watchers for resting limit entries recorded before a restart.
+
+    Watcher threads do not survive a process restart: without this, a resting
+    GTC entry could fill later with nobody to attach its TP/SL. Each pending
+    record is re-watched with the remaining fill window; entries whose window
+    already expired are settled immediately by the watcher (cancel the resting
+    remainder, protect or roll back any partial fill).
+
+    Returns the number of watchers resumed.
+    """
+    config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
+    if not config.enabled or config.dry_run or config.emergency_stop:
+        return 0
+    with _STATE_LOCK:
+        raw_pending = _load_state().get("pending")
+        records = {
+            symbol: record
+            for symbol, record in raw_pending.items()
+            if isinstance(record, dict)
+        } if isinstance(raw_pending, dict) else {}
+    if not records:
+        return 0
+    try:
+        active_client = client or BinanceUSDMTestnetClient(config.api_key, config.api_secret)
+    except ValueError as exc:
+        logger.error("Cannot resume Testnet limit watchers: %s", exc)
+        return 0
+    resumed = 0
+    for symbol, record in records.items():
+        client_id = str(record.get("client_id") or "")
+        signal_id = str(record.get("signal_id") or "")
+        side = str(record.get("side") or "")
+        stop = _positive_decimal(record.get("stop"))
+        target = _positive_decimal(record.get("target"))
+        quantity = _positive_decimal(record.get("quantity"))
+        placed_at = record.get("placed_at")
+        if (
+            not client_id
+            or side not in ("BUY", "SELL")
+            or stop is None
+            or target is None
+            or quantity is None
+        ):
+            logger.warning("Dropping incomplete Testnet pending record for %s", symbol)
+            _drop_pending(symbol, client_id)
+            continue
+        timeout_seconds = float(config.limit_fill_timeout_minutes * 60)
+        if isinstance(placed_at, (int, float)):
+            timeout_seconds = max(0.0, timeout_seconds - max(0.0, time.time() - placed_at))
+        watcher = threading.Thread(
+            target=_watch_limit_entry,
+            kwargs={
+                "client": active_client,
+                "symbol": symbol,
+                "client_id": client_id,
+                "side": side,
+                "stop": stop,
+                "target": target,
+                "quantity": quantity,
+                "signal_id": signal_id,
+                "timeout_seconds": timeout_seconds,
+                "poll_interval": config.limit_poll_interval_seconds,
+            },
+            daemon=True,
+        )
+        watcher.start()
+        resumed += 1
+        logger.info(
+            "Resumed Testnet limit fill watcher for %s %s (remaining %.0fs)",
+            symbol,
+            client_id,
+            timeout_seconds,
+        )
+    return resumed
 
 
 def _daily_pnl_aggregate(

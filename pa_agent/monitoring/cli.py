@@ -321,6 +321,14 @@ def run_monitor() -> int:
 
     previous_sigint = signal.signal(signal.SIGINT, request_stop)
     previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
+    # A previous run may have died while a limit entry rested on the exchange:
+    # re-arm its fill watcher so a later fill still gets SL/TP attached.
+    try:
+        from pa_agent.trading.binance_usdm_testnet import resume_pending_limit_watchers
+
+        resume_pending_limit_watchers(settings)
+    except Exception:
+        logger.exception("恢复 Binance 测试网挂单 watcher 失败")
     monitor: MultiSymbolMonitor | None = None
     try:
         monitor = MultiSymbolMonitor(
