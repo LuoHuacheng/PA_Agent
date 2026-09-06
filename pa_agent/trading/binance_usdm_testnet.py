@@ -179,6 +179,25 @@ class BinanceUSDMTestnetClient:
         except (KeyError, ValueError) as exc:
             raise BinanceAPIError("Binance returned no mark price") from exc
 
+    def daily_close_series(self, symbol: str, days: int) -> list[float]:
+        """Daily close prices (oldest first) covering the last ``days`` days."""
+        start_ms = self._now_ms() - (days + 2) * 86_400_000
+        result = self._request(
+            "GET",
+            "/fapi/v1/klines",
+            {"symbol": symbol, "interval": "1d", "startTime": start_ms, "limit": days + 2},
+        )
+        closes: list[float] = []
+        if isinstance(result, list):
+            for row in result:
+                try:
+                    closes.append(float(row[4]))
+                except (TypeError, ValueError, IndexError):
+                    continue
+        if len(closes) < 2:
+            raise BinanceAPIError(f"Binance returned no daily klines for {symbol}")
+        return closes
+
     def one_way_mode(self) -> bool:
         result = self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
         return not bool(result.get("dualSidePosition"))
@@ -351,6 +370,7 @@ def execute_market_signal(
     *,
     analysis_symbol: str = "",
     client: BinanceUSDMTestnetClient | None = None,
+    trend_30d_pct: float | None = None,
 ) -> ExecutionResult:
     """Execute one validated market signal, retrying after Testnet rate-limit bans.
 
@@ -365,7 +385,11 @@ def execute_market_signal(
     backoff = max(5, int(getattr(config, "execution_retry_backoff_seconds", 30) or 30))
 
     result = _execute_market_signal_once(
-        decision, settings, analysis_symbol=analysis_symbol, client=client
+        decision,
+        settings,
+        analysis_symbol=analysis_symbol,
+        client=client,
+        trend_30d_pct=trend_30d_pct,
     )
     attempts, retried = 1, 0
     while (
@@ -385,7 +409,11 @@ def execute_market_signal(
         )
         time.sleep(delay)
         result = _execute_market_signal_once(
-            decision, settings, analysis_symbol=analysis_symbol, client=client
+            decision,
+            settings,
+            analysis_symbol=analysis_symbol,
+            client=client,
+            trend_30d_pct=trend_30d_pct,
         )
     if retried and result.status == "failed":
         result = ExecutionResult(
@@ -404,6 +432,7 @@ def _execute_market_signal_once(
     *,
     analysis_symbol: str = "",
     client: BinanceUSDMTestnetClient | None = None,
+    trend_30d_pct: float | None = None,
 ) -> ExecutionResult:
     """Execute one validated market signal, with mandatory Testnet TP/SL protection."""
     config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
@@ -501,9 +530,39 @@ def _execute_market_signal_once(
         price = active_client.mark_price(symbol)
         stop = _price_for_tick(stop, info)
         target = _price_for_tick(target, info)
+        # 30d daily-trend guard (whitelisted symbols only): a signal against the
+        # daily-close trend of the symbol over the last trend_30d_days needs higher
+        # confidence and, when allowed, runs at reduced leverage/size.
+        leverage = config.leverage
+        trend_note = ""
+        guard_active = (
+            config.counter_trend_min_confidence > 0 or config.counter_trend_size_scale < 1.0
+        )
+        if guard_active:
+            trend_pct = trend_30d_pct
+            if trend_pct is None:
+                trend_pct = _daily_trend_pct(active_client, symbol, config.trend_30d_days)
+            bucket = _trend_bucket(trend_pct, config.trend_30d_neutral_pct)
+            counter = (side == "BUY" and bucket == "bear") or (side == "SELL" and bucket == "bull")
+            if counter:
+                conf = _parse_win_rate(decision.get("trade_confidence"))
+                if config.counter_trend_min_confidence > 0 and (
+                    conf is None or conf < config.counter_trend_min_confidence
+                ):
+                    return ExecutionResult(
+                        "rejected",
+                        f"Counter-trend vs 30d trend ({trend_pct:+.1f}%) rejected: "
+                        f"trade_confidence {conf} < {config.counter_trend_min_confidence}",
+                        symbol,
+                    )
+                if config.counter_trend_size_scale < 1.0:
+                    leverage = max(1, round(config.leverage * config.counter_trend_size_scale))
+                    trend_note = (
+                        f"; counter-trend 30d ({trend_pct:+.1f}%) scaled leverage to {leverage}x"
+                    )
         # 保证金恒定：名义价值 = 保证金(margin_usdt) × 杠杆，杠杆变化不影响保证金。
         margin_usdt = float(config.max_notional_usdt)
-        notional = margin_usdt * config.leverage
+        notional = margin_usdt * leverage
         quantity = _quantity_for_notional(notional, price, info)
         if quantity is None:
             return ExecutionResult(
@@ -522,6 +581,8 @@ def _execute_market_signal_once(
                 price,
                 info,
                 signal_id,
+                leverage,
+                trend_note,
             )
         if side == "BUY" and not (stop < price < target):
             return ExecutionResult("rejected", "Long requires stop < mark price < target")
@@ -535,7 +596,7 @@ def _execute_market_signal_once(
                 f"({gap:.3f}% < {config.min_stop_distance_pct}% minimum)",
                 symbol,
             )
-        active_client.set_leverage(symbol, config.leverage)
+        active_client.set_leverage(symbol, leverage)
         entry = active_client.place_market_order(
             symbol=symbol,
             side=side,
@@ -553,7 +614,7 @@ def _execute_market_signal_once(
         _remember_signal(signal_id)
         return ExecutionResult(
             "submitted",
-            "Testnet entry and protective orders submitted",
+            "Testnet entry and protective orders submitted" + trend_note,
             symbol,
             _decimal_text(quantity),
             str(entry.get("orderId", "")),
@@ -578,6 +639,8 @@ def _execute_limit_signal(
     mark_price: Decimal,
     exchange_info: dict[str, Any],
     signal_id: str,
+    leverage: int,
+    trend_note: str = "",
 ) -> ExecutionResult:
     if not config.limit_order_enabled:
         return ExecutionResult("skipped", "Limit order automation disabled", symbol)
@@ -604,7 +667,7 @@ def _execute_limit_signal(
     if crosses_mark:
         # A crossed limit would fill immediately. Submit a market entry instead
         # so protection is attached through the same rollback-safe path.
-        client.set_leverage(symbol, config.leverage)
+        client.set_leverage(symbol, leverage)
         entry = client.place_market_order(
             symbol=symbol,
             side=side,
@@ -623,7 +686,8 @@ def _execute_limit_signal(
         _remember_signal(signal_id)
         return ExecutionResult(
             "submitted",
-            "Limit entry crossed mark price; submitted market entry and protective orders",
+            "Limit entry crossed mark price; submitted market entry and protective orders"
+            + trend_note,
             symbol,
             _decimal_text(quantity),
             str(entry.get("orderId", "")),
@@ -631,7 +695,7 @@ def _execute_limit_signal(
     replacement = _replace_pending_limit(client, symbol)
     if replacement is not None:
         return replacement
-    client.set_leverage(symbol, config.leverage)
+    client.set_leverage(symbol, leverage)
     entry_client_id = _entry_client_id(signal_id)
     pending_record = {
         "client_id": entry_client_id,
@@ -1350,3 +1414,41 @@ def _price_for_tick(price: Decimal, exchange_info: dict[str, Any]) -> Decimal:
 
 def _decimal_text(value: Decimal) -> str:
     return format(value.normalize(), "f")
+
+
+# 30d daily-trend guard state: symbol -> (local date of fetch, pct change)
+_TREND_CACHE: dict[str, tuple[str, float]] = {}
+
+
+def _trend_pct_from_closes(closes: list[float]) -> float:
+    """Percent change from the first to the last daily close in the series."""
+    return (closes[-1] / closes[0] - 1.0) * 100.0
+
+
+def _trend_bucket(pct: float | None, neutral_pct: float) -> str | None:
+    """Classify a daily-trend percent into bull/bear; None inside the neutral band."""
+    if pct is None or abs(pct) <= neutral_pct:
+        return None
+    return "bull" if pct > 0 else "bear"
+
+
+def _daily_trend_pct(
+    client: BinanceUSDMTestnetClient, symbol: str, days: int
+) -> float | None:
+    """Daily-close trend percent for ``symbol``, cached once per local day.
+
+    Fail-open: any fetch problem returns None so trading is never blocked by
+    trend data being unavailable (the guard then treats the market as neutral).
+    """
+    today = time.strftime("%Y%m%d")
+    cached = _TREND_CACHE.get(symbol)
+    if cached is not None and cached[0] == today:
+        return cached[1]
+    try:
+        closes = client.daily_close_series(symbol, days)
+        pct = _trend_pct_from_closes(closes)
+    except BinanceAPIError as exc:
+        logger.warning("Cannot fetch daily trend for %s: %s", symbol, exc)
+        return None
+    _TREND_CACHE[symbol] = (today, pct)
+    return pct

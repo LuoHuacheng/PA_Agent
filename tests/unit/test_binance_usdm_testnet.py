@@ -89,6 +89,10 @@ class FakeClient:
         self.calls.append(("net_position", symbol))
         return Decimal("0")
 
+    def daily_close_series(self, symbol: str, days: int) -> list[float]:
+        # Not configured in the fake: the 30d-trend guard fails open.
+        raise BinanceAPIError("daily klines not configured in fake")
+
 
 class OpenPositionClient(FakeClient):
     """Account that already holds an open position for the target symbol."""
@@ -1121,4 +1125,90 @@ def test_resume_pending_limit_watchers_after_restart() -> None:
     ) == 0
     assert started == []
     monkeypatch.undo()
+
+# ---- 30d 日线大趋势护栏 ------------------------------------------------
+
+def _trend_settings() -> Settings:
+    settings = _settings()
+    settings.binance_usdm_testnet.leverage = 20
+    return settings
+
+
+def test_counter_trend_below_confidence_rejected() -> None:
+    """Long vs a 30d bear trend with conf<60: rejected before any order flow."""
+    settings = _trend_settings()
+    client = FakeClient()
+    decision = _long_decision() | {"trade_confidence": 55}
+    result = execute_market_signal(
+        decision, settings, analysis_symbol="BTCUSDT", client=client,
+        trend_30d_pct=-20.0,
+    )
+    assert result.status == "rejected"
+    assert "Counter-trend vs 30d trend" in result.reason
+    assert "55.0 < 60" in result.reason
+    assert "entry" not in [call[0] for call in client.calls]
+
+
+def test_counter_trend_high_confidence_scales_leverage() -> None:
+    """Counter-30d-trend but conf>=60: allowed with leverage 20x -> 10x (half notional)."""
+    settings = _trend_settings()
+    client = FakeClient()
+    decision = _long_decision() | {"trade_confidence": 65}
+    result = execute_market_signal(
+        decision, settings, analysis_symbol="BTCUSDT", client=client,
+        trend_30d_pct=-20.0,
+    )
+    assert result.status == "submitted", result.reason
+    assert "scaled leverage to 10x" in result.reason
+    assert ("set_leverage", "BTCUSDT", 10) in client.calls
+    entry = next(call[1] for call in client.calls if call[0] == "entry")
+    # notional 20 USDT margin x 10 = 200 @ price 100 -> qty 2 (was 4 at 20x)
+    assert entry["quantity"] == Decimal("2")
+
+
+def test_counter_trend_short_against_bull_scaled() -> None:
+    """Short vs a 30d bull trend at conf=60: allowed with halved leverage."""
+    settings = _trend_settings()
+    client = FakeClient()
+    decision = _long_decision() | {
+        "order_direction": "做空",
+        "stop_loss_price": 110,
+        "take_profit_price": 90,
+        "trade_confidence": 60,
+    }
+    result = execute_market_signal(
+        decision, settings, analysis_symbol="BTCUSDT", client=client,
+        trend_30d_pct=12.0,
+    )
+    assert result.status == "submitted", result.reason
+    assert ("set_leverage", "BTCUSDT", 10) in client.calls
+
+
+def test_neutral_30d_trend_not_restricted() -> None:
+    """30d change inside the +/-5% neutral band: no restriction (even low conf)."""
+    settings = _trend_settings()
+    client = FakeClient()
+    decision = _long_decision() | {"trade_confidence": 30}
+    result = execute_market_signal(
+        decision, settings, analysis_symbol="BTCUSDT", client=client,
+        trend_30d_pct=4.0,
+    )
+    assert result.status == "submitted", result.reason
+    assert "counter-trend" not in result.reason.lower()
+    assert ("set_leverage", "BTCUSDT", 20) in client.calls
+
+
+def test_counter_trend_guard_disabled_when_scale_one_and_no_min() -> None:
+    """Both switches off: no guard, low-conf counter-trend order proceeds at full size."""
+    settings = _trend_settings()
+    settings.binance_usdm_testnet.counter_trend_min_confidence = 0
+    settings.binance_usdm_testnet.counter_trend_size_scale = 1.0
+    client = FakeClient()
+    decision = _long_decision() | {"trade_confidence": 40}
+    result = execute_market_signal(
+        decision, settings, analysis_symbol="BTCUSDT", client=client,
+        trend_30d_pct=-20.0,
+    )
+    assert result.status == "submitted", result.reason
+    assert ("set_leverage", "BTCUSDT", 20) in client.calls
 
