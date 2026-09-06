@@ -5,6 +5,7 @@ direction / symbol with an income-ledger reconciliation.
 
 Usage:
     python tools/trade_pnl_report.py                     # last 5 days, cut 55
+    python tools/trade_pnl_report.py --hours 20 --conf-cut 55 --detail
     python tools/trade_pnl_report.py --days 14 --symbols ETHUSDT,ZECUSDT
     python tools/trade_pnl_report.py --conf-cut 60 --detail --out report.json
 """
@@ -88,6 +89,8 @@ def attach_unrealized(opened, positions):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=5)
+    ap.add_argument("--hours", type=int, default=0,
+                    help="rolling window: last N hours ending now (overrides --days)")
     ap.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
     ap.add_argument("--conf-cut", type=int, default=55, help="confidence split point (default 55)")
     ap.add_argument("--detail", action="store_true", help="print per-trade rows")
@@ -95,7 +98,7 @@ def main():
     args = ap.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
-    start_ms, end_ms = window_bounds(args.days)
+    start_ms, end_ms = window_bounds(args.days, hours=args.hours or None)
     fetch_start = start_ms - 24 * 3600 * 1000
 
     settings, client = make_client()

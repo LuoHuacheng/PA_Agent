@@ -30,8 +30,15 @@ def day_key(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, TZ).strftime("%m-%d")
 
 
-def window_bounds(days: int):
-    """Local-day window: start of (days-1) days ago to start of tomorrow."""
+def window_bounds(days: int, *, hours: int | None = None):
+    """Window as (start_ms, end_ms).
+
+    Natural local-day window by default; pass hours for a rolling window
+    ending now (start = now - hours).
+    """
+    if hours:
+        end_ms = int(time.time() * 1000)
+        return end_ms - hours * 3600 * 1000, end_ms
     today = datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     start = today - timedelta(days=days - 1)
     end = today + timedelta(days=1)
