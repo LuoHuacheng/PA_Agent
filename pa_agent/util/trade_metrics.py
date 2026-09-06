@@ -81,7 +81,10 @@ def format_estimated_win_rate_reasoning(decision: dict[str, Any]) -> str:
 # Lower cap: reward must be at least equal to risk (1:1) for any stance.
 MIN_RISK_REWARD_RATIO = 1.0
 # Upper cap on TP1 reward:risk — enforced by widening stop, not by shrinking TP1.
-MAX_TP1_RISK_REWARD_RATIO = 1.0
+# 2.0 keeps sane structure stops (RR<=2) untouched; only extreme RR is widened,
+# and even then the model's structural stop is respected for RR<=2 (see the
+# ADAUSDT case where a 1.0 cap silently doubled the risk 0.2210 -> 0.2192).
+MAX_TP1_RISK_REWARD_RATIO = 2.0
 
 
 def min_risk_reward_ratio(decision_stance: str | None = None) -> float:

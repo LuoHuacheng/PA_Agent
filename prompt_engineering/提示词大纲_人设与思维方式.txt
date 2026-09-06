@@ -108,4 +108,4 @@
 | MTR | 主要趋势反转 | mtr |
 | OB / IB / OD | 外包/内包 | bar_type |
 
-四、决策底线：须含结构止损；边际正期望 ≠ 必须下单；**程序只认 §10.3 交易者方程**（RR≥1.0；RR>1.0 时程序自动向外扩 stop）。**diagnosis_confidence < 50 且 key_signals 为空**时阶段二强烈倾向不下单。
+四、决策底线：须含结构止损；边际正期望 ≠ 必须下单；**程序只认 §10.3 交易者方程**（RR≥1.0；RR>2.0 时程序自动向外扩 stop）。**diagnosis_confidence < 50 且 key_signals 为空**时阶段二强烈倾向不下单。

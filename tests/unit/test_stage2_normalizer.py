@@ -1257,6 +1257,83 @@ def test_repair_misplaced_decision_fields_from_diagnosis_summary() -> None:
     assert "estimated_win_rate_reasoning" not in out["diagnosis_summary"]
 
 
+def _widen_test_payload(
+    direction: str,
+    entry: float,
+    take_profit: float,
+    stop_loss: float,
+) -> dict:
+    """Minimal order payload accepted by normalize_stage2 (no kline frame)."""
+    diag_dir = "bullish" if direction == "做多" else "bearish"
+    return {
+        "decision": {
+            "order_type": "限价单",
+            "order_direction": direction,
+            "entry_price": entry,
+            "take_profit_price": take_profit,
+            "take_profit_price_2": take_profit - (0.0012 if direction == "做空" else -0.0012),
+            "stop_loss_price": stop_loss,
+            "reasoning": "结构回踩顺势，测试用。",  # noqa: RUF001
+            "diagnosis_confidence": 64,
+            "diagnosis_confidence_reasoning": "t",
+            "trade_confidence": 52,
+            "trade_confidence_reasoning": "t",
+            "estimated_win_rate": 55,
+            "estimated_win_rate_reasoning": "t",
+            "key_factors": [],
+            "watch_points": [],
+            "risk_assessment": "t",
+            "invalidation_condition": "t",
+        },
+        "diagnosis_summary": {
+            "cycle_position": "trending_tr",
+            "direction": diag_dir,
+            "key_signals": [],
+        },
+        "decision_trace": [],
+        "terminal": {"node_id": "11.3", "outcome": "trade", "label": "t"},
+    }
+
+
+def test_stop_widened_beyond_cap_appends_program_note() -> None:
+    # RR = 12.486/5.514 = 2.26 > cap 2.0 -> widened to RR 2.0 (4028.729);
+    # reasoning/watch_points must carry an explicit program-side annotation so
+    # the text no longer silently contradicts the executed stop.
+    out = normalize_stage2(
+        _widen_test_payload("做空", 4022.486, 4010.0, 4028.0)
+    )
+    dec = out["decision"]
+    assert dec["order_type"] == "限价单"
+    assert dec["stop_loss_price"] == 4028.729
+    assert "4028.729" in dec["reasoning"]
+    assert "程序按盈亏比上限" in dec["reasoning"]
+    assert any("程序按盈亏比上限" in w for w in dec["watch_points"])
+
+
+def test_structural_stop_within_cap_untouched_and_no_note() -> None:
+    # ADAUSDT 16:10 复现: RR exactly 2.0 (cap) -> stop 0.2206 survives, no note.
+    out = normalize_stage2(
+        _widen_test_payload("做空", 0.2198, 0.2182, 0.2206)
+    )
+    dec = out["decision"]
+    assert dec["order_type"] == "限价单"
+    assert dec["stop_loss_price"] == 0.2206
+    assert "程序按盈亏比上限" not in dec["reasoning"]
+    assert dec["watch_points"] == []
+
+
+def test_structural_stop_rr195_untouched_no_note() -> None:
+    # ADAUSDT 12:00 复现: RR 1.95 structural stop 0.2210 must NOT be widened
+    # to 0.2192 anymore (regression for the doubled-risk loss).
+    out = normalize_stage2(
+        _widen_test_payload("做多", 0.2229, 0.2266, 0.2210)
+    )
+    dec = out["decision"]
+    assert dec["order_type"] == "限价单"
+    assert dec["stop_loss_price"] == 0.2210
+    assert "程序按盈亏比上限" not in dec["reasoning"]
+
+
 def test_coerce_breakout_without_basis_to_limit() -> None:
     from pa_agent.ai.stage2_normalizer import _coerce_breakout_without_basis
 

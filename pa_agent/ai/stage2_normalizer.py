@@ -633,6 +633,30 @@ def _ensure_decision_required_fields(
     return changed
 
 
+def _fmt_price_clean(value: object) -> str:
+    """Short decimal text for prices (0.2192, 4034.972) without float noise."""
+    return f"{float(value):.10f}".rstrip("0").rstrip(".")
+
+
+def _append_widen_note(decision: dict[str, Any], note: str) -> None:
+    """Annotate a program-side stop widening so text and executed price agree.
+
+    The model's reasoning still quotes its structural stop while the structured
+    field (and the real protective order) carry the widened value. Append an
+    explicit note to reasoning (fits the length cap) and to watch_points.
+    """
+    reasoning = decision.get("reasoning")
+    if isinstance(reasoning, str):
+        budget = max(0, DECISION_REASONING_MAX_LEN - len(note))
+        main = reasoning.strip()
+        if len(main) > budget:
+            main = main[: max(0, budget - 1)] + "…"
+        decision["reasoning"] = main + note
+    watch = decision.get("watch_points")
+    if isinstance(watch, list):
+        watch.append(note)
+
+
 def _truncate_decision_reasoning(decision: dict[str, Any]) -> bool:
     """Cap decision.reasoning length to avoid verbose JSON and schema failures."""
     reasoning = decision.get("reasoning")
@@ -1609,11 +1633,19 @@ def normalize_stage2(
             "breakout entry_price adjusted to basis extreme ± 1 tick (basis=%s)",
             decision.get("entry_basis_bar"),
         )
+    stop_widen_note: str | None = None
     if isinstance(decision, dict):
         from pa_agent.util.trade_metrics import adjust_decision_stop_for_tp1_rr_cap
 
+        old_sl = decision.get("stop_loss_price")
         if adjust_decision_stop_for_tp1_rr_cap(decision, kline_frame=kline_frame):
             logger.debug("stop_loss widened to bring TP1 RR within program cap")
+            new_sl = decision.get("stop_loss_price")
+            if new_sl is not None and old_sl not in (None, ""):
+                try:
+                    stop_widen_note = f"（程序按盈亏比上限将原止损 {_fmt_price_clean(old_sl)} 自动扩至 {_fmt_price_clean(new_sl)}；文本引用的止损仅为模型初稿，执行以结构化字段为准）"  # noqa: RUF001 - user-facing Chinese copy
+                except (TypeError, ValueError):
+                    stop_widen_note = None
     _coerce_decision_when_trade_metrics_fail(
         out,
         decision_stance=decision_stance,
@@ -1791,6 +1823,8 @@ def normalize_stage2(
     decision = out.get("decision")
     if isinstance(decision, dict):
         _truncate_decision_reasoning(decision)
+        if stop_widen_note and decision.get("order_type") in _TRADE_ORDER_TYPES:
+            _append_widen_note(decision, stop_widen_note)
 
     decision = out.get("decision")
     if isinstance(decision, dict) and _snap_decision_prices_to_tick(decision, kline_frame):
