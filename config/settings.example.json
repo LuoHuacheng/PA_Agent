@@ -146,7 +146,11 @@
     "limit_order_enabled": true,
     "limit_fill_timeout_minutes": 60,
     "limit_poll_interval_seconds": 10,
-    "min_stop_distance_pct": 0.2
+    "min_stop_distance_pct": 0.2,
+    "trend_30d_days": 30,
+    "trend_30d_neutral_pct": 5.0,
+    "counter_trend_min_confidence": 60,
+    "counter_trend_size_scale": 0.5
   },
   "telegram": {
     "enabled": false,
