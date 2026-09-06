@@ -11,7 +11,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from pa_agent.config.settings import Settings
+from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
 from pa_agent.trading import binance_usdm_testnet
 from pa_agent.trading.binance_usdm_testnet import BinanceAPIError, execute_market_signal
 
@@ -1206,6 +1206,41 @@ def test_guard_trigger_reached_math() -> None:
                  target=Decimal("80"), side="SELL")
     assert trig(mark=Decimal("89"), trigger="1r", **short)
     assert not trig(mark=Decimal("91"), trigger="1r", **short)
+
+
+def test_guard_trigger_fractional_r_math() -> None:
+    trig = binance_usdm_testnet._guard_trigger_reached
+    long = dict(entry=Decimal("100"), stop0=Decimal("90"),
+                target=Decimal("120"), side="BUY")
+    # risk = 10; 0.5r fires at float profit >= 5 (mark 105+).
+    assert trig(mark=Decimal("105"), trigger="0.5r", **long)
+    assert not trig(mark=Decimal("104"), trigger="0.5r", **long)
+    # 0.25r fires at >= 2.5 (mark 103+).
+    assert trig(mark=Decimal("103"), trigger="0.25r", **long)
+    assert not trig(mark=Decimal("102"), trigger="0.25r", **long)
+    # 1r keeps legacy semantics via the same numeric path.
+    assert trig(mark=Decimal("111"), trigger="1r", **long)
+    assert not trig(mark=Decimal("105"), trigger="1r", **long)
+    short = dict(entry=Decimal("100"), stop0=Decimal("110"),
+                 target=Decimal("80"), side="SELL")
+    assert trig(mark=Decimal("95"), trigger="0.5r", **short)
+    assert not trig(mark=Decimal("96"), trigger="0.5r", **short)
+    # Adverse side never fires.
+    assert not trig(mark=Decimal("95"), trigger="0.5r", **long)
+
+
+def test_breakeven_trigger_setting_accepts_fractional_r() -> None:
+    from pydantic import ValidationError
+
+    assert BinanceUSDMTestnetSettings().breakeven_stop_trigger == "1r"
+    assert BinanceUSDMTestnetSettings(breakeven_stop_trigger="0.5r").breakeven_stop_trigger == "0.5r"
+    assert BinanceUSDMTestnetSettings(breakeven_stop_trigger="0.25r").breakeven_stop_trigger == "0.25r"
+    assert BinanceUSDMTestnetSettings(breakeven_stop_trigger="tp").breakeven_stop_trigger == "tp"
+    assert BinanceUSDMTestnetSettings(breakeven_stop_trigger="1r_or_tp").breakeven_stop_trigger == "1r_or_tp"
+    assert BinanceUSDMTestnetSettings(breakeven_stop_trigger="off").breakeven_stop_trigger == "off"
+    for bad in ("2r", "-0.5r", "abc", "1.5r", ""):
+        with pytest.raises(ValidationError):
+            BinanceUSDMTestnetSettings(breakeven_stop_trigger=bad)
 
 
 def test_maybe_guard_policy_and_registration(monkeypatch) -> None:

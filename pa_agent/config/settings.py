@@ -231,12 +231,35 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # --- 保本移动止损 (breakeven stop) ---
     # 持仓浮盈达标后把交易所 STOP 保护单移到入场价, 将"赚过又回吐"的亏损转成
     # 保本离场. 触发条件: 1r = 浮盈 >= 1R (risk = |entry - stop|); tp = 浮盈触及
-    # TP1; 1r_or_tp = 两者先到先触发. off = 关闭该功能.
-    breakeven_stop_trigger: Literal["off", "1r", "tp", "1r_or_tp"] = "1r"
+    # TP1; 1r_or_tp = 两者先到先触发; 也支持分数 R (如 "0.5r" = 浮盈达 0.5R 即
+    # 移保本), 用于 RR 较高/浅浮盈回头的单; off = 关闭该功能.
+    breakeven_stop_trigger: str = "1r"
     # 仅对 trade_confidence >= 此值的信号启用保本止损 (0 = 全部启用).
     breakeven_min_confidence: int = Field(default=55, ge=0, le=100)
     # 持仓守护线程轮询 mark price 的间隔秒数.
     breakeven_poll_seconds: int = Field(default=10, ge=2, le=600)
+
+    @field_validator("breakeven_stop_trigger")
+    @classmethod
+    def _validate_breakeven_trigger(cls, v: object) -> str:
+        """Accept off|1r|tp|1r_or_tp plus fractional-R values (0.25r..1r)."""
+        s = str(v or "").strip().lower()
+        if s in ("off", "1r", "tp", "1r_or_tp"):
+            return s
+        if s.endswith("r") and len(s) > 1:
+            try:
+                factor = float(s[:-1])
+            except ValueError as exc:
+                raise ValueError(
+                    "breakeven_stop_trigger must be off|1r|tp|1r_or_tp or a "
+                    "fractional-R value such as 0.5r"
+                ) from exc
+            if 0 < factor <= 1:
+                return f"{factor:g}r"
+        raise ValueError(
+            "breakeven_stop_trigger must be off|1r|tp|1r_or_tp or a "
+            "fractional-R value such as 0.5r"
+        )
     # --- 结构否定自动离场 (structure-failure exit) ---
     # 已开仓位在静态保护单之外, 还可响应诊断否定: 当 stage-1 方向连续
     # structure_exit_confirm_bars 根已收盘K与持仓相反, 且最新收盘已跌破入场价

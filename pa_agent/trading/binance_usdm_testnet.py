@@ -948,19 +948,29 @@ def _guard_trigger_reached(
 ) -> bool:
     """True when float profit reaches the configured breakeven trigger.
 
-    1r: |mark - entry| >= |entry - stop0| (risk R).
-    tp: price reached the TP1 target.
+    1r:        |mark - entry| >= |entry - stop0| (risk R).
+    tp:        price reached the TP1 target.
+    1r_or_tp:  whichever comes first.
+    0.5r:      fractional R, e.g. "0.5r" moves the stop to entry once float
+               profit reaches half the risk - useful when TP1 is far and the
+               price often gives back shallow profits before TP.
     """
     risk = abs(entry - stop0)
     if risk <= 0:
         return False
     direction = 1 if side == "BUY" else -1
     progress = (mark - entry) * direction
-    if trigger == "1r":
-        return progress >= risk
-    if trigger == "tp":
+    low = str(trigger or "").strip().lower()
+    if low.endswith("r") and "or" not in low and len(low) > 1:
+        try:
+            factor = Decimal(low[:-1])
+            if Decimal("0") < factor <= Decimal("1"):
+                return progress >= risk * factor
+        except Exception:
+            pass  # invalid numeric trigger falls through to legacy options
+    if low == "tp":
         return progress >= (target - entry) * direction
-    if trigger == "1r_or_tp":
+    if low == "1r_or_tp":
         return progress >= risk or progress >= (target - entry) * direction
     return False
 
