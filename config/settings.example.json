@@ -148,7 +148,7 @@
     "limit_poll_interval_seconds": 10,
     "min_stop_distance_pct": 0.2,
     "trend_30d_days": 30,
-    "trend_30d_neutral_pct": 5.0,
+    "trend_30d_neutral_pct": 3.0,
     "counter_trend_min_confidence": 60,
     "counter_trend_size_scale": 0.5
   },

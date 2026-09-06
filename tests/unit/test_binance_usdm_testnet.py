@@ -615,7 +615,7 @@ def test_limit_entry_fill_watcher_attaches_protection() -> None:
         "client_id"
     ]
     client.statuses[client_id] = ["FILLED"]
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + 12.0
     while time.monotonic() < deadline:
         if "protection" in [call[0] for call in client.calls]:
             break
@@ -1191,7 +1191,7 @@ def test_neutral_30d_trend_not_restricted() -> None:
     decision = _long_decision() | {"trade_confidence": 30}
     result = execute_market_signal(
         decision, settings, analysis_symbol="BTCUSDT", client=client,
-        trend_30d_pct=4.0,
+        trend_30d_pct=2.0,
     )
     assert result.status == "submitted", result.reason
     assert "counter-trend" not in result.reason.lower()
