@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003 - Chinese product copy
 """Settings-driven multi-symbol monitoring at K-line close boundaries.
 
 The service deliberately does not share the GUI's single-subscription data
@@ -180,6 +181,8 @@ class MultiSymbolMonitor:
         self._futures: set[Future[Any]] = set()
         self._lock = threading.Lock()
         self._next_refresh_at: float | None = None
+        #: Per-symbol structure-failure negation streak (dir + consecutive bars).
+        self._structure_exit_streak: dict[str, dict[str, object]] = {}
         self._load_state()
 
         for target in self._cfg.targets:
@@ -542,6 +545,7 @@ class MultiSymbolMonitor:
         )
         if record_sink is not None and record is not None:
             record_sink.previous_record = record
+        self._evaluate_structure_exit(frame, record)
         decision = record.stage2_decision if record is not None else None
         if not isinstance(decision, dict):
             return None
@@ -600,6 +604,66 @@ class MultiSymbolMonitor:
             telegram_sent,
         )
         return decision
+
+    def _evaluate_structure_exit(self, frame: Any, record: Any) -> None:
+        """React to diagnosis negation while a pa-entry position is open.
+
+        Runs after every closed-bar analysis (order or no-order rounds alike).
+        Best-effort: any failure only logs and never disturbs the analysis.
+        Mode comes from settings.binance_usdm_testnet.structure_exit_mode.
+        """
+        if record is None:
+            return
+        cfg = self._settings.binance_usdm_testnet
+        if not getattr(cfg, "enabled", False):
+            return
+        mode = str(getattr(cfg, "structure_exit_mode", "off") or "off").strip()
+        if mode == "off":
+            return
+        try:
+            from pa_agent.notify.telegram_notifier import send_structure_exit_notice
+            from pa_agent.trading.binance_usdm_testnet import BinanceUSDMTestnetClient
+            from pa_agent.trading.structure_exit import evaluate_structure_failure_exit
+
+            client = BinanceUSDMTestnetClient(cfg.api_key, cfg.api_secret)
+            verdict = evaluate_structure_failure_exit(
+                symbol=frame.symbol,
+                timeframe=frame.timeframe,
+                record=record,
+                frame=frame,
+                settings=self._settings,
+                counts=self._structure_exit_streak,
+                client=client,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Structure-exit evaluation failed for %s %s: %s",
+                frame.symbol,
+                frame.timeframe,
+                exc,
+            )
+            return
+        action = str(verdict.get("action") or "none")
+        if action not in ("exit", "dry_exit", "failed"):
+            return
+        try:
+            sent = send_structure_exit_notice(
+                symbol=frame.symbol,
+                timeframe=frame.timeframe,
+                mode=mode,
+                action=action,
+                reason=str(verdict.get("reason") or ""),
+                settings=self._settings,
+            )
+            logger.info(
+                "Structure-exit notice for %s %s: telegram=%s action=%s",
+                frame.symbol,
+                frame.timeframe,
+                sent,
+                action,
+            )
+        except Exception:
+            logger.exception("Structure-exit notice failed for %s", frame.symbol)
 
     def _save_order_opportunity(self, frame: Any, decision: dict, inner: dict, record: Any) -> None:
         """Persist the trade record and auto-execute the Testnet market signal."""
@@ -667,6 +731,11 @@ class MultiSymbolMonitor:
             values = raw.get("last_processed_closed_ts", {})
             if isinstance(values, dict):
                 self._persisted_closed_ts = {str(k): int(v) for k, v in values.items()}
+            streak = raw.get("structure_exit_streak", {})
+            if isinstance(streak, dict):
+                self._structure_exit_streak = {
+                    str(k): v for k, v in streak.items() if isinstance(v, dict)
+                }
         except FileNotFoundError:
             pass
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -677,7 +746,13 @@ class MultiSymbolMonitor:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
             temp = self._state_path.with_suffix(".tmp")
             temp.write_text(
-                json.dumps({"last_processed_closed_ts": self._persisted_closed_ts}, indent=2),
+                json.dumps(
+                    {
+                        "last_processed_closed_ts": self._persisted_closed_ts,
+                        "structure_exit_streak": self._structure_exit_streak,
+                    },
+                    indent=2,
+                ),
                 encoding="utf-8",
             )
             temp.replace(self._state_path)

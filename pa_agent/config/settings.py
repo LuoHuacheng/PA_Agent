@@ -236,6 +236,14 @@ class BinanceUSDMTestnetSettings(BaseModel):
     breakeven_min_confidence: int = Field(default=55, ge=0, le=100)
     # 持仓守护线程轮询 mark price 的间隔秒数.
     breakeven_poll_seconds: int = Field(default=10, ge=2, le=600)
+    # --- 结构否定自动离场 (structure-failure exit) ---
+    # 已开仓位在静态保护单之外, 还可响应诊断否定: 当 stage-1 方向连续
+    # structure_exit_confirm_bars 根已收盘K与持仓相反, 且最新收盘已跌破入场价
+    # (做多) / 升破入场价 (做空) 而尚未触及静态止损时, 提前市价平仓.
+    # 模式: off = 关闭; dry_run = 只通知不成交 (默认, 安全观察); on = 自动平仓.
+    structure_exit_mode: Literal["off", "dry_run", "on"] = "dry_run"
+    # 诊断反向连续确认所需已收盘K线数 (每轮分析一根新K).
+    structure_exit_confirm_bars: int = Field(default=2, ge=1, le=6)
 
 
 class MonitorTarget(BaseModel):

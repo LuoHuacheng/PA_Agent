@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003 - Chinese product copy
 """Telegram Bot 消息通知（配置在 settings.json 的 telegram 段，无 GUI）。
 
 通过 Bot API 的 sendMessage 发送下单信号文本。
@@ -183,5 +184,35 @@ def send_execution_failure(
         "",
         "提示：限流(HTTP 418/-1003)多为 Testnet 共享 IP 封禁，已自动指数退避重试；"
         "仍失败则本信号不会补发，需人工复核。",
+    ]
+    return send_telegram_message("\n".join(lines), settings=settings)
+
+
+def send_structure_exit_notice(
+    *,
+    symbol: str,
+    timeframe: str,
+    mode: str,
+    action: str,
+    reason: str,
+    settings: Settings | None = None,
+) -> bool:
+    """Telegram alert for a structure-failure auto-exit verdict."""
+    if not telegram_is_active(settings):
+        return False
+    if action == "dry_exit":
+        head = "🧪 PA Agent 结构否定 (dry-run)"
+        tail = "dry_run 模式仅提示，未实际平仓；如需自动平仓请将 structure_exit_mode 设为 on"
+    else:
+        head = "⚠️ PA Agent 结构否定自动平仓"
+        tail = "已按 reduceOnly 市价平仓，静态保护单不受影响"
+    lines = [
+        head,
+        "",
+        f"品种：{symbol}  周期：{timeframe}  模式：{mode}",
+        f"动作：{action}",
+        f"原因：{_truncate(reason, 900)}",
+        "",
+        tail,
     ]
     return send_telegram_message("\n".join(lines), settings=settings)

@@ -153,7 +153,9 @@
     "counter_trend_size_scale": 0.5,
     "breakeven_stop_trigger": "1r",
     "breakeven_min_confidence": 55,
-    "breakeven_poll_seconds": 10
+    "breakeven_poll_seconds": 10,
+    "structure_exit_mode": "dry_run",
+    "structure_exit_confirm_bars": 2
   },
   "telegram": {
     "enabled": false,
