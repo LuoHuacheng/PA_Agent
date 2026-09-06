@@ -1282,22 +1282,22 @@ def _trend_settings() -> Settings:
 
 
 def test_counter_trend_below_confidence_rejected() -> None:
-    """Long vs a 30d bear trend with conf<60: rejected before any order flow."""
+    """Long vs a 30d bear trend with conf<55: rejected before any order flow."""
     settings = _trend_settings()
     client = FakeClient()
-    decision = _long_decision() | {"trade_confidence": 55}
+    decision = _long_decision() | {"trade_confidence": 50}
     result = execute_market_signal(
         decision, settings, analysis_symbol="BTCUSDT", client=client,
         trend_30d_pct=-20.0,
     )
     assert result.status == "rejected"
     assert "Counter-trend vs 30d trend" in result.reason
-    assert "55.0 < 60" in result.reason
+    assert "50.0 < 55" in result.reason
     assert "entry" not in [call[0] for call in client.calls]
 
 
 def test_counter_trend_high_confidence_scales_leverage() -> None:
-    """Counter-30d-trend but conf>=60: allowed with leverage 20x -> 10x (half notional)."""
+    """Counter-30d-trend but conf>=55: allowed with leverage 20x -> 10x (half notional)."""
     settings = _trend_settings()
     client = FakeClient()
     decision = _long_decision() | {"trade_confidence": 65}
@@ -1314,14 +1314,14 @@ def test_counter_trend_high_confidence_scales_leverage() -> None:
 
 
 def test_counter_trend_short_against_bull_scaled() -> None:
-    """Short vs a 30d bull trend at conf=60: allowed with halved leverage."""
+    """Short vs a 30d bull trend at conf=55 (boundary): allowed with halved leverage."""
     settings = _trend_settings()
     client = FakeClient()
     decision = _long_decision() | {
         "order_direction": "做空",
         "stop_loss_price": 110,
         "take_profit_price": 90,
-        "trade_confidence": 60,
+        "trade_confidence": 55,
     }
     result = execute_market_signal(
         decision, settings, analysis_symbol="BTCUSDT", client=client,
