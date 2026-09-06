@@ -95,6 +95,17 @@ def max_risk_reward_ratio() -> float | None:
     return MAX_TP1_RISK_REWARD_RATIO
 
 
+def _clean_price(value: float, tick: float | None) -> float:
+    """Return *value* repr-clean (no float noise like 0.22139999999999999).
+
+    Aligns to *tick* when available; otherwise rounds at 10 decimals, which
+    preserves any symbol-typical tick (>=1e-6) while dropping float junk.
+    """
+    if tick and tick > 0:
+        return round(round(value / tick) * tick, 10)
+    return round(value, 10)
+
+
 def widen_stop_for_tp1_rr_cap(
     entry: float,
     take_profit: float,
@@ -133,7 +144,7 @@ def widen_stop_for_tp1_rr_cap(
             return ideal_stop
         scaled = ideal_stop / t
         aligned = math.floor(scaled + 1e-12) * t if round_down else math.ceil(scaled - 1e-12) * t
-        return aligned
+        return _clean_price(aligned, t)
 
     if long is True:
         ideal_stop = entry - min_risk
@@ -162,7 +173,7 @@ def widen_stop_for_tp1_rr_cap(
             if best_ratio is None or cand_ratio > best_ratio:
                 best = candidate
                 best_ratio = cand_ratio
-        return best
+        return _clean_price(best, t) if best is not None else None
     if long is False:
         ideal_stop = entry + min_risk
         if ideal_stop <= entry:
@@ -190,7 +201,7 @@ def widen_stop_for_tp1_rr_cap(
             if best_ratio is None or cand_ratio > best_ratio:
                 best = candidate
                 best_ratio = cand_ratio
-        return best
+        return _clean_price(best, t) if best is not None else None
     return None
 
 
@@ -428,7 +439,7 @@ def validate_order_trade_metrics(
     reward = float(rr["reward"])
     min_rr = min_risk_reward_ratio(decision_stance)
 
-    if ratio < min_rr:
+    if ratio < min_rr - 1e-9:
         errors.append(
             f"decision prices: risk_reward {rr['ratio_text']} is below minimum "
             f"{min_rr:.2f}:1 for this stance; adjust take_profit/stop_loss or set "

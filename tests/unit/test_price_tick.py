@@ -86,3 +86,53 @@ def test_stage2_normalizer_passes_breakout_price_check() -> None:
     assert obj["decision"]["entry_price"] > 104.0
     msgs = JsonValidator._check_breakout_price_extreme(obj, frame)
     assert msgs == []
+
+
+def _frame_4dp() -> KlineFrame:
+    return KlineFrame(
+        symbol="ADAUSDT",
+        timeframe="15m",
+        bars=(
+            KlineBar(
+                seq=1,
+                ts_open=1.0,
+                open=0.2184,
+                high=0.2192,
+                low=0.2181,
+                close=0.2187,
+                volume=1,
+                closed=True,
+            ),
+        ),
+        indicators=IndicatorBundle(ema20=(0.2206,), atr14=(0.0012,)),
+        snapshot_ts_local_ms=1,
+    )
+
+
+def test_normalize_stage2_snaps_noisy_prices_to_tick() -> None:
+    frame = _frame_4dp()
+    obj = normalize_stage2(
+        {
+            "decision": {
+                "order_type": "限价单",
+                "order_direction": "做空",
+                "entry_price": 0.21980000000000002,
+                "stop_loss_price": 0.22139999999999999,
+                "take_profit_price": 0.21820000000000003,
+                "take_profit_price_2": 0.21729999999999999,
+                "estimated_win_rate": 55,
+            },
+        },
+        kline_frame=frame,
+    )
+    dec = obj["decision"]
+    assert dec["order_type"] == "限价单"
+    for field, expected in (
+        ("entry_price", "0.2198"),
+        ("stop_loss_price", "0.2214"),
+        ("take_profit_price", "0.2182"),
+        ("take_profit_price_2", "0.2173"),
+    ):
+        value = dec[field]
+        assert value == float(expected)
+        assert repr(value) == expected

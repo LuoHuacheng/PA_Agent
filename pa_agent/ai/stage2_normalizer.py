@@ -7,9 +7,11 @@ from typing import Any
 
 from pa_agent.ai.trace_normalize import normalize_stage2_traces
 from pa_agent.util.price_tick import (
+    infer_price_tick_from_frame,
     normalize_breakout_basis_extreme,
     normalize_breakout_entry_price,
     parse_k_seq,
+    round_to_tick,
 )
 
 logger = logging.getLogger(__name__)
@@ -1535,6 +1537,36 @@ def _fix_9_0_for_planned_limit(out: dict[str, Any]) -> bool:
     return changed
 
 
+def _snap_decision_prices_to_tick(decision: dict[str, Any], kline_frame: Any) -> bool:
+    """Snap entry/stop/TP prices to the symbol tick to drop float noise.
+
+    Model arithmetic and stop widening can leave values like
+    0.22139999999999999 behind; stored or displayed raw, the noise leaks
+    into CSV rows, logs and notification text (and gets echoed back into
+    later prompts). Prices are realigned to the tick inferred from
+    *kline_frame*, or repr-cleaned at 10 decimals when no frame is at hand.
+    """
+    if not isinstance(decision, dict):
+        return False
+    if str(decision.get("order_type") or "") == "不下单":
+        return False
+    tick = infer_price_tick_from_frame(kline_frame) if kline_frame is not None else None
+    changed = False
+    for field in ("entry_price", "stop_loss_price", "take_profit_price", "take_profit_price_2"):
+        raw = decision.get(field)
+        if raw is None or raw == "":
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        snapped = round_to_tick(value, tick) if tick else round(value, 10)
+        if snapped != value:
+            decision[field] = snapped
+            changed = True
+    return changed
+
+
 def normalize_stage2(
     obj: dict[str, Any],
     *,
@@ -1759,5 +1791,9 @@ def normalize_stage2(
     decision = out.get("decision")
     if isinstance(decision, dict):
         _truncate_decision_reasoning(decision)
+
+    decision = out.get("decision")
+    if isinstance(decision, dict) and _snap_decision_prices_to_tick(decision, kline_frame):
+        logger.debug("decision prices snapped to symbol tick (float-noise cleanup)")
 
     return out

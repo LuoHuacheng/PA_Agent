@@ -69,6 +69,41 @@ def test_adjust_decision_stop_for_tp1_rr_cap_mutates_decision():
     assert rr["ratio"] <= 1.0
 
 
+def test_widen_stop_returns_repr_clean_short_noise_regression():
+    # ADAUSDT 16:10 复现: reward=0.0016 -> min_risk=0.0016 与 0.2198 相加
+    # 曾产生 0.22139999999999999 浮点噪声并原样入库/推送。
+    widened = widen_stop_for_tp1_rr_cap(0.2198, 0.2182, 0.2206, "做空", tick=0.0001)
+    assert widened == 0.2214
+    assert repr(widened) == "0.2214"
+    assert str(widened) == "0.2214"
+
+
+def test_widen_stop_returns_repr_clean_long_noise_regression():
+    widened = widen_stop_for_tp1_rr_cap(0.2198, 0.2214, 0.2188, "做多", tick=0.0001)
+    assert widened == 0.2182
+    assert repr(widened) == "0.2182"
+
+
+def test_widen_stop_no_tick_still_repr_clean():
+    widened = widen_stop_for_tp1_rr_cap(0.2198, 0.2182, 0.2206, "做空")
+    assert widened == 0.2214
+    assert repr(widened) == "0.2214"
+
+
+def test_adjust_decision_stop_snaps_noisy_wide_to_tick():
+    decision = {
+        "order_type": "限价单",
+        "order_direction": "做空",
+        "entry_price": 0.2198,
+        "take_profit_price": 0.2182,
+        "stop_loss_price": 0.2206,
+    }
+    assert adjust_decision_stop_for_tp1_rr_cap(decision, tick=0.0001)
+    stop = decision["stop_loss_price"]
+    assert stop == 0.2214
+    assert repr(stop) == "0.2214"
+
+
 def test_format_estimated_win_rate_from_model_field():
     decision = {
         "estimated_win_rate": 47,
