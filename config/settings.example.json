@@ -135,6 +135,7 @@
     ],
     "leverage": 20,
     "max_notional_usdt": 100.0,
+    "risk_per_trade_usdt": 2.0,
     "cooldown_minutes": 30,
     "require_trader_equation": true,
     "limit_order_enabled": true,
