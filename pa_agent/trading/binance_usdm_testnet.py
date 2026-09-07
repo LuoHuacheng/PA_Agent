@@ -32,6 +32,22 @@ _TESTNET_BASE_URL = "https://testnet.binancefuture.com"
 _TIMEOUT_SECONDS = 12
 _RUNTIME_STATE_PATH = "trade_records/binance_usdm_testnet_state.json"
 _STATE_LOCK = threading.Lock()
+# Per-symbol transition locks: serialise breakeven-stop moves and TP2 swaps
+# that run on separate daemon threads for the same symbol (guard vs runner).
+_MANAGER_LOCKS: dict[str, threading.Lock] = {}
+_MANAGER_LOCKS_GUARD = threading.Lock()
+
+
+def _manager_lock(symbol: str) -> threading.Lock:
+    """Return the transition lock guarding this symbol's SL/TP swaps."""
+    with _MANAGER_LOCKS_GUARD:
+        lock = _MANAGER_LOCKS.get(symbol)
+        if lock is None:
+            lock = threading.Lock()
+            _MANAGER_LOCKS[symbol] = lock
+        return lock
+
+
 _ENTRY_CLIENT_PREFIX = "pa-entry-"
 
 # Bounded retry for transient transport failures (torn TLS connections, stale
@@ -346,25 +362,35 @@ class BinanceUSDMTestnetClient:
         return rows
 
     def place_close_algo_order(
-        self, *, symbol: str, side: str, order_type: str, stop_price: Decimal, client_algo_id: str
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        stop_price: Decimal,
+        client_algo_id: str,
+        quantity: Decimal | None = None,
+        close_position: bool = True,
     ) -> None:
         # Binance migrated conditional orders to the Algo Service in December 2025.
-        self._request(
-            "POST",
-            "/fapi/v1/algoOrder",
-            {
-                "algoType": "CONDITIONAL",
-                "symbol": symbol,
-                "side": side,
-                "type": order_type,
-                "triggerPrice": _decimal_text(stop_price),
-                "closePosition": "true",
-                "workingType": "MARK_PRICE",
-                "priceProtect": "TRUE",
-                "clientAlgoId": client_algo_id,
-            },
-            signed=True,
-        )
+        params: dict[str, Any] = {
+            "algoType": "CONDITIONAL",
+            "symbol": symbol,
+            "side": side,
+            "type": order_type,
+            "triggerPrice": _decimal_text(stop_price),
+            "workingType": "MARK_PRICE",
+            "priceProtect": "TRUE",
+            "clientAlgoId": client_algo_id,
+        }
+        if close_position:
+            params["closePosition"] = "true"
+        if quantity is not None:
+            # reduceOnly 部分单(如 TP1 半仓): 只带 quantity, 绝不 closePosition,
+            # 否则会把剩余仓位也一次性平掉(Testnet 实测接受的参数形态)。
+            params["quantity"] = _decimal_text(quantity)
+            params["reduceOnly"] = "true"
+        self._request("POST", "/fapi/v1/algoOrder", params, signed=True)
 
     def cancel_algo_order(self, *, client_algo_id: str) -> None:
         self._request(
@@ -632,9 +658,12 @@ def _execute_market_signal_once(
             quantity=quantity,
             client_id=_entry_client_id(signal_id),
         )
+        target2 = _positive_decimal(decision.get("take_profit_price_2"))
         try:
-            sl_algo_id, _tp_algo_id = _attach_protection(
-                active_client, symbol, side, stop, target
+            sl_algo_id, tp_algo_id, partial_qty = _attach_protection(
+                active_client, symbol, side, stop, target,
+                quantity=quantity, target2=target2,
+                partial_pct=float(config.tp_partial_close_pct or 0.0),
             )
         except BinanceAPIError:
             # Never leave an unprotected automatically-created position.
@@ -652,6 +681,10 @@ def _execute_market_signal_once(
             target,
             sl_algo_id,
             signal_conf,
+            quantity=quantity,
+            target2=target2,
+            tp_algo_id=tp_algo_id,
+            partial_qty=partial_qty,
         )
         return ExecutionResult(
             "submitted",
@@ -716,8 +749,13 @@ def _execute_limit_signal(
             quantity=quantity,
             client_id=_entry_client_id(signal_id),
         )
+        target2 = _positive_decimal(decision.get("take_profit_price_2"))
         try:
-            sl_algo_id, _tp_algo_id = _attach_protection(client, symbol, side, stop, target)
+            sl_algo_id, tp_algo_id, partial_qty = _attach_protection(
+                client, symbol, side, stop, target,
+                quantity=quantity, target2=target2,
+                partial_pct=float(config.tp_partial_close_pct or 0.0),
+            )
         except BinanceAPIError:
             client.close_market_position(
                 symbol=symbol,
@@ -727,7 +765,11 @@ def _execute_limit_signal(
             raise
         _remember_signal(signal_id)
         _maybe_guard(
-            client, config, symbol, side, stop, target, sl_algo_id, conf
+            client, config, symbol, side, stop, target, sl_algo_id, conf,
+            quantity=quantity,
+            target2=target2,
+            tp_algo_id=tp_algo_id,
+            partial_qty=partial_qty,
         )
         return ExecutionResult(
             "submitted",
@@ -742,6 +784,7 @@ def _execute_limit_signal(
         return replacement
     client.set_leverage(symbol, leverage)
     entry_client_id = _entry_client_id(signal_id)
+    target2 = _positive_decimal(decision.get("take_profit_price_2"))
     pending_record = {
         "client_id": entry_client_id,
         "signal_id": signal_id,
@@ -749,6 +792,7 @@ def _execute_limit_signal(
         "quantity": _decimal_text(quantity),
         "stop": _decimal_text(stop),
         "target": _decimal_text(target),
+        "target2": "" if target2 is None else _decimal_text(target2),
         "conf": "" if conf is None else str(conf),
         "placed_at": time.time(),
     }
@@ -773,6 +817,7 @@ def _execute_limit_signal(
             "side": side,
             "stop": stop,
             "target": target,
+            "target2": target2,
             "quantity": quantity,
             "signal_id": signal_id,
             "conf": conf,
@@ -820,6 +865,7 @@ def _replace_pending_limit(
     side = str(old.get("side") or "")
     stop = _positive_decimal(old.get("stop"))
     target = _positive_decimal(old.get("target"))
+    target2 = _positive_decimal(old.get("target2"))
     quantity = _positive_decimal(old.get("quantity"))
     old_conf = _parse_win_rate(old.get("conf"))
     if not old_client_id or side not in ("BUY", "SELL") or stop is None or target is None:
@@ -837,8 +883,12 @@ def _replace_pending_limit(
     if status == "FILLED":
         # The watcher died (process restart) before attaching protection: repair.
         try:
-            sl_algo_id, _tp_algo_id = _attach_protection(
-                client, symbol, side, stop, target
+            sl_algo_id, tp_algo_id, partial_qty = _attach_protection(
+                client, symbol, side, stop, target,
+                quantity=quantity,
+                target2=target2,
+                partial_pct=
+                    float(config.tp_partial_close_pct) if config is not None else 0.0,
             )
         except BinanceAPIError as exc:
             logger.error("Filled limit entry for %s left unprotected: %s", symbol, exc)
@@ -849,7 +899,11 @@ def _replace_pending_limit(
             _remember_signal(old_signal_id)
         if config is not None:
             _maybe_guard(
-                client, config, symbol, side, stop, target, sl_algo_id, old_conf
+                client, config, symbol, side, stop, target, sl_algo_id, old_conf,
+                quantity=quantity,
+                target2=target2,
+                tp_algo_id=tp_algo_id,
+            partial_qty=partial_qty,
             )
         _drop_pending(symbol, old_client_id)
         return ExecutionResult("skipped", "Previously filled limit entry now protected", symbol)
@@ -874,6 +928,7 @@ def _replace_pending_limit(
                 context="replaced pending entry",
                 config=config,
                 conf=old_conf,
+                target2=target2,
             )
     else:
         _drop_pending(symbol, old_client_id)
@@ -886,14 +941,28 @@ def _attach_protection(
     side: str,
     stop: Decimal,
     target: Decimal,
+    *,
+    quantity: Decimal | None = None,
+    target2: Decimal | None = None,
+    partial_pct: float = 0.0,
 ) -> tuple[str, str]:
-    """Attach close-position STOP_MARKET and TAKE_PROFIT_MARKET orders.
+    """Attach STOP_MARKET plus TAKE_PROFIT_MARKET protection for a new position.
+
+    When partial TP1 is enabled (partial_pct > 0) and the position/TP2 are
+    known, the TP1 order is a reduceOnly half-size order (never closePosition);
+    a runner thread later moves the remainder toward TP2. When the partial
+    plan is infeasible (TP2 missing / size below lot minimum / pct=100) the
+    TP1 order keeps the legacy close-all shape so a position is never left
+    without its take-profit.
 
     Returns the generated client algo ids of the (stop, target) orders.
     On failure, cancels any orders already placed and re-raises so the caller
     can roll back the position.
     """
     exit_side = "SELL" if side == "BUY" else "BUY"
+    partial_qty: Decimal | None = None
+    if partial_pct > 0 and quantity is not None and quantity > 0 and target2 is not None:
+        partial_qty = _partial_quantity(quantity, partial_pct, client.exchange_info(symbol))
     protected_algo_ids: list[str] = []
     try:
         stop_algo_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
@@ -906,12 +975,17 @@ def _attach_protection(
         )
         protected_algo_ids.append(stop_algo_id)
         target_algo_id = f"pa-tp-{uuid.uuid4().hex[:24]}"
+        partial_kwargs: dict[str, Any] = {}
+        if partial_qty is not None:
+            # reduceOnly 部分单: 带 quantity 不带 closePosition, 否则一次平光。
+            partial_kwargs = {"quantity": partial_qty, "close_position": False}
         client.place_close_algo_order(
             symbol=symbol,
             side=exit_side,
             order_type="TAKE_PROFIT_MARKET",
             stop_price=target,
             client_algo_id=target_algo_id,
+            **partial_kwargs,
         )
         protected_algo_ids.append(target_algo_id)
     except BinanceAPIError:
@@ -922,13 +996,16 @@ def _attach_protection(
             except BinanceAPIError:
                 logger.exception("Failed to cancel orphaned Testnet protective order")
         raise
-    return stop_algo_id, target_algo_id
+    return stop_algo_id, target_algo_id, partial_qty
 
 
-# --- 保本移动止损 (breakeven stop guard) --------------------------------
+
+# --- 保本移动止损 / TP1 部分止盈 runner -----------------------------
 # Registry lives in the runtime state file under key "guards":
-#   symbol -> {stop_algo_id, target_algo_id, stop0, target, side, conf,
-#              ts, moved}
+#   symbol -> {stop_algo_id, tp_algo_id, stop0, target, target2?, qty?,
+#              partial_qty?, side, conf, ts, moved, partial_done?}
+#  partial 相关字段仅在 TP1 部分止盈启用时写入; moved 由保本 guard 或
+#  TP runner 置位, partial_done 由 TP runner 置位。
 
 def _guard_enabled(config: BinanceUSDMTestnetSettings, conf: float | None) -> bool:
     """True when the breakeven feature applies to a signal with ``conf``."""
@@ -1009,9 +1086,17 @@ def _patch_guard(symbol: str, **patch: Any) -> None:
         record.update(patch)
         _save_state(state)
 
+def _drop_guard(symbol: str) -> None:
+    """Remove the guard/runner record for ``symbol`` (position is gone)."""
+    with _STATE_LOCK:
+        state = _load_state()
+        guards = state.get("guards")
+        if isinstance(guards, dict) and symbol in guards:
+            del guards[symbol]
+            _save_state(state)
+
 
 def _breakeven_guard_loop(
-    *,
     client: BinanceUSDMTestnetClient,
     symbol: str,
     trigger: str,
@@ -1069,73 +1154,317 @@ def _breakeven_guard_loop(
             consecutive_errors = 0
             time.sleep(poll_seconds)
             continue
-        exit_side = "SELL" if side == "BUY" else "BUY"
-        try:
-            client.cancel_algo_order(client_algo_id=stop_algo_id)
-        except BinanceAPIError as exc:
-            if _is_missing_algo_order_error(exc):
-                # 原 STOP 单已不在交易所(撤单成功残留/重启/手动取消):
-                # 视为撤单完成, 直接补挂保本单, 绝不让持仓裸奔。
-                logger.warning(
-                    "Breakeven guard: original stop %s for %s already gone (%s); "
-                    "placing breakeven stop at entry",
-                    stop_algo_id,
-                    symbol,
-                    exc,
+        # 移损临界区: 与 TP runner 互斥, 锁内重读注册表防双撤双挂。
+        with _manager_lock(symbol):
+            fresh = _read_guard(symbol)
+            if fresh is None or fresh.get("moved"):
+                return
+            live_stop = str(fresh.get("stop_algo_id") or "")
+            if not live_stop:
+                return
+            exit_side = "SELL" if side == "BUY" else "BUY"
+            try:
+                client.cancel_algo_order(client_algo_id=live_stop)
+            except BinanceAPIError as exc:
+                if _is_missing_algo_order_error(exc):
+                    # 原 STOP 单已不在交易所(撤单成功残留/重启/手动取消):
+                    # 视为撤单完成, 直接补挂保本单, 绝不让持仓裸奔。
+                    logger.warning(
+                        "Breakeven guard: original stop %s for %s already gone (%s); "
+                        "placing breakeven stop at entry",
+                        stop_algo_id,
+                        symbol,
+                        exc,
+                    )
+                else:
+                    consecutive_errors += 1
+                    logger.error(
+                        "Breakeven stop move failed for %s (kept original stop at %s): %s",
+                        symbol,
+                        _decimal_text(stop0),
+                        exc,
+                    )
+                    if consecutive_errors >= 5:
+                        logger.error(
+                            "Breakeven guard gave up moving stop for %s after repeated "
+                            "cancel errors; original stop may still be resting",
+                            symbol,
+                        )
+                        return
+                    time.sleep(poll_seconds)
+                    continue
+            new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
+            try:
+                client.place_close_algo_order(
+                    symbol=symbol,
+                    side=exit_side,
+                    order_type="STOP_MARKET",
+                    stop_price=entry,
+                    client_algo_id=new_stop_id,
                 )
-            else:
+            except BinanceAPIError as exc:
                 consecutive_errors += 1
                 logger.error(
-                    "Breakeven stop move failed for %s (kept original stop at %s): %s",
+                    "Breakeven stop placement failed for %s (%s), position may be "
+                    "unprotected: %s",
                     symbol,
-                    _decimal_text(stop0),
+                    stop_algo_id,
                     exc,
                 )
                 if consecutive_errors >= 5:
                     logger.error(
-                        "Breakeven guard gave up moving stop for %s after repeated "
-                        "cancel errors; original stop may still be resting",
+                        "Breakeven guard gave up placing breakeven stop for %s after "
+                        "repeated errors; position is unprotected",
                         symbol,
                     )
                     return
                 time.sleep(poll_seconds)
                 continue
-        new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
-        try:
-            client.place_close_algo_order(
-                symbol=symbol,
-                side=exit_side,
-                order_type="STOP_MARKET",
-                stop_price=entry,
-                client_algo_id=new_stop_id,
+            _patch_guard(symbol, moved=True, stop_algo_id=new_stop_id)
+            logger.info(
+                "Breakeven stop moved to entry for %s %s (trigger=%s mark=%s)",
+                symbol,
+                side,
+                trigger,
+                _decimal_text(mark),
             )
+            return
+
+
+def _tp_runner_loop(
+    *,
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    poll_seconds: float,
+) -> None:
+    """Poll a position protected by a partial (reduceOnly) TP1 order.
+
+    The TP1 leg only closes partial_qty, so this thread watches the position
+    amount: once it shrinks (TP1 fired) the original SL is cancelled (unless
+    the breakeven guard already moved it) and a close-all TAKE_PROFIT at TP2
+    is hung so the remainder can run to the far target. When the position is
+    fully closed the resting partial TP1 is cancelled and the record removed.
+    """
+    consecutive_errors = 0
+    while True:
+        record = _read_guard(symbol)
+        if record is None or record.get("partial_done"):
+            return
+        side = str(record.get("side") or "")
+        qty = _positive_decimal(record.get("qty"))
+        partial_qty = _positive_decimal(record.get("partial_qty"))
+        stop_algo_id = str(record.get("stop_algo_id") or "")
+        tp_algo_id = str(record.get("tp_algo_id") or "")
+        target2 = _positive_decimal(record.get("target2"))
+        if (
+            side not in ("BUY", "SELL")
+            or qty is None
+            or partial_qty is None
+            or target2 is None
+            or not stop_algo_id
+            or not tp_algo_id
+        ):
+            return  # 旧 guard 记录(无 partial 字段)或残缺记录: 不归 runner 管
+        try:
+            info = client.position_info(symbol)
+            amount = info["amount"]
+            entry = info["entry"]
         except BinanceAPIError as exc:
             consecutive_errors += 1
-            logger.error(
-                "Breakeven stop placement failed for %s (%s), position may be "
-                "unprotected: %s",
+            logger.warning(
+                "TP runner poll failed for %s (attempt %d): %s",
                 symbol,
-                stop_algo_id,
+                consecutive_errors,
                 exc,
             )
             if consecutive_errors >= 5:
                 logger.error(
-                    "Breakeven guard gave up placing breakeven stop for %s after "
-                    "repeated errors; position is unprotected",
+                    "TP runner gave up for %s after repeated API errors; "
+                    "partial TP1 stays in place",
                     symbol,
                 )
                 return
             time.sleep(poll_seconds)
             continue
-        _patch_guard(symbol, moved=True, stop_algo_id=new_stop_id)
-        logger.info(
-            "Breakeven stop moved to entry for %s %s (trigger=%s mark=%s)",
-            symbol,
-            side,
-            trigger,
-            _decimal_text(mark),
-        )
-        return
+        if (side == "BUY" and amount < 0) or (side == "SELL" and amount > 0):
+            return  # not our position anymore
+        if amount == 0:
+            # 仓位已清: 撤掉可能残留的 TP1 部分单后移除记录。
+            try:
+                client.cancel_algo_order(client_algo_id=tp_algo_id)
+            except BinanceAPIError as exc:
+                if _is_missing_algo_order_error(exc):
+                    logger.warning(
+                        "TP runner: partial TP1 %s for %s already gone (%s)",
+                        tp_algo_id,
+                        symbol,
+                        exc,
+                    )
+                else:
+                    consecutive_errors += 1
+                    logger.error(
+                        "TP runner cleanup failed for %s (partial TP1 %s): %s",
+                        symbol,
+                        tp_algo_id,
+                        exc,
+                    )
+                    if consecutive_errors >= 5:
+                        logger.error(
+                            "TP runner gave up cleaning %s after repeated errors; "
+                            "record kept so a restart resume can retry the cancel",
+                            symbol,
+                        )
+                        return
+                    time.sleep(poll_seconds)
+                    continue
+                    time.sleep(poll_seconds)
+                    continue
+            _drop_guard(symbol)
+            logger.info("TP runner: %s position closed; cleared partial TP1 %s",
+                symbol, tp_algo_id,
+            )
+            return
+        if entry is None:
+            return  # 无法取得入场价, 保本价格无从谈起
+        if amount == qty:
+            consecutive_errors = 0
+            time.sleep(poll_seconds)
+            continue
+        # TP1 半仓已触发(amount < qty): 进入 TP2 阶段。
+        # 临界区: 与保本 guard 的移损互斥(per-symbol 锁), 锁内重读注册表, 防双撤双挂。
+        with _manager_lock(symbol):
+            fresh = _read_guard(symbol)
+            if fresh is None or fresh.get("partial_done"):
+                return
+            moved = bool(fresh.get("moved"))
+            current_stop = str(fresh.get("stop_algo_id") or "")
+            current_tp = str(fresh.get("tp_algo_id") or "")
+            if not current_stop or not current_tp:
+                return
+            exit_side = "SELL" if side == "BUY" else "BUY"
+            # 先清可能仍 resting 的 TP1 部分单(已成交时 -2011/-2013 视为已清):
+            # 手动减仓等场景不能让孤儿部分单对新仓位生效。
+            try:
+                client.cancel_algo_order(client_algo_id=current_tp)
+            except BinanceAPIError as exc:
+                if _is_missing_algo_order_error(exc):
+                    logger.warning(
+                        "TP runner: partial TP1 %s for %s already gone (%s)",
+                        current_tp,
+                        symbol,
+                        exc,
+                    )
+                else:
+                    consecutive_errors += 1
+                    logger.error(
+                        "TP runner partial TP1 cancel failed for %s (%s): %s",
+                        symbol,
+                        current_tp,
+                        exc,
+                    )
+                    if consecutive_errors >= 5:
+                        logger.error(
+                            "TP runner gave up clearing TP1 for %s after repeated "
+                            "errors; original stop stays in place",
+                            symbol,
+                        )
+                        return
+                    time.sleep(poll_seconds)
+                    continue
+            if moved:
+                new_stop_id = current_stop  # 保本已由 guard 完成, SL 不动
+            else:
+                # C1: 先挂新保本 STOP 再撤旧 SL - 任一步失败旧止损仍 resting, 不裸奔。
+                new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
+                try:
+                    client.place_close_algo_order(
+                        symbol=symbol,
+                        side=exit_side,
+                        order_type="STOP_MARKET",
+                        stop_price=entry,
+                        client_algo_id=new_stop_id,
+                    )
+                except BinanceAPIError as exc:
+                    consecutive_errors += 1
+                    logger.error(
+                        "TP runner breakeven stop placement failed for %s (kept original stop): %s",
+                        symbol,
+                        exc,
+                    )
+                    if consecutive_errors >= 5:
+                        logger.error(
+                            "TP runner gave up placing breakeven stop for %s after "
+                            "repeated errors; original stop stays in place",
+                            symbol,
+                        )
+                        return
+                    time.sleep(poll_seconds)
+                    continue
+            if not moved:
+                # 撤旧 SL: -2011/-2013 视为已撤; 其他错误限次重试, 放弃时新旧并存,
+                # 由交易所对空仓 closePosition 的清理语义兜底(与旧版一致)。
+                try:
+                    client.cancel_algo_order(client_algo_id=current_stop)
+                except BinanceAPIError as exc:
+                    if not _is_missing_algo_order_error(exc):
+                        consecutive_errors += 1
+                        logger.error(
+                            "TP runner old stop cancel failed for %s (%s): %s",
+                            symbol,
+                            current_stop,
+                            exc,
+                        )
+                        if consecutive_errors >= 5:
+                            logger.error(
+                                "TP runner gave up cancelling old stop %s for %s; "
+                                "breakeven stop is live, old may still be resting",
+                                current_stop,
+                                symbol,
+                            )
+                            return
+                        time.sleep(poll_seconds)
+                        continue
+            # 保本单已落地(或 guard 已完成): 立即回写注册表, 记录始终指向真实存在的单。
+            _patch_guard(symbol, moved=True, stop_algo_id=new_stop_id)
+            new_tp_id = f"pa-tp-{uuid.uuid4().hex[:24]}"
+            try:
+                client.place_close_algo_order(
+                    symbol=symbol,
+                    side=exit_side,
+                    order_type="TAKE_PROFIT_MARKET",
+                    stop_price=target2,
+                    client_algo_id=new_tp_id,
+                )
+            except BinanceAPIError as exc:
+                consecutive_errors += 1
+                logger.error(
+                    "TP runner TP2 placement failed for %s: %s",
+                    symbol,
+                    exc,
+                )
+                if consecutive_errors >= 5:
+                    logger.error(
+                        "TP runner gave up placing TP2 for %s after repeated errors; "
+                        "record kept for restart resume",
+                        symbol,
+                    )
+                    return
+                time.sleep(poll_seconds)
+                continue
+            _patch_guard(
+                symbol,
+                moved=True,
+                stop_algo_id=new_stop_id,
+                tp_algo_id=new_tp_id,
+                partial_done=True,
+            )
+            logger.info(
+                "TP runner: %s %s half closed; breakeven stop + TP2=%s in place",
+                symbol,
+                side,
+                _decimal_text(target2),
+            )
+            return
 
 
 def _maybe_guard(
@@ -1147,41 +1476,91 @@ def _maybe_guard(
     target: Decimal,
     stop_algo_id: str,
     conf: float | None,
+    *,
+    quantity: Decimal | None = None,
+    target2: Decimal | None = None,
+    tp_algo_id: str | None = None,
+    partial_qty: Decimal | None = None,
 ) -> None:
-    """Register and start a breakeven guard when enabled for this signal."""
-    if not _guard_enabled(config, conf):
+    """Register the open position and arm its managers when enabled.
+
+    Two optional managers share one per-symbol registry record: the breakeven
+    guard (moves the SL to entry once float profit hits its trigger) and the
+    TP1 partial runner (moves the remainder to TP2 after the reduceOnly half
+    closed). Either manager only starts when its feature applies.
+
+    ``partial_qty`` comes from _attach_protection (single source of truth):
+    the registration never re-queries LOT_SIZE so the manager state always
+    matches the TP1 order that was actually placed.
+    """
+    pct = float(config.tp_partial_close_pct or 0.0)
+    if pct <= 0:
+        partial_qty = None  # 功能关闭时忽略调用方传入的部分计划
+    guard_on = _guard_enabled(config, conf)
+    partial_on = (
+        partial_qty is not None
+        and quantity is not None
+        and target2 is not None
+        and tp_algo_id is not None
+    )
+    if not guard_on and not partial_on:
         return
-    _register_guard(
-        symbol,
-        {
-            "stop_algo_id": stop_algo_id,
-            "stop0": _decimal_text(stop),
-            "target": _decimal_text(target),
-            "side": side,
-            "conf": conf,
-            "ts": time.time(),
-            "moved": False,
-        },
-    )
-    watcher = threading.Thread(
-        target=_breakeven_guard_loop,
-        kwargs={
-            "client": client,
-            "symbol": symbol,
-            "trigger": str(config.breakeven_stop_trigger),
-            "poll_seconds": float(config.breakeven_poll_seconds),
-        },
-        daemon=True,
-    )
-    watcher.start()
-    logger.info(
-        "Breakeven guard started for %s %s (conf=%s)",
-        symbol,
-        side,
-        conf if conf is not None else "-",
-    )
-
-
+    record: dict[str, Any] = {
+        "stop_algo_id": stop_algo_id,
+        "stop0": _decimal_text(stop),
+        "target": _decimal_text(target),
+        "side": side,
+        "conf": conf,
+        "ts": time.time(),
+        "moved": False,
+    }
+    if partial_on:
+        record.update(
+            {
+                "tp_algo_id": str(tp_algo_id),
+                "target2": _decimal_text(target2),
+                "qty": _decimal_text(quantity),
+                "partial_qty": _decimal_text(partial_qty),
+                "partial_done": False,
+            }
+        )
+    _register_guard(symbol, record)
+    if guard_on:
+        watcher = threading.Thread(
+            target=_breakeven_guard_loop,
+            kwargs={
+                "client": client,
+                "symbol": symbol,
+                "trigger": str(config.breakeven_stop_trigger),
+                "poll_seconds": float(config.breakeven_poll_seconds),
+            },
+            daemon=True,
+        )
+        watcher.start()
+        logger.info(
+            "Breakeven guard started for %s %s (conf=%s)",
+            symbol,
+            side,
+            conf if conf is not None else "-",
+        )
+    if partial_on:
+        runner = threading.Thread(
+            target=_tp_runner_loop,
+            kwargs={
+                "client": client,
+                "symbol": symbol,
+                "poll_seconds": float(config.breakeven_poll_seconds),
+            },
+            daemon=True,
+        )
+        runner.start()
+        logger.info(
+            "TP partial runner started for %s %s (TP1 close %s%%, runner to TP2=%s)",
+            symbol,
+            side,
+            str(config.tp_partial_close_pct).rstrip("0").rstrip("."),
+            _decimal_text(target2),
+        )
 def resume_breakeven_guards(
     settings: Settings | None = None,
     *,
@@ -1233,6 +1612,68 @@ def resume_breakeven_guards(
     return resumed
 
 
+def resume_tp_runners(
+    settings: Settings | None = None,
+    *,
+    client: BinanceUSDMTestnetClient | None = None,
+) -> int:
+    """Re-arm TP1 partial runners for unfinished records after a restart.
+
+    Runner threads do not survive a process restart. Records with
+    ``partial_done`` are skipped; a runner re-polled for the others exits
+    quickly when the position is gone (cleaning the residual TP1) or swaps
+    the remainder to TP2 when the partial leg fired while we were down.
+    Legacy breakeven-only records (no partial fields) are left untouched for
+    the guard resume path.
+
+    Returns the number of runners resumed.
+    """
+    config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
+    if not config.enabled or config.dry_run or config.emergency_stop:
+        return 0
+    if float(config.tp_partial_close_pct or 0.0) <= 0:
+        return 0
+    with _STATE_LOCK:
+        guards = _load_state().get("guards")
+        records = (
+            {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
+            if isinstance(guards, dict)
+            else {}
+        )
+    if not records:
+        return 0
+    try:
+        active = client or BinanceUSDMTestnetClient(config.api_key, config.api_secret)
+    except ValueError as exc:
+        logger.error("Cannot resume TP partial runners: %s", exc)
+        return 0
+    resumed = 0
+    for symbol, record in records.items():
+        if record.get("partial_done"):
+            continue
+        tp_algo_id = str(record.get("tp_algo_id") or "")
+        stop_algo_id = str(record.get("stop_algo_id") or "")
+        if (
+            _positive_decimal(record.get("qty")) is None
+            or _positive_decimal(record.get("partial_qty")) is None
+            or _positive_decimal(record.get("target2")) is None
+            or not tp_algo_id
+            or not stop_algo_id
+        ):
+            continue  # 旧 guard 记录/残缺记录: 留给 guard resume 处理
+        runner = threading.Thread(
+            target=_tp_runner_loop,
+            kwargs={
+                "client": active,
+                "symbol": symbol,
+                "poll_seconds": float(config.breakeven_poll_seconds),
+            },
+            daemon=True,
+        )
+        runner.start()
+        resumed += 1
+        logger.info("Resumed TP partial runner for %s", symbol)
+    return resumed
 def _settle_after_entry_gone(
     client: BinanceUSDMTestnetClient,
     symbol: str,
@@ -1246,6 +1687,7 @@ def _settle_after_entry_gone(
     context: str,
     config: BinanceUSDMTestnetSettings | None = None,
     conf: float | None = None,
+    target2: Decimal | None = None,
 ) -> None:
     """A limit entry is gone (timed out / cancelled / ended) but may still
     hold a partial position. Protect whatever is open using the recorded
@@ -1276,7 +1718,13 @@ def _settle_after_entry_gone(
         _drop_pending(symbol, client_id)
         return
     try:
-        sl_algo_id, _tp_algo_id = _attach_protection(client, symbol, side, stop, target)
+        sl_algo_id, tp_algo_id, partial_qty = _attach_protection(
+            client, symbol, side, stop, target,
+            quantity=abs(open_qty),
+            target2=target2,
+            partial_pct=
+                float(config.tp_partial_close_pct) if config is not None else 0.0,
+        )
     except BinanceAPIError as exc:
         _drop_pending(symbol, client_id)
         try:
@@ -1294,7 +1742,11 @@ def _settle_after_entry_gone(
         _remember_signal(signal_id)
     if config is not None:
         _maybe_guard(
-            client, config, symbol, side, stop, target, sl_algo_id, conf
+            client, config, symbol, side, stop, target, sl_algo_id, conf,
+            quantity=abs(open_qty),
+            target2=target2,
+            tp_algo_id=tp_algo_id,
+            partial_qty=partial_qty,
         )
     _drop_pending(symbol, client_id)
     logger.info(
@@ -1318,6 +1770,7 @@ def _cancel_and_settle(
     context: str,
     config: BinanceUSDMTestnetSettings | None = None,
     conf: float | None = None,
+    target2: Decimal | None = None,
 ) -> None:
     """Cancel the resting remainder of a timed-out entry, then protect or
     roll back any partial fill. When the cancel itself fails the pending
@@ -1349,6 +1802,7 @@ def _cancel_and_settle(
         context=context,
         config=config,
         conf=conf,
+        target2=target2,
     )
 
 
@@ -1360,6 +1814,7 @@ def _watch_limit_entry(
     side: str,
     stop: Decimal,
     target: Decimal,
+    target2: Decimal | None = None,
     quantity: Decimal,
     signal_id: str,
     timeout_seconds: float,
@@ -1389,6 +1844,7 @@ def _watch_limit_entry(
                     context="timed out after status failures",
                     config=config,
                     conf=conf,
+                    target2=target2,
                 )
                 return
             remaining = deadline - time.monotonic()
@@ -1398,8 +1854,12 @@ def _watch_limit_entry(
             continue
         if status == "FILLED":
             try:
-                sl_algo_id, _tp_algo_id = _attach_protection(
-                    client, symbol, side, stop, target
+                sl_algo_id, tp_algo_id, partial_qty = _attach_protection(
+                    client, symbol, side, stop, target,
+                    quantity=quantity,
+                    target2=target2,
+                    partial_pct=
+                        float(config.tp_partial_close_pct) if config is not None else 0.0,
                 )
             except BinanceAPIError as exc:
                 _drop_pending(symbol, client_id)
@@ -1416,7 +1876,11 @@ def _watch_limit_entry(
             _remember_signal(signal_id)
             if config is not None:
                 _maybe_guard(
-                    client, config, symbol, side, stop, target, sl_algo_id, conf
+                    client, config, symbol, side, stop, target, sl_algo_id, conf,
+                    quantity=quantity,
+                    target2=target2,
+                    tp_algo_id=tp_algo_id,
+            partial_qty=partial_qty,
                 )
             _drop_pending(symbol, client_id)
             logger.info("Testnet limit entry filled and protected: %s %s", symbol, client_id)
@@ -1436,6 +1900,7 @@ def _watch_limit_entry(
                 context=f"order ended ({status})",
                 config=config,
                 conf=conf,
+                target2=target2,
             )
             return
         if time.monotonic() >= deadline:
@@ -1451,6 +1916,7 @@ def _watch_limit_entry(
                 context="timed out",
                 config=config,
                 conf=conf,
+                target2=target2,
             )
             return
         remaining = deadline - time.monotonic()
@@ -1498,6 +1964,7 @@ def resume_pending_limit_watchers(
         side = str(record.get("side") or "")
         stop = _positive_decimal(record.get("stop"))
         target = _positive_decimal(record.get("target"))
+        target2 = _positive_decimal(record.get("target2"))
         quantity = _positive_decimal(record.get("quantity"))
         conf = _parse_win_rate(record.get("conf"))
         placed_at = record.get("placed_at")
@@ -1523,6 +1990,7 @@ def resume_pending_limit_watchers(
                 "side": side,
                 "stop": stop,
                 "target": target,
+                "target2": target2,
                 "quantity": quantity,
                 "signal_id": signal_id,
                 "conf": conf,
@@ -1814,6 +2282,31 @@ def _quantity_for_notional(
     if quantity * price < Decimal(str(min_notional)):
         return None
     return quantity
+
+
+def _partial_quantity(
+    quantity: Decimal, pct: float, exchange_info: dict[str, Any]
+) -> Decimal | None:
+    """Floor the TP1 partial-close size to the LOT_SIZE step size.
+
+    Returns None when partial TP1 is off (pct<=0), not representable on the
+    exchange (below minQty) or equal to the whole position (pct=100 keeps the
+    legacy full-close TP1 behaviour). None also means the caller must fall
+    back to a close-all TP1 order so the position never lacks a take-profit.
+    """
+    if pct <= 0 or quantity <= 0:
+        return None
+    filters = {item.get("filterType"): item for item in exchange_info.get("filters", [])}
+    lot = filters.get("LOT_SIZE")
+    if not isinstance(lot, dict):
+        return None
+    step = Decimal(str(lot["stepSize"]))
+    minimum = Decimal(str(lot["minQty"]))
+    share = quantity * Decimal(str(pct)) / Decimal("100")
+    partial = (share / step).to_integral_value(rounding=ROUND_DOWN) * step
+    if partial <= 0 or partial < minimum or partial >= quantity:
+        return None
+    return partial
 
 
 def _price_for_tick(price: Decimal, exchange_info: dict[str, Any]) -> Decimal:

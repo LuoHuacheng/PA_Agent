@@ -1471,3 +1471,585 @@ def test_counter_trend_guard_disabled_when_scale_one_and_no_min() -> None:
     assert result.status == "submitted", result.reason
     assert ("set_leverage", "BTCUSDT", 20) in client.calls
 
+# ---- P0-1: TP1 部分止盈 + runner(TP2) --------------------------------
+
+def _partial_settings(pct: float = 50.0) -> Settings:
+    settings = _settings()
+    settings.binance_usdm_testnet.tp_partial_close_pct = pct
+    return settings
+
+
+def _lot_info(step: str = "0.001", minimum: str = "0.001") -> dict:
+    return {"filters": [{"filterType": "LOT_SIZE", "minQty": minimum, "stepSize": step}]}
+
+
+def test_partial_quantity_floors_to_lot_step_and_validates() -> None:
+    """TP1 部分单数量 = 仓位按比例后沿 LOT_SIZE step 向下取整; 不可行回退 None。"""
+    q = binance_usdm_testnet._partial_quantity
+    info = _lot_info()
+    assert q(Decimal("2"), 50.0, info) == Decimal("1")
+    assert q(Decimal("167.79"), 50.0, info) == Decimal("83.895")
+    assert q(Decimal("0.3"), 50.0, info) == Decimal("0.15")
+    assert q(Decimal("2"), 0.0, info) is None  # 关闭
+    assert q(Decimal("2"), 100.0, info) is None  # 全平 => 保持现行为
+    assert q(Decimal("0.001"), 50.0, info) is None  # 半仓不足 minQty
+    assert q(Decimal("2"), 50.0, {"filters": []}) is None  # 无 LOT_SIZE
+
+
+def test_place_algo_order_reduce_only_quantity_payload() -> None:
+    """部分止盈挂单必须带 quantity+reduceOnly, 不能 closePosition。"""
+    seen: list[str] = []
+
+    def opener(request, **_kw: object) -> _OkResponse:
+        seen.append(str(request.full_url))
+        return _OkResponse({"code": 200, "msg": "success"})
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "test-key", "test-secret", opener=opener
+    )
+    client.place_close_algo_order(
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="TAKE_PROFIT_MARKET",
+        stop_price=Decimal("120"),
+        client_algo_id="pa-tp-x0001",
+        quantity=Decimal("1.5"),
+        close_position=False,
+    )
+    assert "quantity=1.5" in seen[0], seen[0]
+    assert "reduceOnly=true" in seen[0], seen[0]
+    assert "closePosition" not in seen[0], seen[0]
+    seen.clear()
+    client.place_close_algo_order(
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="STOP_MARKET",
+        stop_price=Decimal("90"),
+        client_algo_id="pa-sl-x0001",
+    )
+    assert "closePosition=true" in seen[0], seen[0]
+    assert "quantity" not in seen[0], seen[0]
+
+
+def test_attach_protection_partial_places_half_qty_tp1_and_full_sl() -> None:
+    """partial_pct>0 时: SL 仍 closePosition, TP1 改为 reduceOnly 半仓单。"""
+    client = FakeClient()
+    sl_id, tp_id, _plan_qty = binance_usdm_testnet._attach_protection(
+        client, "BTCUSDT", "BUY", Decimal("90"), Decimal("120"),
+        quantity=Decimal("2"), target2=Decimal("150"), partial_pct=50.0,
+    )
+    assert sl_id.startswith("pa-sl-")
+    assert tp_id.startswith("pa-tp-")
+    prot = [call[1] for call in client.calls if call[0] == "protection"]
+    assert prot[0]["order_type"] == "STOP_MARKET"
+    assert prot[0]["stop_price"] == Decimal("90")
+    assert "quantity" not in prot[0]
+    tp = prot[1]
+    assert tp["order_type"] == "TAKE_PROFIT_MARKET"
+    assert tp["stop_price"] == Decimal("120")
+    assert tp["quantity"] == Decimal("1")
+    assert tp.get("close_position") is False
+
+
+def test_attach_protection_falls_back_to_full_tp1_when_infeasible() -> None:
+    """无 TP2 / 半仓不可行时回退现状全平 TP1, 不许裸仓。"""
+    client = FakeClient()
+    binance_usdm_testnet._attach_protection(
+        client, "BTCUSDT", "BUY", Decimal("90"), Decimal("120"),
+        quantity=Decimal("2"), target2=None, partial_pct=50.0,
+    )
+    prot = [call[1] for call in client.calls if call[0] == "protection"]
+    assert "quantity" not in prot[1]
+    assert prot[1].get("close_position") is not False
+    client = FakeClient()
+    binance_usdm_testnet._attach_protection(
+        client, "BTCUSDT", "BUY", Decimal("90"), Decimal("120"),
+        quantity=Decimal("2"), target2=Decimal("150"), partial_pct=100.0,
+    )
+    prot = [call[1] for call in client.calls if call[0] == "protection"]
+    assert "quantity" not in prot[1]
+
+
+def test_attach_protection_partial_failure_cancels_placed_orders() -> None:
+    """部分 TP1 挂单失败时, 已挂成功的 SL 也必须撤, 防孤儿全平单。"""
+    client = FailSecondProtectionClient()
+    with pytest.raises(BinanceAPIError, match="take-profit rejected"):
+        binance_usdm_testnet._attach_protection(
+            client, "BTCUSDT", "BUY", Decimal("90"), Decimal("120"),
+            quantity=Decimal("2"), target2=Decimal("150"), partial_pct=50.0,
+        )
+    cancels = [call[1] for call in client.calls if call[0] == "cancel_protection"]
+    assert len(cancels) == 1
+    assert cancels[0]["client_algo_id"].startswith("pa-sl-")
+    # TP 单从未被 attach 计入, 不会被撤(服务器端未挂出) -> 无需孤儿清理
+
+class PartialRunnerClient(FakeClient):
+    """Open long (qty 2) whose amount drops once the TP1 partial fires."""
+
+    def __init__(self, amounts: list[float]) -> None:
+        super().__init__()
+        self._amounts = [Decimal(str(a)) for a in amounts]
+        self._last_amount = Decimal("0")
+
+    def position_info(self, symbol: str) -> dict:
+        self.calls.append(("position_info", symbol))
+        if self._amounts:
+            self._last_amount = self._amounts.pop(0)
+        return {"amount": self._last_amount, "entry": Decimal("100")}
+
+
+class StaleStopRunnerClient(PartialRunnerClient):
+    """Runner account whose resting stop was already removed server-side."""
+
+    def cancel_algo_order(self, **kwargs: object) -> None:
+        self.calls.append(("cancel_protection", kwargs))
+        raise BinanceAPIError(
+            'Binance HTTP 400: {"code":-2011,"msg":"Unknown order sent."}'
+        )
+
+
+class BrokenCancelRunnerClient(PartialRunnerClient):
+    """Runner account whose stop cancel keeps failing for non-missing reasons."""
+
+    def cancel_algo_order(self, **kwargs: object) -> None:
+        self.calls.append(("cancel_protection", kwargs))
+        raise BinanceAPIError("Binance network error: test outage")
+
+
+def _register_tp_record(symbol: str = "BTCUSDT", extra: dict | None = None) -> None:
+    record = {
+        "stop_algo_id": "pa-sl-old0001",
+        "tp_algo_id": "pa-tp-part0001",
+        "stop0": "90",
+        "target": "120",
+        "target2": "150",
+        "qty": "2",
+        "partial_qty": "1",
+        "side": "BUY",
+        "conf": 60,
+        "ts": time.time(),
+        "moved": False,
+        "partial_done": False,
+    }
+    if extra:
+        record.update(extra)
+    binance_usdm_testnet._register_guard(symbol, record)
+
+
+def _run_tp_runner(client: FakeClient, monkeypatch) -> list[float]:
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    binance_usdm_testnet._tp_runner_loop(
+        client=client, symbol="BTCUSDT", poll_seconds=1.0
+    )
+    return sleeps
+
+
+def _tp_places(client: FakeClient) -> list[dict]:
+    return [call[1] for call in client.calls if call[0] == "protection"]
+
+
+def _tp_cancels(client: FakeClient) -> list[dict]:
+    return [call[1] for call in client.calls if call[0] == "cancel_protection"]
+
+
+def test_tp_runner_swaps_to_breakeven_and_tp2_after_half_close(monkeypatch) -> None:
+    """TP1 半仓触发后: 撤原 SL, 挂入场价 STOP + TP2 TAKE_PROFIT, 标记完成。"""
+    _register_tp_record()
+    client = PartialRunnerClient([2, 2, 1])
+    sleeps = _run_tp_runner(client, monkeypatch)
+    assert len(sleeps) == 2  # 前两次量未变, 第三轮才触发半仓
+    cancels = _tp_cancels(client)
+    assert [c["client_algo_id"] for c in cancels] == [
+        "pa-tp-part0001",  # 先清 TP1 残单(已成交则视为已清)
+        "pa-sl-old0001",  # 再撤原止损
+    ]
+    places = _tp_places(client)
+    assert len(places) == 2
+    assert places[0]["order_type"] == "STOP_MARKET"
+    assert places[0]["stop_price"] == Decimal("100")
+    assert places[1]["order_type"] == "TAKE_PROFIT_MARKET"
+    assert places[1]["stop_price"] == Decimal("150")
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["moved"] is True
+    assert record["partial_done"] is True
+    assert record["stop_algo_id"] != "pa-sl-old0001"
+    assert record["tp_algo_id"] != "pa-tp-part0001"
+
+
+def test_tp_runner_cleans_residual_tp1_when_position_closed(monkeypatch) -> None:
+    """仓位归零(止损/手动): 清理残留 TP1 部分单并移除注册记录。"""
+    _register_tp_record()
+    client = PartialRunnerClient([0])
+    sleeps = _run_tp_runner(client, monkeypatch)
+    assert sleeps == []
+    cancels = _tp_cancels(client)
+    assert len(cancels) == 1
+    assert cancels[0]["client_algo_id"] == "pa-tp-part0001"
+    assert _tp_places(client) == []
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+
+
+def test_tp_runner_with_breakeven_already_moved_places_tp2_only(monkeypatch) -> None:
+    """保本已先移(0.5r 早于 TP1): 不再动 SL, 只补挂 TP2 全平单。"""
+    _register_tp_record(extra={"moved": True, "stop_algo_id": "pa-sl-entry1"})
+    client = PartialRunnerClient([2, 1])
+    _run_tp_runner(client, monkeypatch)
+    cancels = _tp_cancels(client)
+    assert [c["client_algo_id"] for c in cancels] == ["pa-tp-part0001"]
+    assert not [c for c in cancels if c["client_algo_id"].startswith("pa-sl-")]
+    places = _tp_places(client)
+    assert len(places) == 1
+    assert places[0]["order_type"] == "TAKE_PROFIT_MARKET"
+    assert places[0]["stop_price"] == Decimal("150")
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["partial_done"] is True
+    assert record["moved"] is True
+    assert record["stop_algo_id"] == "pa-sl-entry1"  # 原保本单保留
+
+
+def test_tp_runner_tolerates_missing_stop_on_swap(monkeypatch) -> None:
+    """撤原 SL 遇 -2011(已被撤): 视为已撤, 照常补挂保本+TP2。"""
+    _register_tp_record()
+    client = StaleStopRunnerClient([2, 1])
+    _run_tp_runner(client, monkeypatch)
+    places = _tp_places(client)
+    assert len(places) == 2
+    assert places[0]["stop_price"] == Decimal("100")
+    assert places[1]["stop_price"] == Decimal("150")
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["partial_done"] is True and record["moved"] is True
+
+
+def test_tp_runner_gives_up_after_repeated_cancel_failures(monkeypatch) -> None:
+    """撤单持续失败(非 -2011)时有限重试后放弃, 不无限空转。"""
+    _register_tp_record()
+    client = BrokenCancelRunnerClient([1] * 10)
+    sleeps = _run_tp_runner(client, monkeypatch)
+    assert _tp_places(client) == []
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["partial_done"] is False and record["moved"] is False
+    assert len(sleeps) <= 5
+
+
+def test_tp_runner_ignores_legacy_guard_record(monkeypatch) -> None:
+    """无 partial 字段的旧 guard 记录(非本功能)直接退出, 不动单不删记录。"""
+    binance_usdm_testnet._register_guard(
+        "BTCUSDT",
+        {"stop_algo_id": "pa-sl-old0001", "stop0": "90", "target": "120",
+         "side": "BUY", "conf": 60, "ts": time.time(), "moved": False},
+    )
+    client = PartialRunnerClient([1])
+    sleeps = _run_tp_runner(client, monkeypatch)
+    assert sleeps == []
+    assert client.calls == []
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["moved"] is False
+
+
+def _capture_threads(monkeypatch) -> list:
+    captured: list = []
+
+    class FakeThread:
+        def __init__(self, *, target, kwargs, daemon=True) -> None:
+            self.target = target
+            self.kwargs = kwargs
+
+        def start(self) -> None:
+            captured.append((self.target, self.kwargs))
+
+    monkeypatch.setattr(binance_usdm_testnet.threading, "Thread", FakeThread)
+    return captured
+
+
+def test_maybe_guard_partial_registers_and_arms_runner(monkeypatch) -> None:
+    """pct>0: 注册表补存 qty/partial_qty/target2/tp_algo_id, guard+runner 双线程。"""
+    captured = _capture_threads(monkeypatch)
+    config = _partial_settings().binance_usdm_testnet
+    binance_usdm_testnet._maybe_guard(
+        client=FakeClient(),
+        config=config,
+        symbol="BTCUSDT",
+        side="BUY",
+        stop=Decimal("90"),
+        target=Decimal("120"),
+        stop_algo_id="pa-sl-x",
+        conf=58,
+        quantity=Decimal("2"),
+        target2=Decimal("150"),
+        tp_algo_id="pa-tp-x",
+        partial_qty=Decimal("1"),
+    )
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["qty"] == "2"
+    assert record["partial_qty"] == "1"
+    assert record["target2"] == "150"
+    assert record["tp_algo_id"] == "pa-tp-x"
+    assert record["moved"] is False
+    assert record["partial_done"] is False
+    targets = [target for target, _kwargs in captured]
+    assert binance_usdm_testnet._breakeven_guard_loop in targets
+    assert binance_usdm_testnet._tp_runner_loop in targets
+    runner_kwargs = [kwargs for target, kwargs in captured
+                     if target is binance_usdm_testnet._tp_runner_loop]
+    assert runner_kwargs and runner_kwargs[0]["symbol"] == "BTCUSDT"
+    assert runner_kwargs[0]["poll_seconds"] == config.breakeven_poll_seconds
+
+
+def test_maybe_guard_partial_without_breakeven_still_arms_runner(monkeypatch) -> None:
+    """保本 off + 部分止盈 on: 只起 runner 线程, 注册表照常。"""
+    captured = _capture_threads(monkeypatch)
+    config = _partial_settings().binance_usdm_testnet
+    config.breakeven_stop_trigger = "off"
+    binance_usdm_testnet._maybe_guard(
+        client=FakeClient(),
+        config=config,
+        symbol="BTCUSDT",
+        side="BUY",
+        stop=Decimal("90"),
+        target=Decimal("120"),
+        stop_algo_id="pa-sl-x",
+        conf=58,
+        quantity=Decimal("2"),
+        target2=Decimal("150"),
+        tp_algo_id="pa-tp-x",
+        partial_qty=Decimal("1"),
+    )
+    targets = [target for target, _kwargs in captured]
+    assert targets == [binance_usdm_testnet._tp_runner_loop]
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None and record["partial_done"] is False
+
+
+def test_resume_tp_runners_arms_unfinished_records_only(monkeypatch) -> None:
+    """重启恢复: 只拉起 partial_done=False 的记录; 跳过已完成的与旧 guard。"""
+    captured = _capture_threads(monkeypatch)
+    settings = _partial_settings()
+    _register_tp_record("BTCUSDT")
+    _register_tp_record("ETHUSDT", extra={"partial_done": True})
+    binance_usdm_testnet._register_guard(
+        "ADAUSDT",
+        {"stop_algo_id": "pa-sl-old2", "stop0": "90", "target": "120",
+         "side": "BUY", "conf": 60, "ts": time.time(), "moved": False},
+    )
+    count = binance_usdm_testnet.resume_tp_runners(settings, client=FakeClient())
+    assert count == 1
+    entries = [(target, kwargs["symbol"]) for target, kwargs in captured]
+    assert entries == [(binance_usdm_testnet._tp_runner_loop, "BTCUSDT")]
+    # 旧 guard 记录(无 partial 字段)不得被删
+    record = binance_usdm_testnet._read_guard("ADAUSDT")
+    assert record and record["stop_algo_id"] == "pa-sl-old2"
+    # pct=0(功能关闭) => 不恢复
+    captured.clear()
+    assert binance_usdm_testnet.resume_tp_runners(
+        _partial_settings(pct=0.0), client=FakeClient()
+    ) == 0
+    assert captured == []
+
+
+def test_market_signal_partial_enabled_arms_half_tp1_and_runner(monkeypatch) -> None:
+    """市价单 + pct50: TP1 只挂半仓 reduceOnly, 注册并拉起 runner 线程。"""
+    captured = _capture_threads(monkeypatch)
+    client = FakeClient()
+    decision = _long_decision() | {
+        "take_profit_price_2": 150,
+        "trade_confidence": 70,
+    }
+    result = execute_market_signal(
+        decision, _partial_settings(), analysis_symbol="BTCUSDT", client=client
+    )
+    assert result.status == "submitted", result.reason
+    tps = [call[1] for call in client.calls if call[0] == "protection"
+           and call[1]["order_type"] == "TAKE_PROFIT_MARKET"]
+    assert tps and tps[0]["quantity"] == Decimal("0.1")
+    assert tps[0].get("close_position") is False
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["qty"] == "0.2"
+    assert record["partial_qty"] == "0.1"
+    assert record["target2"] == "150"
+    targets = {target for target, _kwargs in captured}
+    assert binance_usdm_testnet._tp_runner_loop in targets
+    assert binance_usdm_testnet._breakeven_guard_loop in targets
+
+
+def test_market_signal_partial_without_tp2_falls_back_legacy(monkeypatch) -> None:
+    """decision 缺 take_profit_price_2: 回退全平 TP1, 不起 runner, 不注册。"""
+    captured = _capture_threads(monkeypatch)
+    client = FakeClient()
+    result = execute_market_signal(
+        _long_decision(), _partial_settings(), analysis_symbol="BTCUSDT", client=client
+    )
+    assert result.status == "submitted", result.reason
+    tps = [call[1] for call in client.calls if call[0] == "protection"
+           and call[1]["order_type"] == "TAKE_PROFIT_MARKET"]
+    assert tps and "quantity" not in tps[0]
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+    assert captured == []
+
+
+def test_limit_pending_record_stores_target2_and_watcher_uses_it(monkeypatch) -> None:
+    """限价单 pending 记录须带 target2, 成交后按部分止盈保护并注册 runner。"""
+    client = FakeClient()
+    decision = _long_decision() | {
+        "order_type": "限价单",
+        "entry_price": 95,
+        "take_profit_price_2": 150,
+    }
+    result = execute_market_signal(
+        decision, _partial_settings(), analysis_symbol="BTCUSDT", client=client
+    )
+    assert result.status == "pending", result.reason
+    pending = _pending_state()
+    assert pending["BTCUSDT"]["target2"] == "150"
+    captured = _capture_threads(monkeypatch)
+    client = FakeClient()
+    client.statuses["pa-fill-t"] = ["FILLED"]
+    binance_usdm_testnet._watch_limit_entry(
+        client=client,
+        symbol="BTCUSDT",
+        client_id="pa-fill-t",
+        side="BUY",
+        stop=Decimal("90"),
+        target=Decimal("120"),
+        quantity=Decimal("2"),
+        signal_id="fill-signal",
+        conf=70,
+        config=_partial_settings().binance_usdm_testnet,
+        target2=Decimal("150"),
+        timeout_seconds=1.0,
+        poll_interval=0.1,
+    )
+    tps = [call[1] for call in client.calls if call[0] == "protection"
+           and call[1]["order_type"] == "TAKE_PROFIT_MARKET"]
+    assert tps and tps[0]["quantity"] == Decimal("1")
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None and record["partial_done"] is False
+    assert any(
+        target is binance_usdm_testnet._tp_runner_loop for target, _k in captured
+    )
+
+
+class _Tp2PlaceFailRunnerClient(PartialRunnerClient):
+    """Runner whose breakeven STOP works but TP2 placement always fails."""
+
+    def place_close_algo_order(self, **kwargs: object) -> None:
+        self.calls.append(("protection", kwargs))
+        if kwargs["order_type"] == "TAKE_PROFIT_MARKET":
+            raise BinanceAPIError("Binance network error: tp2 down")
+
+
+def test_tp_runner_tp2_failure_keeps_live_breakeven_record(monkeypatch) -> None:
+    """TP2 限次失败放弃后: 保本单已成功须写回记录(指向新单), 供重启/重跑补 TP2。"""
+    _register_tp_record()
+    client = _Tp2PlaceFailRunnerClient([2, 1])
+    sleeps = _run_tp_runner(client, monkeypatch)
+    assert len(sleeps) == 5  # 1 次全量轮询 + 4 次 TP2 重试退避
+    cancels = _tp_cancels(client)
+    # 每次重试都会先幂等清 TP1 残单(交易所已撤则 -2011 容忍)
+    tp_cancels = [c for c in cancels if c["client_algo_id"].startswith("pa-tp-")]
+    assert len(tp_cancels) >= 1
+    sl_cancels = [c for c in cancels if c["client_algo_id"].startswith("pa-sl-")]
+    assert [c["client_algo_id"] for c in sl_cancels] == ["pa-sl-old0001"]
+    places = _tp_places(client)
+    stops = [p for p in places if p["order_type"] == "STOP_MARKET"]
+    assert len(stops) == 1
+    assert stops[0]["stop_price"] == Decimal("100")
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["moved"] is True          # 保本已就位
+    assert record["partial_done"] is False  # TP2 未完成, 可被再次拉起
+    assert record["stop_algo_id"] != "pa-sl-old0001"
+    assert record["stop_algo_id"].startswith("pa-sl-")
+    # 重新拉起(模拟重启 resume): moved=True 分支只补 TP2, 不再动 SL
+    client2 = PartialRunnerClient([1])
+    sleeps2 = _run_tp_runner(client2, monkeypatch)
+    assert sleeps2 == []
+    cancels2 = _tp_cancels(client2)
+    assert [c["client_algo_id"] for c in cancels2] == ["pa-tp-part0001"]
+    assert not [c for c in cancels2 if c["client_algo_id"].startswith("pa-sl-")]
+    tp2 = [p for p in _tp_places(client2) if p["order_type"] == "TAKE_PROFIT_MARKET"]
+    assert len(tp2) == 1 and tp2[0]["stop_price"] == Decimal("150")
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["partial_done"] is True
+
+
+class _NoInfoClient(FakeClient):
+    """Fake whose exchange_info is down (partial plan must come from attach)."""
+
+    def exchange_info(self, symbol: str) -> dict:
+        raise BinanceAPIError("exchange info down")
+
+
+def test_maybe_guard_uses_attach_partial_plan_without_refetch(monkeypatch) -> None:
+    """partial_qty 由 attach 算好传入: 注册不再回取 exchange_info, 两次取值不会不一致。"""
+    captured = _capture_threads(monkeypatch)
+    config = _partial_settings().binance_usdm_testnet
+    client = _NoInfoClient()
+    binance_usdm_testnet._maybe_guard(
+        client=client,
+        config=config,
+        symbol="BTCUSDT",
+        side="BUY",
+        stop=Decimal("90"),
+        target=Decimal("120"),
+        stop_algo_id="pa-sl-x",
+        conf=58,
+        quantity=Decimal("2"),
+        target2=Decimal("150"),
+        tp_algo_id="pa-tp-x",
+        partial_qty=Decimal("1"),
+    )
+    assert client.calls == []  # 未触发任何额外 API(exchange_info 不可用也不报错)
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["qty"] == "2"
+    assert record["partial_qty"] == "1"
+    assert record["partial_done"] is False
+    assert binance_usdm_testnet._tp_runner_loop in [t for t, _k in captured]
+
+
+def test_maybe_guard_without_attach_plan_skips_partial(monkeypatch) -> None:
+    """attach 判定不可行(None)时: 即使给了 quantity/target2 也不注册 runner。"""
+    captured = _capture_threads(monkeypatch)
+    config = _partial_settings().binance_usdm_testnet
+    binance_usdm_testnet._maybe_guard(
+        client=FakeClient(),
+        config=config,
+        symbol="BTCUSDT",
+        side="BUY",
+        stop=Decimal("90"),
+        target=Decimal("120"),
+        stop_algo_id="pa-sl-x",
+        conf=58,
+        quantity=Decimal("2"),
+        target2=Decimal("150"),
+        tp_algo_id="pa-tp-x",
+        partial_qty=None,
+    )
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None and "partial_qty" not in record
+    targets = [t for t, _k in captured]
+    assert binance_usdm_testnet._breakeven_guard_loop in targets
+    assert binance_usdm_testnet._tp_runner_loop not in targets
+
+
+def test_tp_runner_cleanup_failure_keeps_record_for_resume(monkeypatch) -> None:
+    """仓位清零后清残留 TP1 连续失败: 记录必须保留(供重启 resume 再撤), 不许丢弃句柄。"""
+    _register_tp_record()
+    client = BrokenCancelRunnerClient([0])
+    sleeps = _run_tp_runner(client, monkeypatch)
+    cancels = _tp_cancels(client)
+    assert len(cancels) == 5
+    assert len(sleeps) == 4  # 5 次失败中的 4 次退避
+    assert cancels[0]["client_algo_id"] == "pa-tp-part0001"
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["tp_algo_id"] == "pa-tp-part0001"  # 句柄仍在, resume 可重试
+    assert record["partial_done"] is False
+
+
+
