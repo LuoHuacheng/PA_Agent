@@ -15,6 +15,7 @@ from pa_agent.monitoring.service import (
     MultiSymbolMonitor,
     _default_validate_symbols,
     _frame_atr_pct,
+    _signal_notification_allowed,
     next_poll_at,
     timeframe_seconds,
 )
@@ -653,10 +654,11 @@ def test_monitor_auto_execution_calls_executor_and_logger(tmp_path: Path, monkey
         analyze=lambda _frame, **_kw: _order_decision(),
     )
 
-    monitor._save_order_opportunity(
+    ret = monitor._save_order_opportunity(
         _order_frame(), _order_decision(), _order_decision()["decision"], _record_double()
     )
 
+    assert ret is not None and ret.status == "dry_run"
     assert calls and calls[0]["analysis_symbol"] == "BTCUSDT"
     assert calls[0]["inner"]["order_type"] == "市价单"
     assert recorded and recorded[0]["meta_symbol"] == "BTCUSDT"
@@ -718,3 +720,59 @@ def test_frame_atr_pct_returns_none_when_unavailable() -> None:
         "bars": (type("Bar", (), {"close": 0})(),),
     })()
     assert _frame_atr_pct(zero_close) is None
+
+
+class _Res:
+    def __init__(self, status: str, reason: str = "") -> None:
+        self.status = status
+        self.reason = reason
+
+
+def test_signal_notification_allowed_only_suppresses_rejected() -> None:
+    assert _signal_notification_allowed(None) is True
+    for ok in ("submitted", "pending", "dry_run", "skipped", "failed"):
+        assert _signal_notification_allowed(_Res(ok)) is True, ok
+    assert _signal_notification_allowed(_Res("rejected")) is False
+
+
+def _notify_monitor(tmp_path: Path) -> MultiSymbolMonitor:
+    settings = _settings(MonitorTarget(symbol="BTCUSDT", timeframe="15m"))
+    return MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        clock=lambda: 1_805,
+        analyze=lambda _frame, **_kw: _order_decision(),
+    )
+
+
+def test_rejected_execution_skips_order_signal_push(tmp_path: Path, monkeypatch) -> None:
+    """下单检验被拒(rejected)时不再推信号通知(含 telegram)。"""
+    calls: list[str] = []
+    for mod in ("telegram_notifier", "feishu_notifier", "pushplus_notifier"):
+        monkeypatch.setattr(
+            "pa_agent.notify.%s.send_order_signal" % mod,
+            lambda _m=mod, **_kw: calls.append(_m) or True,
+        )
+    monitor = _notify_monitor(tmp_path)
+    out = monitor._notify_order_signal(
+        _order_frame(), _order_decision(), _order_decision()["decision"],
+        _Res("rejected", "Stop loss too close to entry (0.2% < 0.4% minimum)"),
+    )
+    assert out == _order_decision()
+    assert calls == [], "rejected 的信号不得推送任何渠道"
+
+
+def test_successful_execution_still_pushes_order_signal(tmp_path: Path, monkeypatch) -> None:
+    calls: list[str] = []
+    for mod in ("telegram_notifier", "feishu_notifier", "pushplus_notifier"):
+        monkeypatch.setattr(
+            "pa_agent.notify.%s.send_order_signal" % mod,
+            lambda _m=mod, **_kw: calls.append(_m) or True,
+        )
+    monitor = _notify_monitor(tmp_path)
+    monitor._notify_order_signal(
+        _order_frame(), _order_decision(), _order_decision()["decision"], _Res("submitted")
+    )
+    assert sorted(calls) == ["feishu_notifier", "pushplus_notifier", "telegram_notifier"]

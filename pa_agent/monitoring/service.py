@@ -153,6 +153,19 @@ def _frame_atr_pct(frame: Any) -> float | None:
     return atr / close * 100.0
 
 
+def _signal_notification_allowed(exec_result: Any) -> bool:
+    """Whether the order-signal push should still be sent after execution.
+
+    A rejected execution (stop too close, whitelist, trader equation, duplicate
+    position, ...) means no order is working, so announcing the signal as if it
+    were live is misleading. Every other status - submitted, pending, dry_run,
+    skipped (disabled/cooldown) and failed - keeps the notification; dry-run
+    and disabled still feed the human pipeline and failures carry their own
+    alert.
+    """
+    return exec_result is None or getattr(exec_result, "status", "") != "rejected"
+
+
 @dataclass
 class _TargetState:
     target: MonitorTarget
@@ -658,8 +671,9 @@ class MultiSymbolMonitor:
         # or notifications. The default settings keep automated execution
         # disabled (binance_usdm_testnet.enabled=False), so this is a no-op
         # unless the operator explicitly enables it.
+        exec_result = None
         try:
-            self._save_order_opportunity(frame, decision, inner, record)
+            exec_result = self._save_order_opportunity(frame, decision, inner, record)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Monitor trade-record/execution failed for %s %s: %s",
@@ -668,6 +682,30 @@ class MultiSymbolMonitor:
                 exc,
             )
 
+        # 被下单检验拒绝的信号不推通知（避免"像有单在跑"的误导）；dry_run/
+        # disabled/成功/失败等其余状态照常推送。
+        return self._notify_order_signal(frame, decision, inner, exec_result)
+
+    def _notify_order_signal(
+        self, frame: Any, decision: dict, inner: dict, exec_result: Any
+    ) -> dict:
+        """Push the order-signal alert unless the execution was rejected.
+
+        A rejected execution (stop too close, whitelist, trader equation,
+        duplicate position, ...) means no order is working, so the signal push
+        is skipped to avoid announcing a plan as if it were live. Dry-run /
+        disabled executions keep feeding the human pipeline and failed
+        executions carry their own dedicated alert.
+        """
+        if not _signal_notification_allowed(exec_result):
+            logger.info(
+                "跳过被拒信号的推送 %s %s (status=%s reason=%s)",
+                frame.symbol,
+                frame.timeframe,
+                getattr(exec_result, "status", "?"),
+                getattr(exec_result, "reason", ""),
+            )
+            return decision
         from pa_agent.notify.feishu_notifier import send_order_signal as send_feishu
         from pa_agent.notify.pushplus_notifier import send_order_signal as send_pushplus
         from pa_agent.notify.telegram_notifier import send_order_signal as send_telegram
@@ -816,7 +854,7 @@ class MultiSymbolMonitor:
         except Exception:
             logger.exception("Structure-exit notice failed for %s", frame.symbol)
 
-    def _save_order_opportunity(self, frame: Any, decision: dict, inner: dict, record: Any) -> None:
+    def _save_order_opportunity(self, frame: Any, decision: dict, inner: dict, record: Any) -> Any:
         """Persist the trade record and auto-execute the Testnet market signal."""
         from pa_agent.records.trade_logger import save_trade_record
         from pa_agent.trading.binance_usdm_testnet import execute_market_signal
@@ -874,6 +912,7 @@ class MultiSymbolMonitor:
                 logger.exception(
                     "Execution-failure notification failed for %s", frame.symbol
                 )
+        return result
 
     @staticmethod
     def _key_text(key: tuple[str, str]) -> str:
