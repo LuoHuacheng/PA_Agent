@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import random
 import threading
 import time
 import uuid
@@ -100,6 +101,20 @@ def _rate_limit_cooldown_seconds(poll_seconds: float) -> float:
     )
 
 
+def _guard_rate_limit_wait(poll_seconds: float) -> None:
+    """Sleep through a live ban plus a small jitter to stagger wake-ups.
+
+    Guard/runner/time-stop loops would otherwise all wake at the same
+    ban-until instant if they slept the exact remaining time; the jitter
+    spreads the post-ban first polls so the shared IP is not re-tripped by a
+    synchronized burst.
+    """
+    time.sleep(
+        _rate_limit_cooldown_seconds(poll_seconds)
+        + random.uniform(0.0, float(poll_seconds))
+    )
+
+
 class BinanceAPIError(RuntimeError):
     """A rejected or unavailable Binance API request."""
 
@@ -127,6 +142,15 @@ def _is_retryable(exc: BinanceAPIError, method: str, params: dict[str, Any] | No
         return True
     payload = {k: str(v) for k, v in (params or {}).items() if v is not None}
     return "newClientOrderId" in payload or "clientAlgoId" in payload
+
+
+def _raise_if_banned() -> None:
+    """Raise a rate-limit error when a live ban blocks direct REST access."""
+    if rate_limiter.is_banned():
+        raise BinanceAPIError(
+            f"Binance HTTP 418: IP banned until {rate_limiter.banned_until_ms()} "
+            "(blocked locally, no request sent)"
+        )
 
 
 def _stop_gap_pct(reference: Decimal, stop: Decimal) -> Decimal:
@@ -171,6 +195,7 @@ class BinanceUSDMTestnetClient:
     def _request(
         self, method: str, path: str, params: dict[str, Any] | None = None, *, signed: bool = False
     ) -> dict[str, Any] | list[Any]:
+        _raise_if_banned()
         for attempt in range(_REQUEST_RETRIES + 1):
             try:
                 return self._request_once(method, path, params, signed=signed)
@@ -516,58 +541,23 @@ def execute_market_signal(
     client: BinanceUSDMTestnetClient | None = None,
     trend_30d_pct: float | None = None,
 ) -> ExecutionResult:
-    """Execute one validated market signal, retrying after Testnet rate-limit bans.
+    """Execute one validated market signal (one-shot; no rate-limit retries).
 
     Binance Testnet shares public egress IPs and frequently answers HTTP 418
-    (code -1003, IP banned) for a few minutes. Only rate-limit failures are
-    retried, with exponential backoff; every other failure stays one-shot.
-    Re-entry is safe because the first attempt never records the signal on a
-    failed path and the open-position guard blocks duplicate entries.
+    (code -1003, IP banned). The request layer now refuses to send anything
+    while a ban is live, and retrying a rate-limited submission only extends
+    the penalty, so rate-limit failures are NOT retried - every other failure
+    also stays one-shot. Re-entry is safe because the first attempt never
+    records the signal on a failed path and the open-position guard blocks
+    duplicate entries.
     """
-    config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
-    max_attempts = max(1, int(getattr(config, "execution_retry_max_attempts", 3) or 1))
-    backoff = max(5, int(getattr(config, "execution_retry_backoff_seconds", 30) or 30))
-
-    result = _execute_market_signal_once(
+    return _execute_market_signal_once(
         decision,
         settings,
         analysis_symbol=analysis_symbol,
         client=client,
         trend_30d_pct=trend_30d_pct,
     )
-    attempts, retried = 1, 0
-    while (
-        result.status == "failed"
-        and _is_rate_limit_reason(result.reason)
-        and attempts < max_attempts
-    ):
-        attempts += 1
-        retried += 1
-        delay = backoff * (2 ** (retried - 1))
-        logger.warning(
-            "Testnet rate-limit error (%s); retry %d/%d after %ds sleep",
-            result.reason[:160],
-            attempts,
-            max_attempts,
-            delay,
-        )
-        time.sleep(delay)
-        result = _execute_market_signal_once(
-            decision,
-            settings,
-            analysis_symbol=analysis_symbol,
-            client=client,
-            trend_30d_pct=trend_30d_pct,
-        )
-    if retried and result.status == "failed":
-        result = ExecutionResult(
-            "failed",
-            f"{result.reason} (rate-limit retries exhausted after {retried} retry{'s' if retried > 1 else ''})",
-            result.symbol,
-            result.quantity,
-            result.entry_order_id,
-        )
-    return result
 
 
 def _execute_market_signal_once(
@@ -1322,6 +1312,7 @@ def current_position(client: BinanceUSDMTestnetClient, symbol: str) -> dict[str,
     poller = _snapshot_poller
     if poller is not None and poller.snapshot_ready():
         return poller.position(symbol) or {"amount": Decimal("0"), "entry": None}
+    _raise_if_banned()
     return client.position_info(symbol)
 
 
@@ -1332,6 +1323,7 @@ def current_mark_price(client: BinanceUSDMTestnetClient, symbol: str) -> Decimal
         mark = poller.mark_price(symbol)
         if mark is not None:
             return mark
+    _raise_if_banned()
     return client.mark_price(symbol)
 
 
@@ -1410,7 +1402,7 @@ def _breakeven_guard_loop(
         except BinanceAPIError as exc:
             if _is_rate_limit_reason(str(exc)):
                 # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
-                time.sleep(_rate_limit_cooldown_seconds(poll_seconds))
+                _guard_rate_limit_wait(poll_seconds)
                 continue
             consecutive_errors += 1
             logger.warning(
@@ -1557,7 +1549,7 @@ def _tp_runner_loop(
         except BinanceAPIError as exc:
             if _is_rate_limit_reason(str(exc)):
                 # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
-                time.sleep(_rate_limit_cooldown_seconds(poll_seconds))
+                _guard_rate_limit_wait(poll_seconds)
                 continue
             consecutive_errors += 1
             logger.warning(
@@ -1804,7 +1796,7 @@ def _timestop_loop(
             except BinanceAPIError as exc:
                 if _is_rate_limit_reason(str(exc)):
                     # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
-                    time.sleep(_rate_limit_cooldown_seconds(poll_seconds))
+                    _guard_rate_limit_wait(poll_seconds)
                     continue
                 errors += 1
                 logger.warning(

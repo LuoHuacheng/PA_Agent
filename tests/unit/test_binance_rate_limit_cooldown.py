@@ -50,11 +50,12 @@ class BannedClient:
 
 
 def test_breakeven_guard_does_not_give_up_while_banned(monkeypatch) -> None:
-    """限流错误不算弃守计数：持续撞 418 超过旧阈值(5)也不退出。"""
+    """限流错误不算弃守计数：ban 期间不直连，sleep 穿 ban 也不退出。"""
     client = BannedClient()
     sleeps: list[float] = []
     monkeypatch.setattr(bn.time, "sleep", sleeps.append)
     monkeypatch.setattr(bn, "rate_limiter", _Remaining(3600.0))
+    monkeypatch.setattr(bn.random, "uniform", lambda lo, hi: 0.0)
     records = [{"stop_algo_id": "pa-sl-old0001", "stop0": "90", "target": "120",
                 "side": "BUY", "conf": 60, "ts": time.time(), "moved": False}] * 8 + [None]
 
@@ -64,7 +65,7 @@ def test_breakeven_guard_does_not_give_up_while_banned(monkeypatch) -> None:
     monkeypatch.setattr(bn, "_read_guard", _read_guard)
     bn._breakeven_guard_loop(client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0)
 
-    assert client.polls == 8, "must keep polling through the ban instead of giving up"
+    assert client.polls == 0, "ban 期间不得直连 position_info"
     assert len(sleeps) == 8
     assert sleeps == [300.0] * 8, "must sleep the capped cooldown, not 1s poll spam"
 
@@ -91,6 +92,12 @@ class _Remaining:
 
     def remaining_seconds(self) -> float | None:
         return self._remaining
+
+    def is_banned(self) -> bool:
+        return self._remaining is not None
+
+    def banned_until_ms(self) -> int:
+        return 9999999999999
 
 
 def test_request_layer_records_ban_on_http_418(_isolate) -> None:

@@ -211,18 +211,7 @@ def _retry_settings() -> Settings:
     return settings
 
 
-def test_rate_limit_failure_retries_with_backoff_then_submits(monkeypatch) -> None:
-    sleeps: list[float] = []
-    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
-    client = RateLimitClient(failures=2)
-    result = execute_market_signal(
-        _long_decision(), _retry_settings(), analysis_symbol="BTCUSDT", client=client
-    )
-    assert result.status == "submitted", result.reason
-    assert sleeps == [5.0, 10.0]
-
-
-def test_rate_limit_exhaustion_reports_failed_with_retry_note(monkeypatch) -> None:
+def test_rate_limit_failure_is_one_shot_not_retried(monkeypatch) -> None:
     sleeps: list[float] = []
     monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
     client = RateLimitClient(failures=99)
@@ -230,8 +219,8 @@ def test_rate_limit_exhaustion_reports_failed_with_retry_note(monkeypatch) -> No
         _long_decision(), _retry_settings(), analysis_symbol="BTCUSDT", client=client
     )
     assert result.status == "failed"
-    assert "retries exhausted" in result.reason
-    assert sleeps == [5.0, 10.0]
+    assert "418" in result.reason
+    assert sleeps == [], "rate-limit 失败不得重试/退避"
 
 
 def test_non_rate_limit_failure_is_one_shot(monkeypatch) -> None:
