@@ -152,20 +152,52 @@ def main():
         print("  %s: n=%d 平=%d 持=%d 胜率=%s 已平净=%+.2f 合计=%+.2f"
               % (d, g["n"], g["closed"], g["open"], wr, g["realized"], g["total"]))
     print("按币种：")
-    for sym in symbols:
-        g = stat(by_sym.get(sym, []), unreal_map)
-        wr = ("%.0f%%" % g["winrate"]) if g["winrate"] is not None else "-"
-        print("  %-9s n=%3d 平=%3d 持=%d 胜率=%s 已平净=%+.2f 合计=%+.2f"
-              % (sym, g["n"], g["closed"], g["open"], wr, g["realized"], g["total"]))
+    print("")
+    print("置信度分桶 (窗口内已平):")
+    by_conf: dict = {}
+    for t in in_win:
+        if not t.get("closed_at"):
+            continue
+        c = t.get("conf")
+        if c is None:
+            continue
+        lo = int(c) // 5 * 5
+        by_conf.setdefault(lo, []).append(t)
+    for lo in sorted(by_conf):
+        g = stat(by_conf[lo], unreal_map)
+        wr = ("%.1f%%" % g["winrate"]) if g["winrate"] is not None else "-"
+        avg = ("%+.2f" % g["avg"]) if g["avg"] is not None else "-"
+        print("  conf %2d-%2d: n=%2d 胜率=%s 已平净=%+.2f 均/笔=%s"
+              % (lo, lo + 4, len(by_conf[lo]), wr, g["realized"], avg))
+    print("持仓时长分桶(min, 窗口内已平):")
+    by_dur: dict = {}
+    for t in in_win:
+        if not t.get("closed_at"):
+            continue
+        mins = (t["closed_at"] - t["opened_at"]) / 60000.0
+        if mins < 30:
+            bucket = 30
+        elif mins < 60:
+            bucket = 60
+        elif mins < 180:
+            bucket = 180
+        elif mins < 360:
+            bucket = 360
+        elif mins < 720:
+            bucket = 720
+        elif mins < 1440:
+            bucket = 1440
+        else:
+            bucket = 10080
+        by_dur.setdefault(bucket, []).append(t)
+    for b in sorted(by_dur):
+        g = stat(by_dur[b], unreal_map)
+        wr = ("%.1f%%" % g["winrate"]) if g["winrate"] is not None else "-"
+        avg = ("%+.2f" % g["avg"]) if g["avg"] is not None else "-"
+        print("  <%4dm:  n=%2d 胜率=%s 已平净=%+.2f 均/笔=%s"
+              % (b, len(by_dur[b]), wr, g["realized"], avg))
     print("")
     print("income 对账 (REALIZED_PNL/COMMISSION 窗口内)：")
-    inc_sym = defaultdict(float)
-    for r in income:
-        if r["symbol"] in symbols and start_ms <= int(r["time"]) < end_ms and r["incomeType"] in ("REALIZED_PNL", "COMMISSION"):
-            inc_sym[r["symbol"]] += float(r["income"])
-    trade_r = defaultdict(float)
-    trade_f = defaultdict(float)
-    for t in in_win:
         trade_r[t["sym"]] += t["realized"]
         trade_f[t["sym"]] += t["fees"]
     for sym in symbols:
