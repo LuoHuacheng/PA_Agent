@@ -1957,6 +1957,74 @@ def test_time_stop_setting_bounds() -> None:
             BinanceUSDMTestnetSettings(time_stop_minutes=bad)
 
 
+def test_conf_feedback_setting_defaults_and_bounds() -> None:
+    """P2-3: 反馈闸门默认 off, 样本下限 5..200, 越界拒绝."""
+    from pydantic import ValidationError
+
+    assert BinanceUSDMTestnetSettings().conf_feedback_mode == "off"
+    assert BinanceUSDMTestnetSettings().conf_feedback_min_samples == 30
+    s = BinanceUSDMTestnetSettings(conf_feedback_mode="on", conf_feedback_min_samples=10)
+    assert s.conf_feedback_mode == "on"
+    assert s.conf_feedback_min_samples == 10
+    for bad in (3, 201):
+        with pytest.raises(ValidationError):
+            BinanceUSDMTestnetSettings(conf_feedback_min_samples=bad)
+    with pytest.raises(ValidationError):
+        BinanceUSDMTestnetSettings(conf_feedback_mode="auto")
+
+
+def test_measured_win_rate_override_helper(tmp_path, monkeypatch) -> None:
+    """P2-3: 仅 on+同桶样本达标才返回实测胜率, 其余 fail-open 返回 None."""
+    import json as _json
+
+    buckets = tmp_path / "conf_buckets.json"
+    buckets.write_text(_json.dumps({"50": {"n": 30, "wins": 9}}), encoding="utf-8")
+    monkeypatch.setattr(binance_usdm_testnet, "_CONF_BUCKETS_PATH", str(buckets))
+    cfg = BinanceUSDMTestnetSettings(conf_feedback_mode="on")
+    m = binance_usdm_testnet._measured_win_rate_override
+    assert m(52.0, cfg) == 0.3
+    assert m(49.0, cfg) is None  # 桶 45-49 无样本
+    assert m(None, cfg) is None
+    cfg2 = BinanceUSDMTestnetSettings(conf_feedback_mode="off")
+    assert m(52.0, cfg2) is None
+    cfg3 = BinanceUSDMTestnetSettings(conf_feedback_mode="on", conf_feedback_min_samples=50)
+    assert m(52.0, cfg3) is None  # 样本 30 < 50
+    (tmp_path / "gone.json").write_text("{broken", encoding="utf-8")
+    monkeypatch.setattr(binance_usdm_testnet, "_CONF_BUCKETS_PATH", str(tmp_path / "gone.json"))
+    assert m(52.0, cfg) is None
+
+
+def test_executor_trader_equation_uses_measured_win_rate_when_on(
+    tmp_path, monkeypatch
+) -> None:
+    """P2-3: on+达标时方程用桶实测胜率(0.3 拒单), off 时用模型 0.7 放行."""
+    import json as _json
+
+    buckets = tmp_path / "conf_buckets.json"
+    buckets.write_text(_json.dumps({"50": {"n": 30, "wins": 9}}), encoding="utf-8")
+    monkeypatch.setattr(binance_usdm_testnet, "_CONF_BUCKETS_PATH", str(buckets))
+
+    def decision() -> dict:
+        return _long_decision() | {
+            "entry_price": 100,
+            "stop_loss_price": 99,
+            "take_profit_price": 100.5,
+            "trade_confidence": 52,
+        }
+
+    on = _settings()
+    on.binance_usdm_testnet.conf_feedback_mode = "on"
+    on.binance_usdm_testnet.conf_feedback_min_samples = 30
+    client = FakeClient()
+    result = execute_market_signal(decision(), on, analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "rejected", result.reason
+    assert "Trader" in result.reason
+    off = _settings()
+    client2 = FakeClient()
+    result2 = execute_market_signal(decision(), off, analysis_symbol="BTCUSDT", client=client2)
+    assert result2.status == "submitted", result2.reason
+
+
 def test_timestop_deadline_hit_math() -> None:
     """P2-2: 到期判定: 无记录/无 ts/未到期 False, 到期 True."""
     hit = binance_usdm_testnet._timestop_deadline_hit

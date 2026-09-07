@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 _TESTNET_BASE_URL = "https://testnet.binancefuture.com"
 _TIMEOUT_SECONDS = 12
 _RUNTIME_STATE_PATH = "trade_records/binance_usdm_testnet_state.json"
+# P2-3: conf 5分位桶实测胜率 (tools/trade_pnl_report.py --conf-buckets-out 生成)
+_CONF_BUCKETS_PATH = "trade_records/conf_buckets.json"
 _STATE_LOCK = threading.Lock()
 # Per-symbol transition locks: serialise breakeven-stop moves and TP2 swaps
 # that run on separate daemon threads for the same symbol (guard vs runner).
@@ -534,8 +536,11 @@ def _execute_market_signal_once(
     target = _positive_decimal(decision.get("take_profit_price"))
     if stop is None or target is None:
         return ExecutionResult("rejected", "Stop loss and take profit are required")
+    signal_conf = _parse_win_rate(decision.get("trade_confidence"))
     if config.require_trader_equation:
-        win_rate = _parse_win_rate(decision.get("estimated_win_rate"))
+        win_rate = _measured_win_rate_override(signal_conf, config)
+        if win_rate is None:
+            win_rate = _parse_win_rate(decision.get("estimated_win_rate"))
         if win_rate is None:
             return ExecutionResult(
                 "rejected", "estimated_win_rate missing; cannot verify trader's equation"
@@ -593,7 +598,6 @@ def _execute_market_signal_once(
         # 30d daily-trend guard (whitelisted symbols only): a signal against the
         # daily-close trend of the symbol over the last trend_30d_days needs higher
         # confidence and, when allowed, runs at reduced leverage/size.
-        signal_conf = _parse_win_rate(decision.get("trade_confidence"))
         leverage = config.leverage
         trend_note = ""
         guard_active = (
@@ -2464,6 +2468,39 @@ def _parse_win_rate(value: object) -> float | None:
     if 0.0 <= number <= 1.0:
         return number * 100.0
     return number
+
+
+def _measured_win_rate_override(
+    conf: float | None, config: BinanceUSDMTestnetSettings
+) -> float | None:
+    """Measured win rate for conf's 5-point bucket when the feedback gate is on.
+
+    Data comes from trade_records/conf_buckets.json (offline fapi rebuild and
+    CSV join, written by tools/trade_pnl_report.py). Returns None when feedback
+    is off, conf is unknown, the file is absent/broken, or the bucket sample is
+    below conf_feedback_min_samples: the caller keeps the model estimate then
+    (fail-open, zero behaviour change).
+    """
+    if str(config.conf_feedback_mode) != "on" or conf is None:
+        return None
+    try:
+        with open(_CONF_BUCKETS_PATH, encoding="utf-8") as handle:
+            buckets = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(buckets, dict):
+        return None
+    entry = buckets.get(str(int(conf) // 5 * 5))
+    if not isinstance(entry, dict):
+        return None
+    try:
+        total = int(entry.get("n") or 0)
+        wins = int(entry.get("wins") or 0)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0 or total < max(5, int(config.conf_feedback_min_samples or 0)):
+        return None
+    return wins / total
 
 
 def _positive_decimal(value: object) -> Decimal | None:

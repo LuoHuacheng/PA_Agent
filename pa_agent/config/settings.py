@@ -249,6 +249,12 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # P2-2 持仓超时(分钟): 0=关闭; >0 时持仓超过该时长(自保护单挂上起算)后,
     # time-stop 线程市价清掉剩余仓位(TP2 阶段剩余半仓同样适用). 上限 7 天.
     time_stop_minutes: int = Field(default=0, ge=0, le=10080)
+    # P2-3 conf->胜率回流运行时闸门: off=只用模型 estimated_win_rate(默认;
+    # 回归显示样本不足, 不宜自动生效); on=当同 conf 5 分位桶实测样本 >=
+    # conf_feedback_min_samples 时, executor 用桶实测胜率覆盖模型值参与
+    # 交易者方程. 桶数据由 tools/trade_pnl_report.py --conf-buckets-out 生成.
+    conf_feedback_mode: Literal["off", "on"] = "off"
+    conf_feedback_min_samples: int = Field(default=30, ge=5, le=200)
 
     @field_validator("breakeven_stop_trigger")
     @classmethod

@@ -95,6 +95,8 @@ def main():
     ap.add_argument("--conf-cut", type=int, default=55, help="confidence split point (default 55)")
     ap.add_argument("--detail", action="store_true", help="print per-trade rows")
     ap.add_argument("--out", default="", help="optional json output path")
+    ap.add_argument("--conf-buckets-out", default="",
+                    help="write conf 5-pt bucket win/loss counts for the closed trades")
     args = ap.parse_args()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -152,6 +154,11 @@ def main():
         print("  %s: n=%d 平=%d 持=%d 胜率=%s 已平净=%+.2f 合计=%+.2f"
               % (d, g["n"], g["closed"], g["open"], wr, g["realized"], g["total"]))
     print("按币种：")
+    for sym in symbols:
+        g = stat(by_sym.get(sym, []), unreal_map)
+        wr = ("%.0f%%" % g["winrate"]) if g["winrate"] is not None else "-"
+        print("  %-9s n=%3d 平=%3d 持=%d 胜率=%s 已平净=%+.2f 合计=%+.2f"
+              % (sym, g["n"], g["closed"], g["open"], wr, g["realized"], g["total"]))
     print("")
     print("置信度分桶 (窗口内已平):")
     by_conf: dict = {}
@@ -165,10 +172,9 @@ def main():
         by_conf.setdefault(lo, []).append(t)
     for lo in sorted(by_conf):
         g = stat(by_conf[lo], unreal_map)
-        wr = ("%.1f%%" % g["winrate"]) if g["winrate"] is not None else "-"
-        avg = ("%+.2f" % g["avg"]) if g["avg"] is not None else "-"
-        print("  conf %2d-%2d: n=%2d 胜率=%s 已平净=%+.2f 均/笔=%s"
-              % (lo, lo + 4, len(by_conf[lo]), wr, g["realized"], avg))
+        wr = f"{g['winrate']:.1f}%" if g["winrate"] is not None else "-"
+        avg = f"{g['avg']:+.2f}" if g["avg"] is not None else "-"
+        print(f"  conf {lo:2d}-{lo + 4:2d}: n={len(by_conf[lo]):2d} 胜率={wr} 已平净={g['realized']:+.2f} 均/笔={avg}")
     print("持仓时长分桶(min, 窗口内已平):")
     by_dur: dict = {}
     for t in in_win:
@@ -192,12 +198,18 @@ def main():
         by_dur.setdefault(bucket, []).append(t)
     for b in sorted(by_dur):
         g = stat(by_dur[b], unreal_map)
-        wr = ("%.1f%%" % g["winrate"]) if g["winrate"] is not None else "-"
-        avg = ("%+.2f" % g["avg"]) if g["avg"] is not None else "-"
-        print("  <%4dm:  n=%2d 胜率=%s 已平净=%+.2f 均/笔=%s"
-              % (b, len(by_dur[b]), wr, g["realized"], avg))
+        wr = f"{g['winrate']:.1f}%" if g["winrate"] is not None else "-"
+        avg = f"{g['avg']:+.2f}" if g["avg"] is not None else "-"
+        print(f"  <{b:4d}m:  n={len(by_dur[b]):2d} 胜率={wr} 已平净={g['realized']:+.2f} 均/笔={avg}")
     print("")
     print("income 对账 (REALIZED_PNL/COMMISSION 窗口内)：")
+    inc_sym = defaultdict(float)
+    for r in income:
+        if r["symbol"] in symbols and start_ms <= int(r["time"]) < end_ms and r["incomeType"] in ("REALIZED_PNL", "COMMISSION"):
+            inc_sym[r["symbol"]] += float(r["income"])
+    trade_r = defaultdict(float)
+    trade_f = defaultdict(float)
+    for t in in_win:
         trade_r[t["sym"]] += t["realized"]
         trade_f[t["sym"]] += t["fees"]
     for sym in symbols:
@@ -233,8 +245,25 @@ def main():
                    "groups": {label: stat(ts, unreal_map) for label, ts in groups},
                    "by_day": {d: stat(by_day[d], unreal_map) for d in sorted(by_day)},
                    "by_symbol": {s: stat(by_sym.get(s, []), unreal_map) for s in symbols}}
-        open(args.out, "w", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False, indent=1))
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, indent=1))
         print("summary written:", args.out)
+    if args.conf_buckets_out:
+        buckets: dict = {}
+        for t in in_win:
+            if not t.get("closed_at"):
+                continue
+            c = t.get("conf")
+            if c is None:
+                continue
+            lo = int(c) // 5 * 5
+            entry = buckets.setdefault(str(lo), {"n": 0, "wins": 0})
+            entry["n"] += 1
+            if net(t) > 0:
+                entry["wins"] += 1
+        with open(args.conf_buckets_out, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(buckets, ensure_ascii=False, indent=1))
+        print("conf buckets written:", args.conf_buckets_out)
 
 
 if __name__ == "__main__":
