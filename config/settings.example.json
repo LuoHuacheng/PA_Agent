@@ -150,6 +150,7 @@
     "breakeven_min_confidence": 55,
     "breakeven_poll_seconds": 10,
     "tp_partial_close_pct": 0,
+    "time_stop_minutes": 360,
     "structure_exit_mode": "on",
     "structure_exit_confirm_bars": 2,
     "direction_gates_mode": "dry_run"
