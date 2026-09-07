@@ -89,7 +89,11 @@ def evaluate_structure_failure_exit(
     confirm_bars = max(1, int(getattr(cfg, "structure_exit_confirm_bars", 2) or 2))
 
     try:
-        pos = client.position_info(symbol)
+        # 优先读进程内账户快照(批量拉取, 避免逐品种 REST 轮询触发共享 IP
+        # 限流); 快照未就绪/过期时回退直接查询。
+        from pa_agent.trading.binance_usdm_testnet import current_position
+
+        pos = current_position(client, symbol)
     except Exception as exc:
         logger.warning("structure-exit position check failed for %s: %s", symbol, exc)
         return out

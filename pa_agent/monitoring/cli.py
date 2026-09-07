@@ -321,6 +321,21 @@ def run_monitor() -> int:
 
     previous_sigint = signal.signal(signal.SIGINT, request_stop)
     previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
+    try:
+        from pa_agent.trading.binance_usdm_testnet import start_account_snapshot_poller
+
+        # 账户快照轮询器先行: 守护线程/结构退出检查都从批量快照读取,
+        # 每周期 2 个批量请求取代 N 个品种的逐符号轮询(共享 IP 限流缓解)。
+        if settings.binance_usdm_testnet.enabled and (
+            settings.binance_usdm_testnet.api_key or ""
+        ).strip():
+            start_account_snapshot_poller(
+                api_key=settings.binance_usdm_testnet.api_key,
+                api_secret=settings.binance_usdm_testnet.api_secret,
+                poll_seconds=float(settings.binance_usdm_testnet.breakeven_poll_seconds),
+            )
+    except Exception:
+        logger.exception("启动账户快照轮询器失败")
     # A previous run may have died while a limit entry rested on the exchange:
     # re-arm its fill watcher so a later fill still gets SL/TP attached.
     try:

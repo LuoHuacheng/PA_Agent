@@ -237,6 +237,27 @@ class BinanceUSDMTestnetClient:
         except (KeyError, ValueError) as exc:
             raise BinanceAPIError("Binance returned no mark price") from exc
 
+    def all_mark_prices(self) -> dict[str, Decimal]:
+        """Latest mark price for every listed symbol in one batched request.
+
+        Replaces N per-symbol premiumIndex polls; the shared account-snapshot
+        poller is the only regular reader of this endpoint.
+        """
+        result = self._request("GET", "/fapi/v1/premiumIndex")
+        prices: dict[str, Decimal] = {}
+        if isinstance(result, list):
+            for row in result:
+                symbol = str(row.get("symbol") or "")
+                if not symbol:
+                    continue
+                try:
+                    prices[symbol] = Decimal(str(row["markPrice"]))
+                except Exception:  # malformed row: skip, keep the rest
+                    continue
+        if not prices:
+            raise BinanceAPIError("Binance returned no mark prices")
+        return prices
+
     def daily_close_series(self, symbol: str, days: int) -> list[float]:
         """Daily close prices (oldest first) covering the last ``days`` days."""
         start_ms = self._now_ms() - (days + 2) * 86_400_000
@@ -374,6 +395,36 @@ class BinanceUSDMTestnetClient:
         except Exception:
             entry = None
         return {"amount": amount, "entry": entry}
+
+    def all_positions(self) -> dict[str, dict[str, Any]]:
+        """Open amount/entry for every symbol in one batched request.
+
+        Only symbols reported by the exchange are listed (missing symbol ==
+        flat). One signed GET replaces N per-symbol positionRisk polls; the
+        shared account-snapshot poller is the only regular reader.
+        """
+        rows = self._request("GET", "/fapi/v2/positionRisk", signed=True)
+        positions: dict[str, dict[str, Any]] = {}
+        if isinstance(rows, list):
+            for row in rows:
+                symbol = str(row.get("symbol") or "")
+                if not symbol:
+                    continue
+                try:
+                    amount = Decimal(str(row.get("positionAmt") or 0))
+                except Exception:
+                    continue
+                entry: Decimal | None = None
+                try:
+                    raw_entry = row.get("entryPrice")
+                    if raw_entry not in (None, "", "0"):
+                        entry = Decimal(str(raw_entry))
+                except Exception:
+                    entry = None
+                positions[symbol] = {"amount": amount, "entry": entry}
+        if not positions:
+            raise BinanceAPIError("Binance returned no positions")
+        return positions
 
     def income_history(
         self, *, start_ms: int, end_ms: int | None = None, limit: int = 1000
@@ -1118,6 +1169,172 @@ def _guard_trigger_reached(
     return False
 
 
+# ---------------------------------------------------------------------------
+# 账户快照轮询器 (account snapshot poller)
+# ---------------------------------------------------------------------------
+# Breakeven/TP/time-stop guards and structure-exit checks used to poll
+# Binance per symbol every few seconds (N symbols x 2 requests / cycle), which
+# is the largest request source behind shared-IP rate-limit bans. One
+# background poller now keeps a process-wide snapshot via two batched
+# requests per cycle; readers consult the snapshot first and only fall back
+# to direct REST when no fresh snapshot exists (cold start / poll failure).
+
+_SNAPSHOT_DEFAULT_POLL_SECONDS = 10.0
+_SNAPSHOT_STALE_AFTER_SECONDS = 30.0
+
+
+class AccountSnapshotPoller:
+    """Background reader keeping a process-wide account snapshot fresh.
+
+    Each cycle issues two batched reads (all positions + all mark prices)
+    instead of N per-symbol polls. Readers get best-effort values; on failure
+    the previous snapshot is kept but ages, and readers fall back to direct
+    REST once it goes stale.
+    """
+
+    def __init__(
+        self,
+        client: BinanceUSDMTestnetClient,
+        *,
+        poll_seconds: float = _SNAPSHOT_DEFAULT_POLL_SECONDS,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self._client = client
+        self._poll_seconds = float(poll_seconds)
+        self._clock = clock
+        self._positions: dict[str, dict[str, Any]] = {}
+        self._marks: dict[str, Decimal] = {}
+        self._last_ok: float = 0.0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """Start the background refresh loop (idempotent)."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="account-snapshot", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+        self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._poll_seconds):
+            if rate_limiter.is_banned():
+                # 共享 IP 封禁期间完全不请求（熔断器到期后下一周期自然恢复），
+                # 避免给封禁续命；熔断状态由请求层在错误抛出处统一记录。
+                continue
+            self.refresh()
+
+    def refresh(self) -> None:
+        """Pull one fresh snapshot; failures keep the previous data."""
+        marks_ok = positions_ok = False
+        marks: dict[str, Decimal] = {}
+        positions: dict[str, dict[str, Any]] = {}
+        try:
+            marks = self._client.all_mark_prices()
+            marks_ok = True
+        except Exception as exc:  # rate-limit bans were already recorded upstream
+            logger.warning("Account snapshot mark pull failed: %s", exc)
+        try:
+            positions = self._client.all_positions()
+            positions_ok = True
+        except Exception as exc:  # rate-limit bans were already recorded upstream
+            logger.warning("Account snapshot position pull failed: %s", exc)
+        if marks_ok and positions_ok:
+            with self._lock:
+                self._marks = marks
+                self._positions = positions
+                self._last_ok = self._clock()
+
+    def snapshot_ready(self, now: float | None = None) -> bool:
+        """True when a recent successful snapshot exists (age <= stale limit)."""
+        if self._last_ok <= 0:
+            return False
+        now = self._clock() if now is None else now
+        return (now - self._last_ok) <= _SNAPSHOT_STALE_AFTER_SECONDS
+
+    def position(self, symbol: str) -> dict[str, Any] | None:
+        """Snapshot row for symbol (amount/entry); None == flat or unknown."""
+        with self._lock:
+            row = self._positions.get(symbol)
+            return dict(row) if row is not None else None
+
+    def mark_price(self, symbol: str) -> Decimal | None:
+        with self._lock:
+            return self._marks.get(symbol)
+
+
+# Process-wide singleton: one poller per monitor process, shared by the guard
+# threads and the structure-exit checks (module-level state keeps the wiring
+# explicit, same as the rate-limit breaker).
+_snapshot_poller: AccountSnapshotPoller | None = None
+_snapshot_poller_started: bool = False
+_snapshot_lock = threading.Lock()
+
+
+def start_account_snapshot_poller(
+    *,
+    api_key: str,
+    api_secret: str,
+    poll_seconds: float = _SNAPSHOT_DEFAULT_POLL_SECONDS,
+) -> bool:
+    """Start the shared poller; returns True only when it newly started."""
+    global _snapshot_poller, _snapshot_poller_started
+    with _snapshot_lock:
+        if _snapshot_poller_started and _snapshot_poller is not None:
+            return False
+        try:
+            client = BinanceUSDMTestnetClient(api_key, api_secret)
+        except ValueError as exc:
+            logger.error("Cannot start account snapshot poller: %s", exc)
+            return False
+        poller = AccountSnapshotPoller(client, poll_seconds=poll_seconds)
+        poller.start()
+        _snapshot_poller = poller
+        _snapshot_poller_started = True
+        return True
+
+
+def stop_account_snapshot_poller() -> None:
+    """Stop and drop the shared poller (idempotent)."""
+    global _snapshot_poller, _snapshot_poller_started
+    with _snapshot_lock:
+        poller, _snapshot_poller = _snapshot_poller, None
+        _snapshot_poller_started = False
+    if poller is not None:
+        poller.stop()
+
+
+def account_snapshot_poller() -> AccountSnapshotPoller | None:
+    return _snapshot_poller
+
+
+def current_position(client: BinanceUSDMTestnetClient, symbol: str) -> dict[str, Any]:
+    """Best available position row: fresh snapshot first, else direct REST."""
+    poller = _snapshot_poller
+    if poller is not None and poller.snapshot_ready():
+        return poller.position(symbol) or {"amount": Decimal("0"), "entry": None}
+    return client.position_info(symbol)
+
+
+def current_mark_price(client: BinanceUSDMTestnetClient, symbol: str) -> Decimal:
+    """Best available mark price: fresh snapshot first, else direct REST."""
+    poller = _snapshot_poller
+    if poller is not None and poller.snapshot_ready():
+        mark = poller.mark_price(symbol)
+        if mark is not None:
+            return mark
+    return client.mark_price(symbol)
+
+
 def _register_guard(symbol: str, record: dict[str, Any]) -> None:
     with _STATE_LOCK:
         state = _load_state()
@@ -1182,14 +1399,14 @@ def _breakeven_guard_loop(
         if side not in ("BUY", "SELL") or stop0 is None or target is None or not stop_algo_id:
             return
         try:
-            info = client.position_info(symbol)
+            info = current_position(client, symbol)
             amount = info["amount"]
             entry = info["entry"]
             if amount == 0 or entry is None:
                 return  # position closed (TP/SL/manual) - nothing to protect
             if (side == "BUY" and amount < 0) or (side == "SELL" and amount > 0):
                 return  # not our position anymore
-            mark = client.mark_price(symbol)
+            mark = current_mark_price(client, symbol)
         except BinanceAPIError as exc:
             if _is_rate_limit_reason(str(exc)):
                 # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
@@ -1334,7 +1551,7 @@ def _tp_runner_loop(
         ):
             return  # 旧 guard 记录(无 partial 字段)或残缺记录: 不归 runner 管
         try:
-            info = client.position_info(symbol)
+            info = current_position(client, symbol)
             amount = info["amount"]
             entry = info["entry"]
         except BinanceAPIError as exc:
@@ -1582,7 +1799,7 @@ def _timestop_loop(
             if not _timestop_deadline_hit(fresh, stop_minutes):
                 continue  # record replaced by a newer position: re-arm on its deadline
             try:
-                info = client.position_info(symbol)
+                info = current_position(client, symbol)
                 amount = info["amount"]
             except BinanceAPIError as exc:
                 if _is_rate_limit_reason(str(exc)):
