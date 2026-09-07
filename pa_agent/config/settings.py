@@ -211,7 +211,7 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # Stop loss minimum distance from the entry price (percent). Decisions whose
     # structural stop sits closer than this are rejected before any order is
     # placed, preventing "filled straight into the stop" losses (P0-2).
-    min_stop_distance_pct: float = Field(default=0.2, ge=0.0, le=10.0)
+    min_stop_distance_pct: float = Field(default=0.45, ge=0.0, le=10.0)
     # Rate-limit recovery: when Binance rejects a signal with HTTP 418/-1003/429
     # (shared Testnet IP bans), the whole signal is retried with exponential
     # backoff. execution_retry_max_attempts counts the initial attempt, so 1

@@ -1255,6 +1255,18 @@ def test_tp_partial_close_pct_setting_bounds() -> None:
             BinanceUSDMTestnetSettings(tp_partial_close_pct=bad)
 
 
+def test_min_stop_distance_default_bounds() -> None:
+    """P1-1: min_stop 默认 0.45% (原 0.2%), 越界拒绝。"""
+    from pydantic import ValidationError
+
+    assert BinanceUSDMTestnetSettings().min_stop_distance_pct == 0.45
+    assert BinanceUSDMTestnetSettings(min_stop_distance_pct=0.0).min_stop_distance_pct == 0.0
+    assert BinanceUSDMTestnetSettings(min_stop_distance_pct=1.0).min_stop_distance_pct == 1.0
+    for bad in (-0.1, 10.1):
+        with pytest.raises(ValidationError):
+            BinanceUSDMTestnetSettings(min_stop_distance_pct=bad)
+
+
 def test_breakeven_trigger_setting_accepts_fractional_r() -> None:
     from pydantic import ValidationError
 
