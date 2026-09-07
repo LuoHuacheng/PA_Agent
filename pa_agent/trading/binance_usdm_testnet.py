@@ -24,6 +24,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
+from pa_agent.trading.rate_limit import parse_banned_until_ms, rate_limiter
 from pa_agent.util.trade_metrics import compute_risk_reward, passes_trader_equation
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,34 @@ _RATE_LIMIT_MARKERS = ("http 418", "-1003", "http 429", "too many requests")
 def _is_rate_limit_reason(reason: str) -> bool:
     low = (reason or "").lower()
     return any(marker in low for marker in _RATE_LIMIT_MARKERS)
+
+
+def _observe_rate_limit_error(message: str) -> None:
+    """Record a ban window into the shared breaker when *message* is a ban.
+
+    Called right before a rate-limited request raises, so the monitor's
+    scheduler can pause analysis and the guard loops can sleep through the
+    ban instead of hammering the API.
+    """
+    if not _is_rate_limit_reason(message):
+        return
+    rate_limiter.record_ban(until_ms=parse_banned_until_ms(message))
+
+
+#: Upper bound for guard-loop cooldown sleeps while a ban is live; keeps a
+#: guard responsive shortly after the ban ends without spamming the API.
+_RATE_LIMIT_COOLDOWN_CAP_SECONDS = 300.0
+
+
+def _rate_limit_cooldown_seconds(poll_seconds: float) -> float:
+    """Sleep budget after a rate-limit failure: ride out the ban (capped)."""
+    remaining = rate_limiter.remaining_seconds()
+    if remaining is None:
+        return float(poll_seconds)
+    return min(
+        max(float(remaining) + 5.0, float(poll_seconds)),
+        _RATE_LIMIT_COOLDOWN_CAP_SECONDS,
+    )
 
 
 class BinanceAPIError(RuntimeError):
@@ -170,6 +199,7 @@ class BinanceUSDMTestnetClient:
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
+            _observe_rate_limit_error(f"Binance HTTP {exc.code}: {body}")
             raise BinanceAPIError(f"Binance HTTP {exc.code}: {body}") from exc
         except URLError as exc:
             raise BinanceAPIError(f"Binance network error: {exc.reason}") from exc
@@ -189,6 +219,7 @@ class BinanceUSDMTestnetClient:
             except (TypeError, ValueError):
                 code = -1
             if code not in (0, 200):
+                _observe_rate_limit_error(f"Binance error {code}: {result.get('msg', '')}")
                 raise BinanceAPIError(f"Binance error {code}: {result.get('msg', '')}")
         return result
 
@@ -1160,6 +1191,10 @@ def _breakeven_guard_loop(
                 return  # not our position anymore
             mark = client.mark_price(symbol)
         except BinanceAPIError as exc:
+            if _is_rate_limit_reason(str(exc)):
+                # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
+                time.sleep(_rate_limit_cooldown_seconds(poll_seconds))
+                continue
             consecutive_errors += 1
             logger.warning(
                 "Breakeven guard poll failed for %s (attempt %d): %s",
@@ -1303,6 +1338,10 @@ def _tp_runner_loop(
             amount = info["amount"]
             entry = info["entry"]
         except BinanceAPIError as exc:
+            if _is_rate_limit_reason(str(exc)):
+                # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
+                time.sleep(_rate_limit_cooldown_seconds(poll_seconds))
+                continue
             consecutive_errors += 1
             logger.warning(
                 "TP runner poll failed for %s (attempt %d): %s",
@@ -1546,6 +1585,10 @@ def _timestop_loop(
                 info = client.position_info(symbol)
                 amount = info["amount"]
             except BinanceAPIError as exc:
+                if _is_rate_limit_reason(str(exc)):
+                    # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
+                    time.sleep(_rate_limit_cooldown_seconds(poll_seconds))
+                    continue
                 errors += 1
                 logger.warning(
                     "Time-stop poll failed for %s (attempt %d): %s",

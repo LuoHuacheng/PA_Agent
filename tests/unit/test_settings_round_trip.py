@@ -179,3 +179,21 @@ def test_migrate_legacy_feishu_json(tmp_path):
     assert loaded.feishu.app_id == "cli_legacy"
     data = json.loads(p.read_text(encoding="utf-8"))
     assert data["feishu"]["webhook_url"] == "https://example.com/legacy-hook"
+
+
+def test_rate_limit_pause_settings_round_trip(tmp_path):
+    """限流暂停开关与 fallback 窗口在 save/load 中保持。"""
+    p = tmp_path / "settings.json"
+    original = Settings()
+    assert original.binance_usdm_testnet.pause_monitoring_on_rate_limit is True
+    assert original.binance_usdm_testnet.rate_limit_no_until_seconds == 60
+    original.binance_usdm_testnet.pause_monitoring_on_rate_limit = False
+    original.binance_usdm_testnet.rate_limit_no_until_seconds = 300
+
+    save_settings(original, p)
+    loaded = load_settings(p)
+
+    assert loaded.binance_usdm_testnet.pause_monitoring_on_rate_limit is False
+    assert loaded.binance_usdm_testnet.rate_limit_no_until_seconds == 300
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["binance_usdm_testnet"]["pause_monitoring_on_rate_limit"] is False

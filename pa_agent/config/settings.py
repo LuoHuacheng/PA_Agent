@@ -223,6 +223,11 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # one-shot.
     execution_retry_max_attempts: int = Field(default=3, ge=1, le=5)
     execution_retry_backoff_seconds: int = Field(default=30, ge=5, le=300)
+    # 检测到 Testnet 共享 IP 限流(HTTP 418/-1003, banned until)时, 暂停监控的
+    # 行情分析与信号推送直到封禁到期(错过的不补发信号); False = 保持现状.
+    pause_monitoring_on_rate_limit: bool = True
+    # 限流响应无 banned-until 时间戳(如纯 429)时按此秒数估算封禁窗口.
+    rate_limit_no_until_seconds: int = Field(default=60, ge=5, le=3600)
     # --- 日线大趋势护栏 (逆势单保护) ---
     # 以币种日线 close 的 trend_30d_days 天涨跌幅定义大趋势; |涨跌| <=
     # trend_30d_neutral_pct 视为无趋势 (不做限制). 仅作用于白名单内的币种.

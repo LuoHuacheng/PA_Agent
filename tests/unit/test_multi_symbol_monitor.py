@@ -320,8 +320,8 @@ def test_monitor_reuses_previous_record_for_incremental_analysis(tmp_path: Path)
         ctx=object(),
         settings=settings,
         state_path=tmp_path / "state.json",
-        source_factory=lambda _kind: FakeSource(_bars(1_805)),
-        clock=lambda: 1_805_000.0,
+        source_factory=lambda _kind: FakeSource(_bars(1_800_900)),
+        clock=lambda: 1_801_800.0,
         analyze=lambda frame, **kw: calls.append((frame, kw)) or None,
     )
     state = next(iter(monitor._states.values()))
@@ -332,9 +332,40 @@ def test_monitor_reuses_previous_record_for_incremental_analysis(tmp_path: Path)
 
     assert len(calls) == 1
     kw = calls[0][1]
-    # 15m bar: prev close 1_800_900_000, now 1_805_000_000 → 5 new bars.
+    # 15m bar: prev close 1_800_900_000, now 1_801_800_000 → exactly 1 new bar.
     assert kw["previous_record"] == state.previous_record
-    assert kw["incremental_new_bar_count"] == 5
+    assert kw["incremental_new_bar_count"] == 1
+    assert "record_sink" in kw
+
+
+def test_monitor_drops_stale_record_after_multibar_gap(tmp_path: Path) -> None:
+    """After a multi-bar gap the stale record is dropped for a full pipeline.
+
+    Scenarios such as a rate-limit pause or a long outage span >= 2 closed
+    bars; incremental analysis on an outdated previous_record would produce
+    low-quality signals, so fall back to the full pipeline instead.
+    """
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
+    calls: list[tuple[object, dict]] = []
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_805)),
+        clock=lambda: 1_805_000.0,  # prev close + 5 根 15m bar
+        analyze=lambda frame, **kw: calls.append((frame, kw)) or None,
+    )
+    state = next(iter(monitor._states.values()))
+    state.previous_record = {"stage1_diagnosis": {"direction": "bullish"}}
+    state.last_processed_closed_ts = 1_800_000_000
+
+    monitor._poll_and_analyze(state)
+
+    assert len(calls) == 1
+    kw = calls[0][1]
+    assert "previous_record" not in kw
+    assert "incremental_new_bar_count" not in kw
+    assert state.previous_record is None, "stale record must be dropped"
     assert "record_sink" in kw
 
 

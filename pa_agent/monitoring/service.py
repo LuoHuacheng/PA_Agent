@@ -162,10 +162,17 @@ class MultiSymbolMonitor:
         analyze: Callable[..., dict | None] | None = None,
         on_result: Callable[[Any, dict | None], None] | None = None,
         on_status: Callable[[str], None] | None = None,
+        rate_limiter: Any = None,
     ) -> None:
         self._ctx = ctx
         self._settings = settings
         self._cfg = settings.monitoring
+        if rate_limiter is None:
+            from pa_agent.trading.rate_limit import rate_limiter as _module_limiter
+
+            rate_limiter = _module_limiter
+        self._rate_limiter = rate_limiter
+        self._rate_limit_pause_was = False
         self._state_path = state_path
         self._source_factory = source_factory
         self._discover = discover
@@ -345,9 +352,55 @@ class MultiSymbolMonitor:
         self._save_state()
         return not self._futures
 
+    def _update_rate_limit_pause(self, now: float) -> bool:
+        """Observe the Binance rate-limit breaker; announce transitions once.
+
+        Returns True while analysis/pushes must stay paused. Announcements
+        fire only on the pause/resume edges so a long ban does not spam.
+        """
+        cfg = self._settings.binance_usdm_testnet
+        limiter = self._rate_limiter
+        enabled = bool(getattr(cfg, "pause_monitoring_on_rate_limit", False))
+        if not enabled or limiter is None:
+            self._rate_limit_pause_was = False
+            return False
+        paused = bool(limiter.is_banned(now_ms=int(now * 1000)))
+        if paused == self._rate_limit_pause_was:
+            return paused
+        self._rate_limit_pause_was = paused
+        try:
+            if paused:
+                until_ms = int(limiter.banned_until_ms() or (now * 1000))
+                when = time.strftime("%H:%M:%S", time.localtime(until_ms / 1000.0))
+                self._report(
+                    f"Binance 限流中：暂停行情分析与信号推送，预计 {when} 自动恢复",
+                    level=logging.WARNING,
+                )
+                self._announce_rate_limit_change(
+                    "已暂停", f"检测到 Binance Testnet 限流(HTTP 418/-1003)，预计 {when} 自动恢复"
+                )
+            else:
+                self._report("Binance 限流解除：恢复行情监控（下一根 K 线收盘起）")
+                self._announce_rate_limit_change("已恢复", "Binance Testnet 限流解除，下一根 K 线收盘起生效")
+        except Exception:  # announcements are best-effort
+            logger.exception("Rate-limit transition announcement failed")
+        return paused
+
+    def _announce_rate_limit_change(self, verb: str, detail: str) -> None:
+        """Push one Telegram notice per pause/resume edge (best-effort)."""
+        from pa_agent.notify.telegram_notifier import send_telegram_message
+
+        text = (
+            f"ℹ️ PA Agent 监控{verb}：{detail}。"
+            "暂停期间不产生分析、不推送信号，已错过的 K 线收盘不追溯补发。"
+        )
+        send_telegram_message(text=text, settings=self._settings)
+
     def run_due_once(self, now: float | None = None) -> int:
         """Schedule due targets once. Public primarily for deterministic tests."""
         now = self._clock() if now is None else now
+        if self._update_rate_limit_pause(now):
+            return 0
         scheduled = 0
         for state in self._states.values():
             if state.running or now < state.next_poll_at or self._executor is None:
@@ -511,6 +564,11 @@ class MultiSymbolMonitor:
         bar_s = timeframe_seconds(state.target.timeframe)
         prev_close_ms = state.last_processed_closed_ts + int(bar_s * 1000)
         new_bars = max(1, round((int(now * 1000) - prev_close_ms) / (bar_s * 1000)))
+        if new_bars >= 2:
+            # 跨 >=2 根收盘 K 线（限流暂停/停机/断网恢复）：基于过期 previous_record
+            # 的增量上下文不可靠，丢弃并回退全量分析。
+            state.previous_record = None
+            return {}
         if new_bars < 1:
             return {}
         return {
