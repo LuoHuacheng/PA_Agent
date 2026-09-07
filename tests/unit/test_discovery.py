@@ -149,3 +149,18 @@ def test_rank_by_literal_accepts_market_cap() -> None:
 
     cfg = AutoDiscoverSettings(rank_by="market_cap", enabled=False)
     assert cfg.rank_by == "market_cap"
+
+
+def test_quote_volume_skips_non_crypto_commodities() -> None:
+    """贵金属等非加密合约(XAU/XAG)成交额再高也不进候选池。"""
+    tickers = [
+        *_TICKERS,
+        {"symbol": "XAUUSDT", "quoteVolume": "99999", "priceChangePercent": "1.0"},
+        {"symbol": "XAGUSDT", "quoteVolume": "88888", "priceChangePercent": "2.0"},
+    ]
+    _mock_urlopen(tickers)
+    symbols = fetch_usdm_top_n(rank_by="quote_volume", top_n=3, stablecoin_only=True)
+    assert "XAUUSDT" not in symbols
+    assert "XAGUSDT" not in symbols
+    # 递补的是真实加密合约
+    assert symbols == ["ETHUSDT", "BTCUSDT", "SOLUSDT"]

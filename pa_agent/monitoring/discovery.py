@@ -25,6 +25,10 @@ _STABLECOIN_SYMBOLS = {"usdt", "usdc", "dai", "fdusd", "tusd", "pyusd",
 _TIMEOUT_S = 10.0
 #: Settled in fiat or another stablecoin; excluded when stablecoin_only=True.
 _NON_USDT_SETTLEMENTS = ("USDC", "FDUSD", "TUSD", "USDP", "EUR", "GBP", "BUSD")
+#: Non-cryptocurrency USDⓈ-M contracts (precious metals / commodities) that
+#: still settle in USDT and would otherwise crowd out crypto leaders by 24h
+#: volume. Kept as an explicit denylist: these are rare and stable listings.
+_NON_CRYPTO_SYMBOLS = frozenset({"XAUUSDT", "XAGUSDT"})
 
 
 class DiscoveryError(RuntimeError):
@@ -79,6 +83,8 @@ def fetch_usdm_top_n(
     rows: list[tuple[str, float]] = []
     for t in tickers:
         symbol = str(t.get("symbol") or "")
+        if symbol in _NON_CRYPTO_SYMBOLS:
+            continue  # 贵金属等非加密合约不属于「加密货币 top N」
         if stablecoin_only and not _is_usdt_settled(symbol):
             continue
         if rank_by == "quote_volume":
