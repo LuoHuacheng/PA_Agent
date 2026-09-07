@@ -529,6 +529,76 @@ def test_margin_constant_across_leverage() -> None:
 
 
 
+def test_risk_per_trade_setting_bounds() -> None:
+    """P2-1: 单笔风险金 0=关闭默认, 0<x<=1000 有效, 越界拒绝."""
+    from pydantic import ValidationError
+
+    assert BinanceUSDMTestnetSettings().risk_per_trade_usdt == 0.0
+    assert BinanceUSDMTestnetSettings(risk_per_trade_usdt=2).risk_per_trade_usdt == 2.0
+    for bad in (-1, 1001):
+        with pytest.raises(ValidationError):
+            BinanceUSDMTestnetSettings(risk_per_trade_usdt=bad)
+
+
+def test_quantity_for_risk_math() -> None:
+    """P2-1: qty = risk/|anchor-stop| 按 LOT_SIZE 向下取整, 边界返回 None."""
+    q = binance_usdm_testnet._quantity_for_risk
+    info = {"filters": [
+        {"filterType": "LOT_SIZE", "minQty": "0.001", "stepSize": "0.001"},
+        {"filterType": "MIN_NOTIONAL", "notional": "5"},
+    ]}
+    assert q(2.0, Decimal("100"), Decimal("99"), info) == Decimal("2")
+    assert q(2.0, Decimal("100"), Decimal("97"), info) == Decimal("0.666")
+    assert q(2.0, Decimal("100"), Decimal("100"), info) is None  # gap=0
+    assert q(0.0005, Decimal("100"), Decimal("99"), info) is None  # below minQty
+    assert q(2.0, Decimal("100"), Decimal("99"), {"filters": []}) is None
+    assert q(2.0, Decimal("0"), Decimal("99"), info) is None  # anchor<=0
+    # 做空方向: stop 高于 anchor
+    assert q(2.0, Decimal("100"), Decimal("101"), info) == Decimal("2")
+
+
+def test_market_risk_equal_sizing() -> None:
+    """P2-1: 市价单按 risk/|mark-stop| 定仓 (mark=100, stop=99 -> qty=2)."""
+    settings = _settings()
+    settings.binance_usdm_testnet.max_notional_usdt = 1000
+    settings.binance_usdm_testnet.risk_per_trade_usdt = 2.0
+    client = FakeClient()
+    decision = _long_decision() | {"stop_loss_price": 99, "entry_price": 101}
+    result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "submitted", result.reason
+    entry = next(call[1] for call in client.calls if call[0] == "entry")
+    assert Decimal(str(entry["quantity"])) == Decimal("2")
+
+
+def test_market_risk_sizing_over_margin_cap_rejects() -> None:
+    """P2-1: risk 所需名义 > 保证金*杠杆 时拒单且不入场."""
+    settings = _settings()
+    settings.binance_usdm_testnet.max_notional_usdt = 100  # 杠杆1 -> 名义上限100
+    settings.binance_usdm_testnet.risk_per_trade_usdt = 30.0
+    client = FakeClient()
+    decision = _long_decision() | {"stop_loss_price": 99}
+    result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "rejected"
+    assert "margin cap" in result.reason
+    assert "entry" not in [call[0] for call in client.calls]
+
+
+def test_limit_risk_sizing_anchors_at_entry_price() -> None:
+    """P2-1: resting 限价单按 entry 止损距离定仓."""
+    settings = _settings()
+    settings.binance_usdm_testnet.max_notional_usdt = 1000
+    settings.binance_usdm_testnet.risk_per_trade_usdt = 2.0
+    client = FakeClient()
+    decision = _long_decision() | {
+        "order_type": "限价单", "entry_price": 95, "stop_loss_price": 94.5,
+    }
+    result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "pending", result.reason
+    entries = [call[1] for call in client.calls if call[0] == "limit_entry"]
+    assert len(entries) == 1
+    assert Decimal(str(entries[0]["quantity"])) == Decimal("4")
+
+
 def test_rejects_invalid_long_protection_prices_before_entry() -> None:
     client = FakeClient()
     decision = _long_decision() | {"stop_loss_price": 110}
@@ -899,10 +969,12 @@ def test_stop_too_close_to_market_price_rejects_entry() -> None:
 
 
 def test_stop_at_minimum_distance_proceeds_market_entry() -> None:
+    settings = _settings()
+    settings.binance_usdm_testnet.min_stop_distance_pct = 0.2
     client = FakeClient()
     # gap 0.3% >= 0.2% minimum → allowed
     decision = _long_decision() | {"stop_loss_price": 99.7}
-    result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
+    result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
     assert result.status == "submitted", result.reason
     assert "entry" in [call[0] for call in client.calls]
 
@@ -941,6 +1013,8 @@ def test_crossed_limit_with_close_stop_rejected_before_market_fallback() -> None
 
 
 def test_crossed_limit_with_safe_stop_keeps_market_fallback() -> None:
+    settings = _settings()
+    settings.binance_usdm_testnet.min_stop_distance_pct = 0.2
     client = FakeClient()
     decision = _long_decision() | {
         "order_type": "限价单",
@@ -948,7 +1022,7 @@ def test_crossed_limit_with_safe_stop_keeps_market_fallback() -> None:
         "stop_loss_price": 99.7,  # vs mark 100 → 0.3% gap >= minimum
         "take_profit_price": 150,
     }
-    result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
+    result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
     assert result.status == "submitted", result.reason
     assert "crossed mark price" in result.reason
     assert "entry" in [call[0] for call in client.calls]

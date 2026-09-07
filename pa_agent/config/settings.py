@@ -200,6 +200,10 @@ class BinanceUSDMTestnetSettings(BaseModel):
     symbol_whitelist: list[str] = Field(default_factory=lambda: ["BTCUSDT"])
     leverage: int = Field(default=1, ge=1, le=20)
     max_notional_usdt: float = Field(default=100.0, gt=0, le=10000.0)
+    # P2-1 单笔风险等额仓位: 0=关闭(维持名义=保证金*杠杆), 0<x<=1000 时按
+    # 风险金/|入场价-止损价| 计算 quantity, 每笔最大亏损(不含费)相同;
+    # 所需名义仍受 max_notional_usdt*leverage 上限约束, 超出拒单.
+    risk_per_trade_usdt: float = Field(default=0.0, ge=0.0, le=1000.0)
     cooldown_minutes: int = Field(default=30, ge=1, le=1440)
     # Enforce the §10.3 trader's equation (win_rate×reward > (1-win_rate)×risk)
     # before automating a market order. Default on for safety.

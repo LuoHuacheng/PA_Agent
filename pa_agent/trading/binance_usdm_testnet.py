@@ -616,8 +616,30 @@ def _execute_market_signal_once(
                     )
         # 保证金恒定：名义价值 = 保证金(margin_usdt) × 杠杆，杠杆变化不影响保证金。
         margin_usdt = float(config.max_notional_usdt)
-        notional = margin_usdt * leverage
-        quantity = _quantity_for_notional(notional, price, info)
+        risk_usdt = float(config.risk_per_trade_usdt or 0.0)
+        if risk_usdt > 0:
+            # P2-1 风险等额: 锚=市价(mark)或 resting 限价(entry); 越过市价的
+            # 限价按市价成交, 锚回退为 mark. 名义超 margin*leverage 则拒单.
+            anchor = price
+            if order_type == "限价单":
+                limit_entry = _positive_decimal(decision.get("entry_price"))
+                if limit_entry is not None and (
+                    (side == "BUY" and limit_entry < price)
+                    or (side == "SELL" and limit_entry > price)
+                ):
+                    anchor = limit_entry
+            quantity = _quantity_for_risk(risk_usdt, anchor, stop, info)
+            cap = margin_usdt * leverage
+            if quantity is not None and float(quantity) * float(anchor) > cap * 1.0001:
+                return ExecutionResult(
+                    "rejected",
+                    f"Risk sizing needs {float(quantity) * float(anchor):.2f} USDT "
+                    f"notional > margin cap {cap:.2f}",
+                    symbol,
+                )
+        else:
+            notional = margin_usdt * leverage
+            quantity = _quantity_for_notional(notional, price, info)
         if quantity is None:
             return ExecutionResult(
                 "rejected", "Configured margin is below symbol minimum or invalid"
@@ -2280,6 +2302,34 @@ def _quantity_for_notional(
         return None
     min_notional = filters.get("MIN_NOTIONAL", {}).get("notional", "0")
     if quantity * price < Decimal(str(min_notional)):
+        return None
+    return quantity
+
+
+def _quantity_for_risk(
+    risk_usdt: float, anchor: Decimal, stop: Decimal, exchange_info: dict[str, Any]
+) -> Decimal | None:
+    """Size a position so that risk_usdt is lost if price reaches *stop*.
+
+    quantity = risk / |anchor - stop|, floored to LOT_SIZE steps. Anchor is the
+    expected fill price (mark for market entries, the resting limit price
+    otherwise). Returns None on invalid input or unrepresentable size.
+    """
+    if risk_usdt <= 0 or anchor <= 0 or stop <= 0 or anchor == stop:
+        return None
+    filters = {item.get("filterType"): item for item in exchange_info.get("filters", [])}
+    lot = filters.get("LOT_SIZE") or filters.get("MARKET_LOT_SIZE")
+    if not isinstance(lot, dict):
+        return None
+    step = Decimal(str(lot["stepSize"]))
+    minimum = Decimal(str(lot["minQty"]))
+    gap = abs(anchor - stop)
+    desired = Decimal(str(risk_usdt)) / gap
+    quantity = (desired / step).to_integral_value(rounding=ROUND_DOWN) * step
+    if quantity < minimum:
+        return None
+    min_notional = filters.get("MIN_NOTIONAL", {}).get("notional", "0")
+    if quantity * anchor < Decimal(str(min_notional)):
         return None
     return quantity
 
