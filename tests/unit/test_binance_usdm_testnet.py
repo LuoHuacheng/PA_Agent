@@ -1242,6 +1242,19 @@ def test_guard_trigger_fractional_r_math() -> None:
     assert not trig(mark=Decimal("95"), trigger="0.5r", **long)
 
 
+def test_tp_partial_close_pct_setting_bounds() -> None:
+    """TP1 部分止盈比例: 0=关闭(默认), 0< x <=100 有效, 越界拒绝。"""
+    from pydantic import ValidationError
+
+    assert BinanceUSDMTestnetSettings().tp_partial_close_pct == 0.0
+    assert BinanceUSDMTestnetSettings(tp_partial_close_pct=0).tp_partial_close_pct == 0.0
+    assert BinanceUSDMTestnetSettings(tp_partial_close_pct=50).tp_partial_close_pct == 50.0
+    assert BinanceUSDMTestnetSettings(tp_partial_close_pct=100).tp_partial_close_pct == 100.0
+    for bad in (-1, 101):
+        with pytest.raises(ValidationError):
+            BinanceUSDMTestnetSettings(tp_partial_close_pct=bad)
+
+
 def test_breakeven_trigger_setting_accepts_fractional_r() -> None:
     from pydantic import ValidationError
 

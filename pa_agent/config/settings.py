@@ -238,6 +238,10 @@ class BinanceUSDMTestnetSettings(BaseModel):
     breakeven_min_confidence: int = Field(default=55, ge=0, le=100)
     # 持仓守护线程轮询 mark price 的间隔秒数.
     breakeven_poll_seconds: int = Field(default=10, ge=2, le=600)
+    # --- TP1 部分止盈 / runner(TP2) ---
+    # 到达 TP1 时平掉此比例的仓位(0 = 关闭, 维持现状全平; 50 = 平一半),
+    # 剩余仓位保本后继续持有至 TP2. 0-100 闭区间.
+    tp_partial_close_pct: float = Field(default=0.0, ge=0.0, le=100.0)
 
     @field_validator("breakeven_stop_trigger")
     @classmethod
