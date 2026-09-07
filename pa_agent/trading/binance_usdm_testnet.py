@@ -179,8 +179,15 @@ class BinanceUSDMTestnetClient:
             raise BinanceAPIError("Binance returned invalid JSON") from exc
         # Binance conditional (Algo) service answers success with an HTTP 200
         # body {"code":200,"msg":"success"}; only non-200 codes are errors.
-        if isinstance(result, dict) and result.get("code", 0) not in (0, 200, None):
-            raise BinanceAPIError(f"Binance error {result['code']}: {result.get('msg', '')}")
+        # The code arrives as int normally but has been observed serialized as
+        # the string "200" (real testnet repro), so coerce before comparing.
+        if isinstance(result, dict) and result.get("code") is not None:
+            try:
+                code = int(result["code"])
+            except (TypeError, ValueError):
+                code = -1
+            if code not in (0, 200):
+                raise BinanceAPIError(f"Binance error {code}: {result.get('msg', '')}")
         return result
 
     def exchange_info(self, symbol: str) -> dict[str, Any]:

@@ -424,6 +424,18 @@ def test_algo_success_body_code_200_is_not_an_error() -> None:
     client.cancel_algo_order(client_algo_id="pa-sl-test0001")
 
 
+def test_algo_success_body_code_as_string_200_is_not_an_error() -> None:
+    """Algo 服务偶发把 code 序列化成字符串 "200": 实测复现, 同样必须视为成功。"""
+
+    def ok_opener(*_args: object, **_kwargs: object) -> _OkResponse:
+        return _OkResponse({"code": "200", "msg": "success"})
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "test-key", "test-secret", opener=ok_opener
+    )
+    client.cancel_algo_order(client_algo_id="pa-sl-test0002")
+
+
 def test_entry_client_id_deterministic_and_bounded() -> None:
     first = binance_usdm_testnet._entry_client_id("sig-abc")
     assert first == binance_usdm_testnet._entry_client_id("sig-abc")
