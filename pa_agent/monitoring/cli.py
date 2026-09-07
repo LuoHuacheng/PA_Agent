@@ -327,11 +327,13 @@ def run_monitor() -> int:
         from pa_agent.trading.binance_usdm_testnet import (
             resume_breakeven_guards,
             resume_pending_limit_watchers,
+            resume_time_stops,
             resume_tp_runners,
         )
 
         resume_pending_limit_watchers(settings)
         resume_breakeven_guards(settings)
+        resume_time_stops(settings)
         resume_tp_runners(settings)
     except Exception:
         logger.exception("恢复 Binance 测试网挂单 watcher 失败")

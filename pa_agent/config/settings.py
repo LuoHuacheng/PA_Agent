@@ -246,6 +246,9 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # 到达 TP1 时平掉此比例的仓位(0 = 关闭, 维持现状全平; 50 = 平一半),
     # 剩余仓位保本后继续持有至 TP2. 0-100 闭区间.
     tp_partial_close_pct: float = Field(default=0.0, ge=0.0, le=100.0)
+    # P2-2 持仓超时(分钟): 0=关闭; >0 时持仓超过该时长(自保护单挂上起算)后,
+    # time-stop 线程市价清掉剩余仓位(TP2 阶段剩余半仓同样适用). 上限 7 天.
+    time_stop_minutes: int = Field(default=0, ge=0, le=10080)
 
     @field_validator("breakeven_stop_trigger")
     @classmethod

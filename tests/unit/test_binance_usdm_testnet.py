@@ -1910,6 +1910,222 @@ def test_maybe_guard_partial_without_breakeven_still_arms_runner(monkeypatch) ->
     assert record is not None and record["partial_done"] is False
 
 
+class TimeStopClient(FakeClient):
+    """Position stays open until close_market_position is called."""
+
+    def __init__(self, amount: Decimal = Decimal("0.5")) -> None:
+        super().__init__()
+        self.amount = amount
+
+    def position_info(self, symbol: str) -> dict:
+        self.calls.append(("position_info", symbol))
+        return {"amount": self.amount, "entry": Decimal("95")}
+
+    def close_market_position(self, **kwargs: object) -> None:
+        super().close_market_position(**kwargs)
+        self.amount = Decimal("0")
+
+
+def _legacy_record(ts: float, symbol: str = "BTCUSDT") -> None:
+    binance_usdm_testnet._register_guard(
+        symbol,
+        {"stop_algo_id": "pa-sl-x", "stop0": "90", "target": "120",
+         "side": "BUY", "conf": 55, "ts": ts, "moved": False},
+    )
+
+
+def test_time_stop_setting_bounds() -> None:
+    """P2-2: 持仓超时分钟数 0=关闭默认, 1..10080 有效, 越界拒绝."""
+    from pydantic import ValidationError
+
+    assert BinanceUSDMTestnetSettings().time_stop_minutes == 0
+    assert BinanceUSDMTestnetSettings(time_stop_minutes=360).time_stop_minutes == 360
+    for bad in (-1, 10081):
+        with pytest.raises(ValidationError):
+            BinanceUSDMTestnetSettings(time_stop_minutes=bad)
+
+
+def test_timestop_deadline_hit_math() -> None:
+    """P2-2: 到期判定: 无记录/无 ts/未到期 False, 到期 True."""
+    hit = binance_usdm_testnet._timestop_deadline_hit
+    now = 1_000_000.0
+    record = {"ts": now - 3600, "side": "BUY"}
+    assert hit(record, 60, now=now) is True
+    assert hit({"ts": now - 60, "side": "BUY"}, 10, now=now) is False
+    young = {"ts": now - 300, "side": "BUY"}
+    assert hit(young, 10, now=now) is False
+    assert hit(young, 5, now=now) is True
+    assert hit(None, 10, now=now) is False
+    assert hit({}, 10, now=now) is False
+    assert hit({"ts": 0, "side": "BUY"}, 10, now=now) is False
+    assert hit({"ts": now - 60, "side": "BUY"}, 0, now=now) is False
+
+
+def test_timestop_loop_closes_after_deadline_and_drops() -> None:
+    """P2-2: 到期后市价清剩余仓位并移除无 partial 记录."""
+    _legacy_record(time.time() - 7200)
+    client = TimeStopClient()
+    thread = binance_usdm_testnet.threading.Thread(
+        target=binance_usdm_testnet._timestop_loop,
+        kwargs={"client": client, "symbol": "BTCUSDT",
+                "stop_minutes": 60.0, "poll_seconds": 0.02},
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.time() + 5
+    while time.time() < deadline and not any(c[0] == "rollback" for c in client.calls):
+        time.sleep(0.02)
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    closes = [c[1] for c in client.calls if c[0] == "rollback"]
+    assert closes and closes[0]["side"] == "SELL"
+    assert closes[0]["quantity"] == Decimal("0.5")
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+
+
+def test_timestop_loop_young_record_waits_then_closes() -> None:
+    """P2-2: 未到期不动作; 记录 ts 推旧后同一线程到期平仓."""
+    _legacy_record(time.time() - 60)  # 1 分钟持仓, 阈值 60min
+    client = TimeStopClient()
+    thread = binance_usdm_testnet.threading.Thread(
+        target=binance_usdm_testnet._timestop_loop,
+        kwargs={"client": client, "symbol": "BTCUSDT",
+                "stop_minutes": 60.0, "poll_seconds": 0.02},
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.12)
+    assert not any(c[0] == "rollback" for c in client.calls)
+    _legacy_record(time.time() - 7200)  # 模拟记录被替换成更旧的持仓
+    deadline = time.time() + 5
+    while time.time() < deadline and not any(c[0] == "rollback" for c in client.calls):
+        time.sleep(0.02)
+    thread.join(timeout=2)
+    assert any(c[0] == "rollback" for c in client.calls)
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+
+
+def test_timestop_loop_flat_position_drops_stale_record() -> None:
+    """P2-2: 记录在但仓位已平(无 partial): 清残留后移除记录, 不平仓."""
+    _legacy_record(time.time() - 7200)
+    client = TimeStopClient(amount=Decimal("0"))
+    thread = binance_usdm_testnet.threading.Thread(
+        target=binance_usdm_testnet._timestop_loop,
+        kwargs={"client": client, "symbol": "BTCUSDT",
+                "stop_minutes": 60.0, "poll_seconds": 0.02},
+        daemon=True,
+    )
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert not any(c[0] == "rollback" for c in client.calls)
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+
+
+def test_timestop_loop_keeps_partial_record_for_runner() -> None:
+    """P2-2: 半仓未触发时 runner 仍存活: time-stop 平仓后不撤 TP1 不移记录."""
+    binance_usdm_testnet._register_guard(
+        "BTCUSDT",
+        {"stop_algo_id": "pa-sl-x", "stop0": "90", "target": "120", "side": "BUY",
+         "conf": 55, "ts": time.time() - 7200, "moved": False,
+         "tp_algo_id": "pa-tp-x", "target2": "150", "qty": "1",
+         "partial_qty": "0.5", "partial_done": False},
+    )
+    client = TimeStopClient(amount=Decimal("1"))
+    thread = binance_usdm_testnet.threading.Thread(
+        target=binance_usdm_testnet._timestop_loop,
+        kwargs={"client": client, "symbol": "BTCUSDT",
+                "stop_minutes": 60.0, "poll_seconds": 0.02},
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.time() + 5
+    while time.time() < deadline and not any(c[0] == "rollback" for c in client.calls):
+        time.sleep(0.02)
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert any(c[0] == "rollback" for c in client.calls)
+    assert not any(c[0] == "cancel_protection" for c in client.calls)
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is not None
+
+
+def test_timestop_loop_tp2_phase_flat_cancels_residual_and_drops() -> None:
+    """P2-2: TP2 阶段(partial_done, runner 已退)仓位已平: 撤残留 TP1 并移除记录."""
+    binance_usdm_testnet._register_guard(
+        "BTCUSDT",
+        {"stop_algo_id": "pa-sl-x2", "stop0": "90", "target": "120", "side": "BUY",
+         "conf": 55, "ts": time.time() - 7200, "moved": True,
+         "tp_algo_id": "pa-tp-x", "target2": "150", "qty": "1",
+         "partial_qty": "0.5", "partial_done": True},
+    )
+    client = TimeStopClient(amount=Decimal("0"))
+    thread = binance_usdm_testnet.threading.Thread(
+        target=binance_usdm_testnet._timestop_loop,
+        kwargs={"client": client, "symbol": "BTCUSDT",
+                "stop_minutes": 60.0, "poll_seconds": 0.02},
+        daemon=True,
+    )
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    cancels = [c[1] for c in client.calls if c[0] == "cancel_protection"]
+    assert cancels and cancels[0]["client_algo_id"] == "pa-tp-x"
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+
+
+def test_maybe_guard_arms_timestop_when_configured(monkeypatch) -> None:
+    """P2-2: time_stop_minutes>0 时注册记录并额外拉起 time-stop 线程."""
+    captured = _capture_threads(monkeypatch)
+    config = _partial_settings().binance_usdm_testnet
+    config.time_stop_minutes = 60
+    binance_usdm_testnet._maybe_guard(
+        client=FakeClient(),
+        config=config,
+        symbol="BTCUSDT",
+        side="BUY",
+        stop=Decimal("90"),
+        target=Decimal("120"),
+        stop_algo_id="pa-sl-x",
+        conf=58,
+        quantity=Decimal("2"),
+        target2=Decimal("150"),
+        tp_algo_id="pa-tp-x",
+        partial_qty=Decimal("1"),
+    )
+    targets = [target for target, _kwargs in captured]
+    assert binance_usdm_testnet._timestop_loop in targets
+    ts_kwargs = [kwargs for target, kwargs in captured
+                 if target is binance_usdm_testnet._timestop_loop]
+    assert ts_kwargs and ts_kwargs[0]["stop_minutes"] == 60
+    assert ts_kwargs[0]["poll_seconds"] == config.breakeven_poll_seconds
+
+
+def test_resume_time_stops_arms_all_record_kinds(monkeypatch) -> None:
+    """P2-2: 重启恢复: 所有含 side/ts 的记录(含 moved/partial_done)都拉起."""
+    captured = _capture_threads(monkeypatch)
+    settings = _partial_settings()
+    settings.binance_usdm_testnet.time_stop_minutes = 60
+    _legacy_record(time.time() - 3600, "BTCUSDT")
+    _legacy_record(time.time() - 3600, "ADAUSDT")
+    binance_usdm_testnet._register_guard(
+        "ETHUSDT",
+        {"stop_algo_id": "pa-sl-y", "stop0": "90", "target": "120", "side": "BUY",
+         "conf": 60, "ts": time.time() - 3600, "moved": True,
+         "tp_algo_id": "pa-tp-y", "target2": "150", "qty": "1",
+         "partial_qty": "0.5", "partial_done": True},
+    )
+    count = binance_usdm_testnet.resume_time_stops(settings, client=FakeClient())
+    assert count == 3
+    entries = sorted((kwargs["symbol"]) for _t, kwargs in captured)
+    assert entries == ["ADAUSDT", "BTCUSDT", "ETHUSDT"]
+    # 关闭(0 分钟)不恢复
+    captured.clear()
+    assert binance_usdm_testnet.resume_time_stops(
+        _partial_settings(), client=FakeClient()
+    ) == 0
+    assert captured == []
+
+
 def test_resume_tp_runners_arms_unfinished_records_only(monkeypatch) -> None:
     """重启恢复: 只拉起 partial_done=False 的记录; 跳过已完成的与旧 guard。"""
     captured = _capture_threads(monkeypatch)

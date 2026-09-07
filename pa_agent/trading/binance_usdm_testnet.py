@@ -1489,6 +1489,117 @@ def _tp_runner_loop(
             return
 
 
+def _timestop_deadline_hit(
+    record: dict[str, Any] | None, stop_minutes: float, *, now: float | None = None
+) -> bool:
+    """True when the recorded position has been open past the time-stop."""
+    if not isinstance(record, dict) or stop_minutes <= 0:
+        return False
+    ts = record.get("ts")
+    if not isinstance(ts, (int, float)) or ts <= 0:
+        return False
+    return (now if now is not None else time.time()) - float(ts) >= stop_minutes * 60
+
+
+def _timestop_loop(
+    *,
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    stop_minutes: float,
+    poll_seconds: float,
+) -> None:
+    """Close the remaining position once it aged past stop_minutes.
+
+    Runs alongside the breakeven guard and TP1 runner (all read the same
+    registry record under the per-symbol lock). After closing, a resting
+    partial TP1 order is cancelled and the record dropped unless an unfinished
+    runner still owns that lifecycle (it then observes the flat position on
+    its next poll and cleans up itself).
+    """
+    errors = 0
+    while True:
+        record = _read_guard(symbol)
+        if record is None or not _timestop_deadline_hit(record, stop_minutes):
+            time.sleep(poll_seconds)
+            continue
+        side = str(record.get("side") or "")
+        if side not in ("BUY", "SELL"):
+            return
+        with _manager_lock(symbol):
+            fresh = _read_guard(symbol)
+            if fresh is None or str(fresh.get("side") or "") != side:
+                return
+            if not _timestop_deadline_hit(fresh, stop_minutes):
+                continue  # record replaced by a newer position: re-arm on its deadline
+            try:
+                info = client.position_info(symbol)
+                amount = info["amount"]
+            except BinanceAPIError as exc:
+                errors += 1
+                logger.warning(
+                    "Time-stop poll failed for %s (attempt %d): %s",
+                    symbol, errors, exc,
+                )
+                if errors >= 5:
+                    logger.error(
+                        "Time-stop gave up for %s after repeated API errors; "
+                        "static stop/TP stays in place",
+                        symbol,
+                    )
+                    return
+                time.sleep(poll_seconds)
+                continue
+            exit_side = "SELL" if side == "BUY" else "BUY"
+            partial_pending = (
+                _positive_decimal(fresh.get("partial_qty")) is not None
+                and not bool(fresh.get("partial_done"))
+            )
+            if amount != 0:
+                if (side == "BUY" and amount < 0) or (side == "SELL" and amount > 0):
+                    return  # not our position anymore
+                try:
+                    client.close_market_position(
+                        symbol=symbol,
+                        side=exit_side,
+                        quantity=abs(amount),
+                    )
+                except BinanceAPIError as exc:
+                    errors += 1
+                    logger.error(
+                        "Time-stop close failed for %s (%s): %s",
+                        symbol, _decimal_text(abs(amount)), exc,
+                    )
+                    if errors >= 5:
+                        logger.error(
+                            "Time-stop gave up closing %s after repeated errors; "
+                            "static stop/TP stays in place",
+                            symbol,
+                        )
+                        return
+                    time.sleep(poll_seconds)
+                    continue
+                logger.info(
+                    "Time-stop reached for %s %s: closed remaining %s",
+                    symbol, side, _decimal_text(abs(amount)),
+                )
+            if partial_pending:
+                # runner 仍存活, 由它撤残留 TP1 并清理记录 (下一轮见 amount=0).
+                return
+            tp_algo_id = str(fresh.get("tp_algo_id") or "")
+            if tp_algo_id:
+                try:
+                    client.cancel_algo_order(client_algo_id=tp_algo_id)
+                except BinanceAPIError as exc:
+                    if not _is_missing_algo_order_error(exc):
+                        logger.error(
+                            "Time-stop residual TP1 cancel failed for %s (%s): %s",
+                            symbol, tp_algo_id, exc,
+                        )
+                        return
+            _drop_guard(symbol)
+            return
+
+
 def _maybe_guard(
     client: BinanceUSDMTestnetClient,
     config: BinanceUSDMTestnetSettings,
@@ -1582,6 +1693,25 @@ def _maybe_guard(
             side,
             str(config.tp_partial_close_pct).rstrip("0").rstrip("."),
             _decimal_text(target2),
+        )
+    time_stop_minutes = int(config.time_stop_minutes or 0)
+    if time_stop_minutes > 0:
+        ts_thread = threading.Thread(
+            target=_timestop_loop,
+            kwargs={
+                "client": client,
+                "symbol": symbol,
+                "stop_minutes": float(time_stop_minutes),
+                "poll_seconds": float(config.breakeven_poll_seconds),
+            },
+            daemon=True,
+        )
+        ts_thread.start()
+        logger.info(
+            "Time-stop manager started for %s %s (limit %d minutes)",
+            symbol,
+            side,
+            time_stop_minutes,
         )
 def resume_breakeven_guards(
     settings: Settings | None = None,
@@ -1696,6 +1826,58 @@ def resume_tp_runners(
         resumed += 1
         logger.info("Resumed TP partial runner for %s", symbol)
     return resumed
+def resume_time_stops(
+    settings: Settings | None = None,
+    *,
+    client: BinanceUSDMTestnetClient | None = None,
+) -> int:
+    """Re-arm time-stop managers for registered records after a restart.
+
+    Any record with a side and ts gets a manager (records at or past their
+    deadline are closed on the first poll). Returns the resumed count.
+    """
+    config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
+    if not config.enabled or config.dry_run or config.emergency_stop:
+        return 0
+    minutes = int(config.time_stop_minutes or 0)
+    if minutes <= 0:
+        return 0
+    with _STATE_LOCK:
+        guards = _load_state().get("guards")
+        records = (
+            {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
+            if isinstance(guards, dict)
+            else {}
+        )
+    if not records:
+        return 0
+    try:
+        active = client or BinanceUSDMTestnetClient(config.api_key, config.api_secret)
+    except ValueError as exc:
+        logger.error("Cannot resume time-stop managers: %s", exc)
+        return 0
+    resumed = 0
+    for symbol, record in records.items():
+        ts = record.get("ts")
+        side = str(record.get("side") or "")
+        if not isinstance(ts, (int, float)) or ts <= 0 or side not in ("BUY", "SELL"):
+            continue
+        thread = threading.Thread(
+            target=_timestop_loop,
+            kwargs={
+                "client": active,
+                "symbol": symbol,
+                "stop_minutes": float(minutes),
+                "poll_seconds": float(config.breakeven_poll_seconds),
+            },
+            daemon=True,
+        )
+        thread.start()
+        resumed += 1
+        logger.info("Resumed time-stop manager for %s", symbol)
+    return resumed
+
+
 def _settle_after_entry_gone(
     client: BinanceUSDMTestnetClient,
     symbol: str,
