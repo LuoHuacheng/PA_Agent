@@ -179,7 +179,7 @@ def test_auto_discover_syncs_symbol_whitelist(tmp_path: Path) -> None:
     settings = _settings()
     settings.monitoring.auto_discover.enabled = True
     settings.monitoring.auto_discover.timeframe = "15m"
-    # 预置一个手动白名单条目，验证被保留而不是覆盖
+    # 预置一个手动白名单条目: 白名单必须与监控品种一致(替换式同步)
     settings.binance_usdm_testnet.symbol_whitelist = ["XAUUSD"]
     monitor = MultiSymbolMonitor(
         ctx=object(),
@@ -191,7 +191,29 @@ def test_auto_discover_syncs_symbol_whitelist(tmp_path: Path) -> None:
 
     monitor._apply_discovered()
 
-    assert settings.binance_usdm_testnet.symbol_whitelist == ["XAUUSD", "BTCUSDT", "ETHUSDT"]
+    assert settings.binance_usdm_testnet.symbol_whitelist == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_static_mode_whitelist_matches_targets(tmp_path: Path) -> None:
+    """Static-targets mode: whitelist becomes the monitor set on start."""
+    settings = _settings(
+        MonitorTarget(symbol="XAUUSD", timeframe="15m"),
+        MonitorTarget(symbol="BTCUSDT", timeframe="30m"),
+    )
+    settings.binance_usdm_testnet.symbol_whitelist = ["ETHUSDT"]
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        analyze=lambda _frame, **_kw: None,
+    )
+
+    monitor.start()
+    try:
+        assert settings.binance_usdm_testnet.symbol_whitelist == ["XAUUSD", "BTCUSDT"]
+    finally:
+        monitor.stop()
 
 
 def test_auto_discover_drops_symbols_without_kline(tmp_path: Path) -> None:

@@ -210,6 +210,21 @@ class MultiSymbolMonitor:
             last_processed_closed_ts=self._persisted_closed_ts.get(self._key_text(key)),
         )
 
+    def _sync_whitelist_to_active(self, symbols: list[str]) -> None:
+        """Make the execution whitelist exactly match the active monitor set.
+
+        白名单与监控名单保持一致：监控外的币种只会收到信号推送、绝不自动
+        执行（用户要求两名单一致，替换式同步，不再保留手动条目）。
+        """
+        auto_cfg = self._settings.binance_usdm_testnet
+        synced = list(dict.fromkeys(symbols))
+        if auto_cfg.symbol_whitelist != synced:
+            auto_cfg.symbol_whitelist = synced
+            self._report(
+                f"symbol_whitelist 已同步监控品种: {len(synced)} 个 "
+                f"({', '.join(synced)})"
+            )
+
     def _discover_targets(self) -> list[MonitorTarget]:
         """Run auto-discovery, falling back to the static list on failure."""
         if not self._cfg.auto_discover.enabled:
@@ -259,16 +274,8 @@ class MultiSymbolMonitor:
             ]
         if not targets:
             return
-        # 让自动发现的品种也能通过 testnet 下单的白名单检查：
-        # 合并进 symbol_whitelist（保留用户手动配置的条目）。
-        auto_cfg = self._settings.binance_usdm_testnet
-        merged = list(dict.fromkeys([*auto_cfg.symbol_whitelist, *symbols]))
-        if auto_cfg.symbol_whitelist != merged:
-            auto_cfg.symbol_whitelist = merged
-            self._report(
-                f"symbol_whitelist 已同步自动发现品种: {len(merged)} 个 "
-                f"({', '.join(merged)})"
-            )
+        # 执行白名单与监控品种保持一致（替换式同步）：监控外的品种不自动执行。
+        self._sync_whitelist_to_active(symbols)
         with self._lock:
             new_states: dict[tuple[str, str], _TargetState] = {}
             for target in targets:
@@ -308,6 +315,11 @@ class MultiSymbolMonitor:
         # Auto-discovery 启用时先拉取品种，避免静态 targets 为空导致不启动。
         if self._cfg.auto_discover.enabled:
             self._apply_discovered()
+        else:
+            # 静态 targets 模式同样保持白名单 = 监控品种。
+            self._sync_whitelist_to_active(
+                [state.target.symbol for state in self._states.values()]
+            )
         if not self._states:
             return
         self._executor = ThreadPoolExecutor(
