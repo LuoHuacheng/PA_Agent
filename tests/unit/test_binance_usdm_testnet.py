@@ -411,6 +411,19 @@ def test_request_does_not_retry_post_without_idempotency_key() -> None:
     assert len(calls) == 1
 
 
+def test_algo_success_body_code_200_is_not_an_error() -> None:
+    """Algo API 成功响应形如 {"code":200,"msg":"success"}: 不得被当成错误。"""
+
+    def ok_opener(*_args: object, **_kwargs: object) -> _OkResponse:
+        return _OkResponse({"code": 200, "msg": "success"})
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "test-key", "test-secret", opener=ok_opener
+    )
+    # 撤单成功必须无异常返回, 否则保本移动会误判失败、丢止损不补挂。
+    client.cancel_algo_order(client_algo_id="pa-sl-test0001")
+
+
 def test_entry_client_id_deterministic_and_bounded() -> None:
     first = binance_usdm_testnet._entry_client_id("sig-abc")
     assert first == binance_usdm_testnet._entry_client_id("sig-abc")
@@ -1307,6 +1320,57 @@ def test_resume_breakeven_guards_skips_moved(monkeypatch) -> None:
         settings, client=FakeClient()
     ) == 0
     monkeypatch.undo()
+
+class StaleStopClient(MarkSeqClient):
+    """Open long whose resting stop was already removed server-side."""
+
+    def cancel_algo_order(self, **kwargs: object) -> None:
+        self.calls.append(("cancel_protection", kwargs))
+        raise BinanceAPIError(
+            'Binance HTTP 400: {"code":-2011,"msg":"Unknown order sent."}'
+        )
+
+
+class BrokenCancelClient(MarkSeqClient):
+    """Open long whose stop cancel keeps failing for non-unknown reasons."""
+
+    def cancel_algo_order(self, **kwargs: object) -> None:
+        self.calls.append(("cancel_protection", kwargs))
+        raise BinanceAPIError("Binance network error: test outage")
+
+
+def test_guard_move_still_places_breakeven_when_original_stop_unknown(
+    monkeypatch,
+) -> None:
+    """旧 STOP 已被撤(-2011)时, 保本移动仍必须重挂入场价止损, 不许裸奔。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    client = StaleStopClient([111])  # mark 111 >= 1R(110)
+    _register_test_guard()
+    binance_usdm_testnet._breakeven_guard_loop(
+        client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0
+    )
+    places = [c[1] for c in client.calls if c[0] == "protection"]
+    assert places, "must still place a breakeven stop"
+    assert places[-1]["stop_price"] == Decimal("100")
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["moved"] is True
+
+
+def test_guard_gives_up_after_repeated_cancel_errors(monkeypatch) -> None:
+    """撤单持续失败(非-2011)时有限重试后放弃, 不会无限空转。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    client = BrokenCancelClient([111] * 20)  # trigger keeps being reached
+    _register_test_guard()
+    binance_usdm_testnet._breakeven_guard_loop(
+        client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0
+    )
+    places = [c[1] for c in client.calls if c[0] == "protection"]
+    assert places == [], "must not place a replacement while cancel keeps failing"
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["moved"] is False
+    assert len(sleeps) <= 6  # bounded retries: 5 failures + give-up
 
 # ---- 30d 日线大趋势护栏 ------------------------------------------------
 

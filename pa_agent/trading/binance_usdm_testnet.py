@@ -161,7 +161,9 @@ class BinanceUSDMTestnetClient:
             result = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise BinanceAPIError("Binance returned invalid JSON") from exc
-        if isinstance(result, dict) and result.get("code", 0) not in (0, None):
+        # Binance conditional (Algo) service answers success with an HTTP 200
+        # body {"code":200,"msg":"success"}; only non-200 codes are errors.
+        if isinstance(result, dict) and result.get("code", 0) not in (0, 200, None):
             raise BinanceAPIError(f"Binance error {result['code']}: {result.get('msg', '')}")
         return result
 
@@ -1056,7 +1058,6 @@ def _breakeven_guard_loop(
                 return
             time.sleep(poll_seconds)
             continue
-        consecutive_errors = 0
         if not _guard_trigger_reached(
             mark=mark,
             entry=entry,
@@ -1065,12 +1066,42 @@ def _breakeven_guard_loop(
             side=side,
             trigger=trigger,
         ):
+            consecutive_errors = 0
             time.sleep(poll_seconds)
             continue
         exit_side = "SELL" if side == "BUY" else "BUY"
         try:
             client.cancel_algo_order(client_algo_id=stop_algo_id)
-            new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
+        except BinanceAPIError as exc:
+            if _is_missing_algo_order_error(exc):
+                # 原 STOP 单已不在交易所(撤单成功残留/重启/手动取消):
+                # 视为撤单完成, 直接补挂保本单, 绝不让持仓裸奔。
+                logger.warning(
+                    "Breakeven guard: original stop %s for %s already gone (%s); "
+                    "placing breakeven stop at entry",
+                    stop_algo_id,
+                    symbol,
+                    exc,
+                )
+            else:
+                consecutive_errors += 1
+                logger.error(
+                    "Breakeven stop move failed for %s (kept original stop at %s): %s",
+                    symbol,
+                    _decimal_text(stop0),
+                    exc,
+                )
+                if consecutive_errors >= 5:
+                    logger.error(
+                        "Breakeven guard gave up moving stop for %s after repeated "
+                        "cancel errors; original stop may still be resting",
+                        symbol,
+                    )
+                    return
+                time.sleep(poll_seconds)
+                continue
+        new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
+        try:
             client.place_close_algo_order(
                 symbol=symbol,
                 side=exit_side,
@@ -1081,12 +1112,18 @@ def _breakeven_guard_loop(
         except BinanceAPIError as exc:
             consecutive_errors += 1
             logger.error(
-                "Breakeven stop move failed for %s (kept original stop at %s): %s",
+                "Breakeven stop placement failed for %s (%s), position may be "
+                "unprotected: %s",
                 symbol,
-                _decimal_text(stop0),
+                stop_algo_id,
                 exc,
             )
             if consecutive_errors >= 5:
+                logger.error(
+                    "Breakeven guard gave up placing breakeven stop for %s after "
+                    "repeated errors; position is unprotected",
+                    symbol,
+                )
                 return
             time.sleep(poll_seconds)
             continue
@@ -1657,6 +1694,24 @@ def _is_missing_order_error(exc: BinanceAPIError) -> bool:
         or '"code":-2013' in message
         or '"code": -2013' in message
     )
+
+
+def _is_missing_algo_order_error(exc: BinanceAPIError) -> bool:
+    """Return whether the Algo service reports the conditional order is gone.
+
+    The cancel endpoint answers -2011 "Unknown order sent" once an order was
+    already removed (successful earlier cancel / restart residue / manual
+    cancel); -2013 shapes may also appear. Treat these as "cancel done": the
+    caller must re-hang a replacement stop instead of aborting the move and
+    leaving the position unprotected.
+    """
+    message = str(exc).lower()
+    return (
+        "-2011" in message
+        or "unknown order" in message
+        or _is_missing_order_error(exc)
+    )
+
 
 
 def _remember_signal(signal_id: str) -> None:
