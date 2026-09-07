@@ -129,6 +129,30 @@ def _has_order_opportunity(decision: dict[str, Any], confidence_threshold: int) 
     return confidence >= confidence_threshold
 
 
+def _frame_atr_pct(frame: Any) -> float | None:
+    """Latest analyzed-bar ATR14 as a percent of its close; None when unavailable.
+
+    ATR is already computed on the analysis frame (IndicatorBundle.atr14,
+    newest-first); this helper only converts it to a percentage so the executor
+    can apply the dynamic stop-distance floor without any extra API request.
+    """
+    indicators = getattr(frame, "indicators", None)
+    if indicators is None:
+        return None
+    atr14 = tuple(getattr(indicators, "atr14", ()) or ())
+    bars = tuple(getattr(frame, "bars", ()) or ())
+    if not atr14 or not bars:
+        return None
+    try:
+        atr = float(atr14[0])
+        close = float(bars[0].close)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if atr != atr or close <= 0:  # NaN during ATR warm-up
+        return None
+    return atr / close * 100.0
+
+
 @dataclass
 class _TargetState:
     target: MonitorTarget
@@ -818,7 +842,11 @@ class MultiSymbolMonitor:
             structure_flip_cooldown_bars=flip_cooldown,
         )
 
-        result = execute_market_signal(inner, self._settings, analysis_symbol=frame.symbol)
+        exec_decision = dict(inner)
+        atr_pct = _frame_atr_pct(frame)
+        if atr_pct is not None:
+            exec_decision["atr_pct"] = atr_pct
+        result = execute_market_signal(exec_decision, self._settings, analysis_symbol=frame.symbol)
         logger.info(
             "Binance U本位 Testnet 自动执行: status=%s symbol=%s reason=%s",
             result.status,

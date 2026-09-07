@@ -1037,6 +1037,86 @@ def test_stop_distance_minimum_is_configurable() -> None:
     result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
     assert result.status == "rejected"
     assert "Stop loss too close" in result.reason
+
+
+# ── 动态止损下限 max(floor, mult × ATR%) ───────────────────────────────
+
+def _atr_settings(*, floor: float = 0.2, multiple: float = 0.8) -> Settings:
+    settings = _settings()
+    cfg = settings.binance_usdm_testnet
+    cfg.min_stop_mode = "atr"
+    cfg.min_stop_distance_pct = floor
+    cfg.min_stop_atr_multiple = multiple
+    return settings
+
+
+def test_stop_floor_helper_fixed_mode_returns_constant_floor() -> None:
+    config = _settings().binance_usdm_testnet
+    assert binance_usdm_testnet._stop_distance_floor_pct(config, {"atr_pct": 3.0}) == Decimal("0.45")
+
+
+def test_stop_floor_helper_atr_mode_uses_max_of_floor_and_multiple() -> None:
+    config = _atr_settings().binance_usdm_testnet
+    # ATR% 大 → 动态下限 = mult × ATR%
+    assert binance_usdm_testnet._stop_distance_floor_pct(config, {"atr_pct": 0.5}) == Decimal("0.4")
+    # ATR% 小 → 退回 floor
+    assert binance_usdm_testnet._stop_distance_floor_pct(config, {"atr_pct": 0.1}) == Decimal("0.2")
+    # 无 ATR 信息 → 退回 floor
+    assert binance_usdm_testnet._stop_distance_floor_pct(config, {}) == Decimal("0.2")
+    assert binance_usdm_testnet._stop_distance_floor_pct(config, {"atr_pct": None}) == Decimal("0.2")
+
+
+def test_market_order_uses_dynamic_floor_above_fixed_minimum() -> None:
+    """gap 0.3% > floor 0.2% 但 < 0.8×ATR(0.5%)=0.4% → 动态下限拒绝。"""
+    settings = _atr_settings()
+    client = FakeClient()
+    decision = _long_decision() | {
+        "stop_loss_price": 99.7,  # vs mark 100 → 0.3% gap (tick 0.1 网格上)
+        "atr_pct": 0.5,
+    }
+    result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "rejected"
+    assert "Stop loss too close" in result.reason
+    assert "entry" not in [call[0] for call in client.calls]
+
+
+def test_market_order_atr_floor_allows_wide_enough_gap() -> None:
+    settings = _atr_settings()
+    client = FakeClient()
+    decision = _long_decision() | {
+        "stop_loss_price": 99.4,  # 0.6% gap >= max(0.2, 0.8×0.5)
+        "atr_pct": 0.5,
+    }
+    result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "submitted", result.reason
+
+
+def test_resting_limit_order_uses_dynamic_floor() -> None:
+    """限价单 gap 按 entry 价算：0.41% > floor 但 < 0.8×ATR(0.6%)=0.48% → 拒绝。"""
+    settings = _atr_settings()
+    client = FakeClient()
+    decision = _long_decision() | {
+        "order_type": "限价单",
+        "entry_price": 98,
+        "stop_loss_price": 97.6,
+        "take_profit_price": 120,
+        "atr_pct": 0.6,
+    }
+    result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "rejected"
+    assert "Stop loss too close" in result.reason
+    assert "limit_entry" not in [call[0] for call in client.calls]
+
+
+def test_atr_mode_without_atr_info_falls_back_to_fixed_floor() -> None:
+    """mode=atr 但 decision 无 ATR → 退回固定 floor(0.2)，0.25% gap 放行。"""
+    settings = _atr_settings()
+    client = FakeClient()
+    decision = _long_decision() | {"stop_loss_price": 99.75}  # 0.25% gap
+    result = execute_market_signal(decision, settings, analysis_symbol="BTCUSDT", client=client)
+    assert result.status == "submitted", result.reason
+
+
 # ── P0-3: 限价部分成交后绝不裸仓 ───────────────────────────────────────
 
 def _persist_pending_record(symbol: str, client_id: str, signal_id: str) -> None:

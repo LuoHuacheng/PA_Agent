@@ -212,10 +212,16 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # Resting limit entries use a fill watcher and attach TP/SL after fill.
     limit_fill_timeout_minutes: int = Field(default=60, ge=1, le=1440)
     limit_poll_interval_seconds: int = Field(default=10, ge=2, le=300)
-    # Stop loss minimum distance from the entry price (percent). Decisions whose
-    # structural stop sits closer than this are rejected before any order is
-    # placed, preventing "filled straight into the stop" losses (P0-2).
+    # Stop loss minimum distance from the entry/mark price (percent). "fixed"
+    # mode: constant min_stop_distance_pct floor. "atr" mode: floor =
+    # max(min_stop_distance_pct, min_stop_atr_multiple × 分析周期 ATR%), where
+    # ATR% comes from the latest analyzed bar (decision.atr_pct, injected by the
+    # monitor) - high-volatility symbols get a noise-safe minimum while quiet
+    # symbols keep tight structural stops. Without atr_pct the plain
+    # min_stop_distance_pct floor applies. (P0-2 / 动态止损下限)
+    min_stop_mode: Literal["fixed", "atr"] = "fixed"
     min_stop_distance_pct: float = Field(default=0.45, ge=0.0, le=10.0)
+    min_stop_atr_multiple: float = Field(default=0.8, ge=0.0, le=10.0)
     # Rate-limit recovery: when Binance rejects a signal with HTTP 418/-1003/429
     # (shared Testnet IP bans), the whole signal is retried with exponential
     # backoff. execution_retry_max_attempts counts the initial attempt, so 1

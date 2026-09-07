@@ -14,6 +14,7 @@ from pa_agent.monitoring.cli import format_decision_result
 from pa_agent.monitoring.service import (
     MultiSymbolMonitor,
     _default_validate_symbols,
+    _frame_atr_pct,
     next_poll_at,
     timeframe_seconds,
 )
@@ -693,3 +694,27 @@ def test_monitor_auto_execution_disabled_by_default_returns_skipped(
     monitor._save_order_opportunity(
         _order_frame(), _order_decision(), _order_decision()["decision"], _record_double()
     )
+
+
+def test_frame_atr_pct_converts_latest_atr_to_percent() -> None:
+    frame = type("Frame", (), {
+        "indicators": type("Ind", (), {"atr14": (1.5, 2.0)})(),
+        "bars": (type("Bar", (), {"close": 100})(),),
+    })()
+    assert _frame_atr_pct(frame) == 1.5
+
+
+def test_frame_atr_pct_returns_none_when_unavailable() -> None:
+    assert _frame_atr_pct(type("Frame", (), {})()) is None
+    no_ind = type("Frame", (), {"bars": (object(),)})()
+    assert _frame_atr_pct(no_ind) is None
+    nan_frame = type("Frame", (), {
+        "indicators": type("Ind", (), {"atr14": (float("nan"),)})(),
+        "bars": (type("Bar", (), {"close": 100})(),),
+    })()
+    assert _frame_atr_pct(nan_frame) is None
+    zero_close = type("Frame", (), {
+        "indicators": type("Ind", (), {"atr14": (2.0,)})(),
+        "bars": (type("Bar", (), {"close": 0})(),),
+    })()
+    assert _frame_atr_pct(zero_close) is None

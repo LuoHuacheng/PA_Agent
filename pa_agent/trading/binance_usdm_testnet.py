@@ -165,6 +165,32 @@ def _stop_gap_pct(reference: Decimal, stop: Decimal) -> Decimal:
     return (abs(reference - stop) / reference) * 100
 
 
+def _stop_distance_floor_pct(
+    config: BinanceUSDMTestnetSettings, decision: dict[str, Any]
+) -> Decimal:
+    """Effective minimum entry->stop distance in percent.
+
+    fixed mode returns the constant min_stop_distance_pct. atr mode lifts the
+    floor to min_stop_atr_multiple x the latest analyzed bar ATR% (decision
+    field atr_pct, injected by the monitor) whenever that is wider, so
+    high-volatility symbols keep a noise-safe minimum while quiet symbols
+    retain tight structural stops. Without ATR info it degrades to the fixed
+    floor.
+    """
+    floor = Decimal(str(getattr(config, "min_stop_distance_pct", 0.45) or 0.45))
+    mode = str(getattr(config, "min_stop_mode", "fixed") or "fixed").strip().lower()
+    if mode != "atr":
+        return floor
+    try:
+        atr_pct = float(decision.get("atr_pct") or 0.0)
+    except (TypeError, ValueError):
+        atr_pct = 0.0
+    if atr_pct <= 0:
+        return floor
+    multiple = Decimal(str(getattr(config, "min_stop_atr_multiple", 0.8) or 0.8))
+    return max(floor, multiple * Decimal(str(atr_pct)))
+
+
 def _entry_client_id(signal_id: str) -> str:
     """Deterministic clientOrderId per signal.
 
@@ -749,11 +775,12 @@ def _execute_market_signal_once(
         if side == "SELL" and not (target < price < stop):
             return ExecutionResult("rejected", "Short requires target < mark price < stop")
         gap = _stop_gap_pct(price, stop)
-        if gap < Decimal(str(config.min_stop_distance_pct)):
+        stop_floor = _stop_distance_floor_pct(config, decision)
+        if gap < stop_floor:
             return ExecutionResult(
                 "rejected",
                 f"Stop loss too close to market price "
-                f"({gap:.3f}% < {config.min_stop_distance_pct}% minimum)",
+                f"({gap:.3f}% < {stop_floor:.3f}% minimum)",
                 symbol,
             )
         active_client.set_leverage(symbol, leverage)
@@ -837,11 +864,12 @@ def _execute_limit_signal(
             return ExecutionResult("rejected", "Short limit requires limit price < stop")
         crosses_mark = entry_price <= mark_price
     gap = _stop_gap_pct(mark_price if crosses_mark else entry_price, stop)
-    if gap < Decimal(str(config.min_stop_distance_pct)):
+    stop_floor = _stop_distance_floor_pct(config, decision)
+    if gap < stop_floor:
         return ExecutionResult(
             "rejected",
             f"Stop loss too close to entry "
-            f"({gap:.3f}% < {config.min_stop_distance_pct}% minimum)",
+            f"({gap:.3f}% < {stop_floor:.3f}% minimum)",
             symbol,
         )
     if crosses_mark:
