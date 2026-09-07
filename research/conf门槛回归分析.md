@@ -62,8 +62,10 @@ net -13.85; >=60 n=11 wr36.4% net -28.89. conf<60 n=36 wr55.6% net +16.60.
 
 - 形态: 数据回流基建 = tools/trade_pnl_report.py 增加 conf 5 分位分桶与
   持仓时长分桶输出 (离线 fapi 重建 + CSV conf 关联, 精确 realized/fees).
-- 运行时自动改门槛/注入胜率: 在样本 >= 100 前不做 (本文件回归显示 conf
-  60-64 段反最差, 自动门槛会被噪声带偏); 达到样本后重跑本分析再拍板.
+- 运行时闸门(默认关): conf_feedback_mode=off 保持现状(代码已带); 开启需桶样本
+  >= conf_feedback_min_samples(默认30) 且定期跑 trade_pnl_report.py
+  --conf-buckets-out trade_records/conf_buckets.json, executor 用桶实测胜率覆盖
+  estimated_win_rate 参与交易者方程. 回归显示 conf 60-64 段反最差, 未达标前保持 off.
 - 操作: 定期执行 .venv/bin/python tools/trade_pnl_report.py --days 5 查看
   分桶, 与本次基线比对 (缓存 /tmp/pa-reg-cache-5d 可复用).
 
