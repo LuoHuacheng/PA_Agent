@@ -128,16 +128,10 @@
     "require_analysis_symbol_match": true,
     "symbol": "BTCUSDT",
     "symbol_whitelist": [
-      "BTCUSDT",
       "ETHUSDT",
-      "BNBUSDT",
-      "XRPUSDT",
-      "SOLUSDT",
-      "TRXUSDT",
-      "ZECUSDT",
-      "DOGEUSDT",
       "LINKUSDT",
-      "ADAUSDT"
+      "XRPUSDT",
+      "TRXUSDT"
     ],
     "leverage": 20,
     "max_notional_usdt": 100.0,
@@ -155,7 +149,7 @@
     "breakeven_min_confidence": 55,
     "breakeven_poll_seconds": 10,
     "tp_partial_close_pct": 0,
-    "structure_exit_mode": "dry_run",
+    "structure_exit_mode": "on",
     "structure_exit_confirm_bars": 2,
     "direction_gates_mode": "dry_run"
   },
