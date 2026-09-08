@@ -1538,20 +1538,23 @@ def test_guard_move_still_places_breakeven_when_original_stop_unknown(
     assert record and record["moved"] is True
 
 
-def test_guard_gives_up_after_repeated_cancel_errors(monkeypatch) -> None:
-    """撤单持续失败(非-2011)时有限重试后放弃, 不会无限空转。"""
+def test_guard_keeps_new_stop_when_old_cancel_fails(monkeypatch) -> None:
+    """先挂后撤: 撤旧失败(非-2011)不重试不裸奔——新保本单已在场, 标记 moved。"""
     sleeps: list[float] = []
     monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
-    client = BrokenCancelClient([111] * 20)  # trigger keeps being reached
+    client = BrokenCancelClient([111])  # mark 111 >= 1R(110)
     _register_test_guard()
     binance_usdm_testnet._breakeven_guard_loop(
         client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0
     )
     places = [c[1] for c in client.calls if c[0] == "protection"]
-    assert places == [], "must not place a replacement while cancel keeps failing"
+    assert len(places) == 1, "breakeven replacement must be placed first"
+    assert places[0]["stop_price"] == Decimal("100")
+    cancels = [c for c in client.calls if c[0] == "cancel_protection"]
+    assert len(cancels) == 1, "old-stop cancel attempted once (no retry storm)"
     record = binance_usdm_testnet._read_guard("BTCUSDT")
-    assert record and record["moved"] is False
-    assert len(sleeps) <= 6  # bounded retries: 5 failures + give-up
+    assert record and record["moved"] is True
+    assert record["stop_algo_id"] != "pa-sl-old0001"
 
 # ---- 30d 日线大趋势护栏 ------------------------------------------------
 
@@ -2593,6 +2596,51 @@ def test_watcher_wake_registry_cleans_up_on_exit(monkeypatch) -> None:
     )
     with binance_usdm_testnet._watcher_wake_lock:
         assert "pa-entry-clean" not in binance_usdm_testnet._watcher_wake_events
+
+
+# ---------------------------------------------------------------------------
+# -2021 立即触发预检 (breakeven at entry after mark crossed back)
+# ---------------------------------------------------------------------------
+
+
+def test_stop_would_immediately_trigger_strict_sides() -> None:
+    f = binance_usdm_testnet._stop_would_immediately_trigger
+    # 多单离场(SELL): mark 严格低于 trigger 才立即触发
+    assert f("SELL", Decimal("100"), Decimal("99.9")) is True
+    assert f("SELL", Decimal("100"), Decimal("100")) is False  # 相等可挂
+    assert f("SELL", Decimal("100"), Decimal("100.1")) is False
+    # 空单离场(BUY): mark 严格高于 trigger 才立即触发
+    assert f("BUY", Decimal("100"), Decimal("100.1")) is True
+    assert f("BUY", Decimal("100"), Decimal("100")) is False
+    assert f("BUY", Decimal("100"), Decimal("99.9")) is False
+
+
+def test_tp_runner_skips_breakeven_when_mark_crossed_back(monkeypatch) -> None:
+    """mark 已回吐穿 entry(TP1 成交后急跌): 保本单会 -2021, runner 保留原 SL
+    并标记 moved, TP2 阶段照常推进, 不再反复尝试挂保本。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+
+    class CrossedRunnerClient(PartialRunnerClient):
+        def mark_price(self, symbol: str) -> Decimal:
+            self.calls.append(("mark_price", symbol))
+            return Decimal("99")  # 低于 entry 100 -> 预检拦截
+
+    _register_tp_record()
+    client = CrossedRunnerClient([2, 1])  # 第二轮 amount 半仓进入 TP2 阶段
+    binance_usdm_testnet._tp_runner_loop(
+        client=client, symbol="BTCUSDT", poll_seconds=1.0
+    )
+    breakeven_places = [
+        c[1] for c in client.calls
+        if c[0] == "protection" and c[1].get("stop_price") == Decimal("100")
+    ]
+    assert breakeven_places == [], "must not place an immediately-triggering breakeven stop"
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["moved"] is True, "runner must mark moved to stop retrying"
+    assert record["stop_algo_id"] == "pa-sl-old0001", "original stop stays in place"
+
 
 
 

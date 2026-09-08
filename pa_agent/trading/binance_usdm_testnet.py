@@ -169,6 +169,27 @@ def _observe_rate_limit_error(message: str) -> None:
     rate_limiter.record_ban(until_ms=until_ms)
 
 
+def _stop_would_immediately_trigger(
+    exit_side: str, trigger_price: Decimal, mark: Decimal
+) -> bool:
+    """True when a STOP at *trigger_price* would be rejected (-2021) because
+    the mark is already on/beyond the trigger side.
+
+    A breakeven stop sits at the entry price; when the mark has already moved
+    back through the entry (profit given back), placing it would immediately
+    trigger and the exchange answers -2021. Callers skip the placement (the
+    original protective stop stays in place) instead of retrying into the
+    error.
+    """
+    # 严格比较: mark 与 trigger 相等时交易所不判立即触发(可挂单),
+    # 只有 mark 已严格越过 trigger 侧才拒绝.
+    if exit_side == "SELL":  # 多单离场: 价格跌破 trigger 触发
+        return mark < trigger_price
+    if exit_side == "BUY":  # 空单离场: 价格升破 trigger 触发
+        return mark > trigger_price
+    return False
+
+
 #: Upper bound for guard-loop cooldown sleeps while a ban is live; keeps a
 #: guard responsive shortly after the ban ends without spamming the API.
 _RATE_LIMIT_COOLDOWN_CAP_SECONDS = 300.0
@@ -1728,36 +1749,23 @@ def _breakeven_guard_loop(
             if not live_stop:
                 return
             exit_side = "SELL" if side == "BUY" else "BUY"
-            try:
-                client.cancel_algo_order(client_algo_id=live_stop)
-            except BinanceAPIError as exc:
-                if _is_missing_algo_order_error(exc):
-                    # 原 STOP 单已不在交易所(撤单成功残留/重启/手动取消):
-                    # 视为撤单完成, 直接补挂保本单, 绝不让持仓裸奔。
-                    logger.warning(
-                        "Breakeven guard: original stop %s for %s already gone (%s); "
-                        "placing breakeven stop at entry",
-                        stop_algo_id,
-                        symbol,
-                        exc,
-                    )
-                else:
-                    consecutive_errors += 1
-                    logger.error(
-                        "Breakeven stop move failed for %s (kept original stop at %s): %s",
-                        symbol,
-                        _decimal_text(stop0),
-                        exc,
-                    )
-                    if consecutive_errors >= 5:
-                        logger.error(
-                            "Breakeven guard gave up moving stop for %s after repeated "
-                            "cancel errors; original stop may still be resting",
-                            symbol,
-                        )
-                        return
-                    time.sleep(poll_seconds)
-                    continue
+            if _stop_would_immediately_trigger(exit_side, entry, mark):
+                # 浮盈已回吐(价格回到入场另一侧): 保本 STOP 会立即触发被拒(-2021),
+                # 原止损保留; 回到主循环等价格重新满足移损条件, 避免反复失败刷屏。
+                logger.info(
+                    "Breakeven guard: mark %s already through entry %s for %s; "
+                    "keeping original stop %s",
+                    _decimal_text(mark),
+                    _decimal_text(entry),
+                    symbol,
+                    live_stop,
+                )
+                consecutive_errors = 0
+                time.sleep(poll_seconds)
+                continue
+            # 安全顺序(与 TP runner 一致): 先挂新保本单, 成功后再撤旧止损.
+            # 任一步失败旧止损仍 resting, 持仓绝不裸奔; 新旧短暂并存时由
+            # closePosition 的仓位清理语义兜底。
             new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
             try:
                 client.place_close_algo_order(
@@ -1770,8 +1778,8 @@ def _breakeven_guard_loop(
             except BinanceAPIError as exc:
                 consecutive_errors += 1
                 logger.error(
-                    "Breakeven stop placement failed for %s (%s), position may be "
-                    "unprotected: %s",
+                    "Breakeven stop placement failed for %s (%s), original stop "
+                    "kept resting: %s",
                     symbol,
                     stop_algo_id,
                     exc,
@@ -1779,12 +1787,33 @@ def _breakeven_guard_loop(
                 if consecutive_errors >= 5:
                     logger.error(
                         "Breakeven guard gave up placing breakeven stop for %s after "
-                        "repeated errors; position is unprotected",
+                        "repeated errors; original stop stays in place",
                         symbol,
                     )
                     return
                 time.sleep(poll_seconds)
                 continue
+            try:
+                client.cancel_algo_order(client_algo_id=live_stop)
+            except BinanceAPIError as exc:
+                if _is_missing_algo_order_error(exc):
+                    logger.warning(
+                        "Breakeven guard: original stop %s for %s already gone (%s)",
+                        live_stop,
+                        symbol,
+                        exc,
+                    )
+                else:
+                    # 撤旧失败: 新旧并存, closePosition 对空仓的清理语义兜底,
+                    # 不再回滚(回滚反而可能裸奔); 下次入场会替换残留单。
+                    logger.warning(
+                        "Breakeven guard: old stop %s cancel failed for %s (%s); "
+                        "new breakeven stop %s is in place",
+                        live_stop,
+                        symbol,
+                        exc,
+                        new_stop_id,
+                    )
             _patch_guard(symbol, moved=True, stop_algo_id=new_stop_id)
             logger.info(
                 "Breakeven stop moved to entry for %s %s (trigger=%s mark=%s)",
@@ -1911,6 +1940,10 @@ def _tp_runner_loop(
             if not current_stop or not current_tp:
                 return
             exit_side = "SELL" if side == "BUY" else "BUY"
+            try:
+                mark = current_mark_price(client, symbol)
+            except BinanceAPIError:
+                mark = None  # 预检尽力而为: 拿不到 mark 则保持原行为
             # 先清可能仍 resting 的 TP1 部分单(已成交时 -2011/-2013 视为已清):
             # 手动减仓等场景不能让孤儿部分单对新仓位生效。
             try:
@@ -1942,6 +1975,22 @@ def _tp_runner_loop(
                     continue
             if moved:
                 new_stop_id = current_stop  # 保本已由 guard 完成, SL 不动
+            elif mark is not None and _stop_would_immediately_trigger(
+                exit_side, entry, mark
+            ):
+                # 浮盈已回吐(mark 回到入场另一侧): 保本 STOP 会立即触发被拒(-2021).
+                # 保留原 SL 并标记 moved: TP2 阶段照常推进, 不再反复尝试挂保本.
+                logger.info(
+                    "TP runner: mark %s already through entry %s for %s; "
+                    "keeping original stop %s and proceeding with TP2",
+                    _decimal_text(mark),
+                    _decimal_text(entry),
+                    symbol,
+                    current_stop,
+                )
+                moved = True
+                _patch_guard(symbol, moved=True)
+                new_stop_id = current_stop
             else:
                 # C1: 先挂新保本 STOP 再撤旧 SL - 任一步失败旧止损仍 resting, 不裸奔。
                 new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
