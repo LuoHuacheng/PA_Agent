@@ -117,7 +117,9 @@
     "max_concurrent_analyses": 1,
     "poll_lead_seconds": 5,
     "poll_retry_attempts": 3,
-    "poll_retry_seconds": 5
+    "poll_retry_seconds": 5,
+    "light_mode_enabled": false,
+    "light_mode_max_quiet_bars": 3
   },
   "tushare": {
     "token": ""

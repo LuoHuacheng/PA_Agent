@@ -459,6 +459,67 @@ def build_stage2_gate_wait_response(stage1_json: dict[str, Any]) -> dict[str, An
     }
 
 
+def build_stage2_light_skip_response(
+    stage1_json: dict[str, Any], *, reason: str
+) -> dict[str, Any]:
+    """Synthesize Stage2 JSON when the monitor light-mode skips Stage 2.
+
+    Programmatic keepalive (light_skip_stage2=True marker): no model call,
+    no order, decision_trace empty. Mirrors build_stage2_gate_wait_response
+    so downstream GUI/record consumers see the usual schema.
+    """
+    cycle = stage1_json.get("cycle_position", "")
+    direction = stage1_json.get("direction", "")
+    key_signals = stage1_json.get("key_signals") or []
+    return {
+        "decision": {
+            "order_direction": None,
+            "order_type": "不下单",
+            "entry_price": None,
+            "take_profit_price": None,
+            "take_profit_price_2": None,
+            "stop_loss_price": None,
+            "reasoning": (
+                f"监控轻量模式：{reason}。本轮未调用阶段二模型，"
+                "不下单；结构事件出现或信号质量达标时自动恢复完整分析。"
+            ),
+            "diagnosis_confidence": stage1_json.get("diagnosis_confidence", 0),
+            "diagnosis_confidence_reasoning": "沿用阶段一诊断置信度。",
+            "trade_confidence": 0,
+            "trade_confidence_reasoning": "轻量模式未评估交易。",
+            "estimated_win_rate": None,
+            "estimated_win_rate_reasoning": "未进入 §10.3，无胜率估计。",
+            "key_factors": list(key_signals)[:5],
+            "watch_points": ["等待结构事件或程序特征变化后恢复阶段二评估"],
+            "risk_assessment": "轻量模式仅做诊断保活，不产生交易方案。",
+            "invalidation_condition": None,
+        },
+        "diagnosis_summary": {
+            "cycle_position": cycle,
+            "direction": direction,
+            "key_signals": list(key_signals),
+        },
+        "decision_trace": [],
+        "terminal": {"node_id": "light", "outcome": "wait", "label": "轻量模式跳过阶段二"},
+        "light_skip_stage2": True,
+        "next_bar_prediction": {
+            "direction": None,
+            "probabilities": None,
+            "reasoning": "轻量模式未调用模型，不预测下一根 K 线。",
+            "unpredictable": True,
+            "features_used": ["stage1_diagnosis"],
+        },
+        "next_cycle_prediction": {
+            "cycle": None,
+            "direction": None,
+            "probabilities": None,
+            "reasoning": "轻量模式未进入周期演变评估。",
+            "unpredictable": True,
+            "features_used": ["stage1_diagnosis"],
+        },
+    }
+
+
 def validate_gate_result_consistency(stage1: dict[str, Any]) -> list[str]:
     """Return list of consistency error messages (empty if ok)."""
     errors: list[str] = []

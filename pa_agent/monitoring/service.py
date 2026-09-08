@@ -227,6 +227,8 @@ class MultiSymbolMonitor:
         self._next_refresh_at: float | None = None
         #: Per-symbol structure-failure negation streak (dir + consecutive bars).
         self._structure_exit_streak: dict[str, dict[str, object]] = {}
+        #: C3 light-mode: quiet-bar counter per symbol::timeframe key.
+        self._light_quiet: dict[str, int] = {}
         #: Direction-gate rejection counters keyed by gate name (G1/G2...).
         self._direction_gate_stats: dict[str, int] = {}
         self._load_state()
@@ -662,12 +664,15 @@ class MultiSymbolMonitor:
             exp_reader=self._ctx.exp_reader,
             settings=self._settings,
         )
+        key = self._key_text((frame.symbol, frame.timeframe))
+        light_judge = self._light_mode_judge(key, previous_record)
         record = orchestrator.submit(
             frame,
             CancelToken(),
             lambda _event: None,
             previous_record=previous_record,
             incremental_new_bar_count=incremental_new_bar_count,
+            light_skip_judge=light_judge,
         )
         if record_sink is not None and record is not None:
             record_sink.previous_record = record
@@ -810,6 +815,38 @@ class MultiSymbolMonitor:
             "[方向闸门] %s %s 拦截 %s: %s", frame.symbol, frame.timeframe, gates, detail
         )
         return True
+
+    def _light_mode_judge(self, key: str, previous_record: Any):
+        """Return a stage1->reason judge when light mode is enabled (C3).
+
+        Called by the orchestrator after stage 1 completes with the real
+        stage-1 JSON. The judge resets on structure events / active plans and
+        only returns a skip reason after max_quiet_bars consecutive quiet
+        bars; a non-empty reason means the model Stage-2 call is skipped.
+        """
+        if not getattr(self._cfg, "light_mode_enabled", False):
+            return None
+
+        def _judge(stage1_json: dict) -> str:
+            from pa_agent.monitoring.light_gate import (
+                record_has_active_plan,
+                stage1_of_record,
+                structure_event_detected,
+            )
+
+            if record_has_active_plan(previous_record):
+                self._light_quiet[key] = 0
+                return ""
+            if structure_event_detected(stage1_of_record(previous_record), stage1_json):
+                self._light_quiet[key] = 0
+                return ""
+            max_quiet = int(getattr(self._cfg, "light_mode_max_quiet_bars", 3) or 3)
+            self._light_quiet[key] = self._light_quiet.get(key, 0) + 1
+            if self._light_quiet[key] < max_quiet:
+                return ""
+            return f"连续安静 {self._light_quiet[key]} 根无结构事件"
+
+        return _judge
 
     def _evaluate_structure_exit(self, frame: Any, record: Any) -> None:
         """React to diagnosis negation while a pa-entry position is open.

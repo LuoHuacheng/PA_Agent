@@ -382,6 +382,9 @@ class MonitoringSettings(BaseModel):
     poll_lead_seconds: int = Field(default=5, ge=0, le=120)
     poll_retry_attempts: int = Field(default=3, ge=0, le=10)
     poll_retry_seconds: int = Field(default=5, ge=1, le=120)
+    #: C3 轻量模式: 无结构事件连续安静达 N 根时跳过阶段二(默认关, monitor only).
+    light_mode_enabled: bool = False
+    light_mode_max_quiet_bars: int = Field(default=3, ge=1, le=24)
 
 
 class FeedbackSettings(BaseModel):

@@ -350,6 +350,7 @@ class TwoStageOrchestrator:
         on_stage2_files: Callable[[list[str]], None] | None = None,
         previous_record: AnalysisRecord | None = None,
         incremental_new_bar_count: int | None = None,
+        light_skip_judge: Callable[[dict], str] | None = None,
     ) -> AnalysisRecord:
         """Run the two-stage analysis pipeline and return an AnalysisRecord.
 
@@ -685,6 +686,44 @@ class TwoStageOrchestrator:
                         e.model_dump() if hasattr(e, "model_dump") else dict(e)
                         for e in experience_entries
                     ],
+                    "usage_total": usage_total,
+                    "exception": None,
+                }
+            )
+            self._pending_writer.save_full(record)
+            on_event(OrchestratorEvent.RecordSaved)
+            return record
+
+        # ── Step 13.5: Monitor light mode (C3) ────────────────────────────────
+        # No model Stage-2 call: the program synthesizes a keepalive decision
+        # (light_skip_stage2=True) so GUI/record consumers see the usual schema.
+        light_skip_stage2_reason = (
+            light_skip_judge(stage1_json) if light_skip_judge is not None else ""
+        )
+        if light_skip_stage2_reason:
+            from pa_agent.ai.decision_tree import build_stage2_light_skip_response
+
+            if on_stage_prompt is not None:
+                on_stage_prompt("stage2", "", f"（轻量模式：{light_skip_stage2_reason}）")
+            _emit_buffered_stream(
+                f"阶段二跳过（轻量模式：{light_skip_stage2_reason}），保持阶段一诊断保活。\n",
+                on_stage2_content,
+            )
+            stage2_json = build_stage2_light_skip_response(
+                stage1_json, reason=light_skip_stage2_reason
+            )
+            on_event(OrchestratorEvent.Stage2Done)
+            usage_total = _accumulate_usage(record.usage_total, reply_s1.usage)
+            record = record.model_copy(
+                update={
+                    "stage1_messages": messages_s1,
+                    "stage1_response": reply_s1.raw,
+                    "stage1_diagnosis": stage1_json,
+                    "stage2_messages": [],
+                    "stage2_response": None,
+                    "stage2_decision": stage2_json,
+                    "strategy_files_used": strategy_files,
+                    "experience_loaded": [],
                     "usage_total": usage_total,
                     "exception": None,
                 }
