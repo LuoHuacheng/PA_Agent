@@ -989,6 +989,38 @@ class PromptAssembler:
         lines.append(_KLINE_INDICATOR_NOTE)
         return "\n".join(lines)
 
+    def _stage1_kline_limit(self) -> int | None:
+        """Configured stage-1 table row cap (0/None = full table)."""
+        cfg = self._prompt_settings
+        if cfg is None:
+            return None
+        try:
+            value = int(getattr(cfg, "stage1_kline_rows_limit", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    @staticmethod
+    def _render_kline_rollup_block(frame: KlineFrame, limit: int | None) -> str:
+        """Ten-bar rollup of the bars trimmed away by the table limit; '' when
+        the limit is unset or covers the whole frame."""
+        if not limit or limit >= len(frame.bars):
+            return ""
+        bars = frame.bars
+        lines = ["#### 更早 K 线概览(程序压缩, 精确价位以程序结构位/特征为准)"]
+        for start in range(int(limit), len(bars), 10):
+            chunk = bars[start:start + 10]
+            if not chunk:
+                continue
+            hi = max(float(b.high) for b in chunk)
+            lo = min(float(b.low) for b in chunk)
+            first, last = chunk[0], chunk[-1]
+            lines.append(
+                f"- K{first.seq}-K{last.seq}: 高{hi:.10g} 低{lo:.10g} "
+                f"收 {last.close:.10g}->{first.close:.10g}"
+            )
+        return "\n".join(lines)
+
     @staticmethod
     def _render_kline_feature_table(frame: KlineFrame, limit: int | None = None) -> str:
         """Render方案 A single-bar geometry features for prompt grounding."""
@@ -1039,10 +1071,13 @@ class PromptAssembler:
 
     # ── Stage 1 ───────────────────────────────────────────────────────────────
 
-    def build_stage1(self, frame: KlineFrame, *, analysis_mode: str = "original") -> list[dict]:
+    def build_stage1(self, frame: KlineFrame, *, analysis_mode: str = "original",
+                     htf_block: str = "") -> list[dict]:
         """Build the message list for Stage 1 (market diagnosis)."""
         system_content = self._build_stage1_system_prompt()
-        user_content = self._build_stage1_user_prompt(frame, analysis_mode=analysis_mode)
+        user_content = self._build_stage1_user_prompt(
+            frame, analysis_mode=analysis_mode, htf_block=htf_block
+        )
 
         return [
             {"role": "system", "content": system_content},
@@ -1289,7 +1324,8 @@ class PromptAssembler:
             return ""
 
     def _build_stage1_user_prompt(
-        self, frame: KlineFrame, *, analysis_mode: str = "original"
+        self, frame: KlineFrame, *, analysis_mode: str = "original",
+        htf_block: str = "",
     ) -> str:
         """Build the Stage 1 task turn; stage-specific rules stay out of system."""
         pattern_block = self._stage1_pattern_supplement()
@@ -1300,8 +1336,10 @@ class PromptAssembler:
             _stage1_output_reminder_for_mode(analysis_mode),
         ]
         stage1_context = "\n\n---\n\n".join(p for p in stage1_parts if p)
-        kline_table = self._render_kline_table(frame)
-        feature_table = self._render_kline_feature_table(frame)
+        kline_limit = self._stage1_kline_limit()
+        kline_table = self._render_kline_table(frame, kline_limit)
+        feature_table = self._render_kline_feature_table(frame, kline_limit)
+        rollup_block = self._render_kline_rollup_block(frame, kline_limit)
         simple_features_block = self._render_simple_market_features_block(frame)
         n_bars = len(frame.bars)
         if n_bars > 40:
@@ -1311,6 +1349,7 @@ class PromptAssembler:
                 f"**长程背景**（当前仅 {n_bars} 根，不足 41 根，与近期窗口重叠；"
                 f"以程序预填 §2.2 为准）：\n"
             )
+        cycle_block = self._render_cycle_candidates_block(frame)
         return (
             "## 阶段一任务\n\n"
             "你现在只执行阶段一：市场诊断与闸门判断。不要评估具体下单、止损、止盈或仓位。\n\n"
@@ -1318,6 +1357,7 @@ class PromptAssembler:
             "---\n\n"
             f"## 当前分析目标\n\n"
             f"品种:{frame.symbol} 周期:{frame.timeframe} K线数量:{n_bars}\n"
+            f"{htf_block + chr(10) if htf_block else ''}"
             f"（K线序号：1=最新已收盘，最大 K{n_bars}；"
             f"每个决策节点的 bar_range 由你自行选择子区间，勿超出 K{n_bars}-K1）\n\n"
             f"## ⚠️ 分析窗口分层规则（与程序 §2.2/§2.3/§2.4 预填一致，必须遵守）\n\n"
@@ -1337,14 +1377,29 @@ class PromptAssembler:
             f"## K线数据(序号1=最新已收盘K线,序号越大越早;不含当前未收盘K线;"
             f"阳阴列由程序按收盘价与开盘价计算:收盘>开盘=阳线,收盘<开盘=阴线,相等=平)\n\n"
             f"{kline_table}\n\n"
+            f"{rollup_block + chr(10) if rollup_block else ''}"
             "## K线几何特征(程序预计算；「类型」列为单字段 bar_type，判定优先级：inside/outside > doji/trend/flat/other；"
             "不替代周期判断；基于当前 N 根已收盘 K 线，指标非全历史延续)\n\n"
             f"{feature_table}\n\n"
             + (f"{simple_features_block}\n\n" if simple_features_block else "")
             + (f"{prefill_hint}\n\n" if prefill_hint else "")
+            + (f"{cycle_block}\n\n" if cycle_block else "")
             + f"请根据以上数据，严格输出阶段一 JSON 诊断结果。\n\n"
             f"{_STAGE1_TAIL_REMINDER}"
         )
+
+    def _render_cycle_candidates_block(self, frame: KlineFrame) -> str:
+        """Task B1: program cycle candidate block for the stage-1 user turn."""
+        try:
+            from pa_agent.ai.cycle_candidates import (
+                build_metrics,
+                render_cycle_candidates_block as render,
+                score_cycle,
+            )
+
+            return render(score_cycle(build_metrics(frame)))
+        except Exception:  # noqa: BLE001 - best-effort routing hint
+            return ""
 
     def _build_incremental_stage1_user_prompt(
         self,
@@ -1750,6 +1805,8 @@ class PromptAssembler:
             if omit_kline_block
             else "本消息下方附有完整 K 线表与几何特征。\n\n"
         )
+        feedback_stats = self._feedback_stats_block()
+        node_prefill_block = self._render_node_prefills_block(frame, stage1_json)
         return (
             f"{_STAGE2_API_TASK_RULE}\n\n"
             "## 阶段二任务\n\n"
@@ -1762,12 +1819,52 @@ class PromptAssembler:
             f"{compact_s1}"
             f"\n```\n\n"
             f"{kline_block}"
+            f"{node_prefill_block + chr(10) if node_prefill_block else ''}"
             f"{prev_pred_block + chr(10) if prev_pred_block else ''}"
             f"请根据以上诊断和K线数据,按《二元决策.txt》§3–§11、§14 输出 JSON 决策结果"
             f"(含 decision_trace 与 terminal)。\n"
             f"注意:如果判断不下单,entry_price、take_profit_price、take_profit_price_2、stop_loss_price、order_direction 必须全部为 null。\n\n"
+            f"{feedback_stats + chr(10) + chr(10) if feedback_stats else ''}"
             f"{_STAGE2_TAIL_REMINDER}"
         )
+
+    def _feedback_stats_block(self) -> str:
+        """Phase-A 历史胜率先验块:只在 feedback.enabled 时注入到阶段二末尾.
+
+        动态文本放在 user 消息尾部(最终输出提醒之前), 静态前缀保持
+        byte-identical 以复用 KV cache; 任何失败都静默返回空串,
+        绝不打断分析流程.
+        """
+        try:
+            from pa_agent.config.settings import load_settings
+            from pa_agent.feedback.base_rate_injector import load_stats_block
+
+            feedback = load_settings().feedback
+            return load_stats_block(feedback)
+        except Exception:  # noqa: BLE001 - best-effort injection
+            return ""
+
+    def _render_node_prefills_block(
+        self, frame: KlineFrame, stage1_json: dict
+    ) -> str:
+        """Task B2: §6.3 boundary / §9.0 signal-bar quality program prefills."""
+        try:
+            from pa_agent.ai.kline_features import compute_kline_geometry_features
+            from pa_agent.ai.market_features import compute_simple_market_features
+            from pa_agent.ai.node_prefills import (
+                prefill_boundary,
+                prefill_signal_quality,
+                render_node_prefills_block as render,
+            )
+
+            _ = stage1_json  # boundary/quality are frame-local; context used later
+            features = compute_simple_market_features(frame)
+            boundary = prefill_boundary(features)
+            geo = compute_kline_geometry_features(frame, limit=1)
+            quality = prefill_signal_quality(geo[0]) if geo else None
+            return render(boundary=boundary, quality=quality)
+        except Exception:  # noqa: BLE001 - best-effort prefill block
+            return ""
 
     def stage2_system_prompt_only(
         self,

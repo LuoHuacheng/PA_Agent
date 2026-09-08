@@ -28,6 +28,8 @@ from _pa_sim_common import (
     window_bounds,
 )
 
+from pa_agent.trading.replay_pairing import classify_outcome
+
 
 def net(t):
     return t["realized"] + t["fees"]
@@ -37,8 +39,9 @@ def stat(ts, unreal_map):
     closed = [t for t in ts if t.get("closed_at")]
     opened = [t for t in ts if not t.get("closed_at")]
     nets = [net(t) for t in closed]
-    wins = [n for n in nets if n > 0]
-    loss = [n for n in nets if n < 0]
+    # Q3 repo-wide: net == 0 counts as loss (shared classify_outcome)
+    wins = [n for n in nets if classify_outcome(n) == "win"]
+    loss = [n for n in nets if classify_outcome(n) == "loss"]
     unreal = sum(unreal_map.get(t["sym"], 0.0) for t in opened)
     return {
         "n": len(ts), "closed": len(closed), "open": len(opened),

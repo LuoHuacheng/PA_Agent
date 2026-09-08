@@ -43,6 +43,9 @@ class PromptSettings(BaseModel):
     experience_max_chars_per_entry: int = Field(default=400, ge=100, le=4000)
     #: Inject pattern判定表 + 速查 brief into Stage 1 user prompt (reduces missed tags).
     stage1_inject_pattern_briefs: bool = True
+    #: 阶段一 K 线表最多渲染的最近 K 行数; 0 = 不裁剪(默认, 全量). 裁剪时
+    #: 更早的 K 线以十根滚轴概览补充 (Phase C A/B 实验开关).
+    stage1_kline_rows_limit: int = Field(default=0, ge=0, le=60)
 
 
 class ValidationSettings(BaseModel):
@@ -379,6 +382,37 @@ class MonitoringSettings(BaseModel):
     poll_lead_seconds: int = Field(default=5, ge=0, le=120)
     poll_retry_attempts: int = Field(default=3, ge=0, le=10)
     poll_retry_seconds: int = Field(default=5, ge=1, le=120)
+    #: C3 轻量模式: 无结构事件连续安静达 N 根时跳过阶段二(默认关, monitor only).
+    light_mode_enabled: bool = False
+    light_mode_max_quiet_bars: int = Field(default=3, ge=1, le=24)
+    #: D1 HTF 背景摘要: 每根 K 线收盘额外拉取高周期程序特征(默认关).
+    htf_context_enabled: bool = False
+    htf_timeframes: list[str] = Field(default_factory=lambda: ["1h", "4h"])
+    htf_max_summary_chars: int = Field(default=400, ge=100, le=2000)
+
+
+class FeedbackSettings(BaseModel):
+    """结果回灌闭环（Phase A）：base-rate 统计与校准工具的参数。
+
+    全部默认关/默认安全：enabled 打开只影响离线统计与 prompt 注入，
+    不触碰执行路径（binance_usdm_* 节才是自动交易开关）。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    #: 统计滚动窗口（自然日）。
+    days: int = Field(default=30, ge=1, le=365)
+    #: 分组至少需多少已平仓样本才给出胜率/期望（门控，禁止小样本硬编）。
+    min_samples: int = Field(default=10, ge=1, le=1000)
+    #: 注入 stage2 的历史先验最大行数。
+    max_prompt_lines: int = Field(default=6, ge=1, le=30)
+    #: 决策可使用的分组键（strategy_file / cycle_direction）。
+    group_bys: list[str] = Field(
+        default_factory=lambda: ["strategy_file", "cycle_direction"]
+    )
+    #: 决策记录与成交归属的最大时间窗（小时）。
+    join_hours: int = Field(default=48, ge=1, le=720)
 
 
 class Settings(BaseModel):
@@ -409,6 +443,7 @@ class Settings(BaseModel):
         default_factory=BinanceUSDMTestnetSettings
     )
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
+    feedback: FeedbackSettings = Field(default_factory=FeedbackSettings)
 
 
 def provider_api_key_configured(settings: Settings | None) -> bool:

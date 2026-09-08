@@ -30,7 +30,8 @@
     "stage2_load_full_strategy_library": false,
     "experience_max_entries": 0,
     "experience_max_chars_per_entry": 400,
-    "stage1_inject_pattern_briefs": true
+    "stage1_inject_pattern_briefs": true,
+    "stage1_kline_rows_limit": 0
   },
   "validation": {
     "normalization_mode": "strict",
@@ -116,10 +117,29 @@
     "max_concurrent_analyses": 1,
     "poll_lead_seconds": 5,
     "poll_retry_attempts": 3,
-    "poll_retry_seconds": 5
+    "poll_retry_seconds": 5,
+    "light_mode_enabled": false,
+    "light_mode_max_quiet_bars": 3,
+    "htf_context_enabled": false,
+    "htf_timeframes": [
+      "1h",
+      "4h"
+    ],
+    "htf_max_summary_chars": 400
   },
   "tushare": {
     "token": ""
+  },
+  "feedback": {
+    "enabled": false,
+    "days": 30,
+    "min_samples": 10,
+    "max_prompt_lines": 6,
+    "group_bys": [
+      "strategy_file",
+      "cycle_direction"
+    ],
+    "join_hours": 48
   },
   "binance_usdm_environment": "testnet",
   "binance_usdm_live": {

@@ -402,8 +402,56 @@ def validate_stage1_coherence(
     from pa_agent.ai.pattern_routing import validate_detected_patterns_vs_key_signals
 
     errors.extend(validate_detected_patterns_vs_key_signals(stage1))
+    errors.extend(check_cycle_candidate_route(stage1, kline_frame))
 
     return errors
+
+
+def check_cycle_candidate_route(stage1: dict[str, Any], kline_frame: Any) -> list[str]:
+    """Task B1: cycle_position must land inside the clear program candidate set.
+
+    Only enforced when constrain_worthy() says the program read is clear
+    (confident top score + gap). alternative_cycle_position matching also
+    passes (the model documents an ambiguity instead of contradicting it),
+    and a node_overrides entry for 1.2 with concrete K-line evidence is the
+    escape hatch. Everything fails soft: any computation hiccup returns no
+    error so routing never blocks analysis.
+    """
+    if kline_frame is None:
+        return []
+    if str(stage1.get("gate_result", "")).lower() != "proceed":
+        return []
+    try:
+        from pa_agent.ai.cycle_candidates import (
+            build_metrics,
+            constrain_worthy,
+            score_cycle,
+        )
+
+        candidates = constrain_worthy(score_cycle(build_metrics(kline_frame)))
+    except Exception:  # noqa: BLE001 best-effort routing check
+        return []
+    if not candidates:
+        return []
+    allowed = {c.cycle for c in candidates}
+    cycle = str(stage1.get("cycle_position", "") or "").strip().lower()
+    alt = str(stage1.get("alternative_cycle_position", "") or "").strip().lower()
+    if cycle in allowed or alt in allowed:
+        return []
+    overrides = stage1.get("node_overrides")
+    if isinstance(overrides, list) and any(
+        str(o.get("node_id", "")).strip() == "1.2" and isinstance(o, dict)
+        for o in overrides
+    ):
+        return []
+    evidence = " / ".join(
+        f"{c.cycle}({c.score:.0f}: {c.evidence})" for c in candidates[:3]
+    )
+    return [
+        f"cycle_position {cycle!r} (alt={alt!r}) not in program cycle candidates: "
+        f"{evidence}. Either pick one of the candidates or submit a "
+        f"node_overrides entry with node_id=1.2 citing concrete K-line evidence."
+    ]
 
 
 def validate_bar_by_bar_vs_features(
@@ -697,7 +745,68 @@ def validate_stage2_coherence(
         )
         errors.extend(_validate_stage2_section9(stage2, decision_trace))
 
+    errors.extend(validate_signal_quality_vs_prefill(stage2, kline_frame))
+
     return errors
+
+
+def validate_signal_quality_vs_prefill(
+    stage2: dict[str, Any], kline_frame: Any
+) -> list[str]:
+    """Task B2: §9.0 signal-bar quality upgrades need cited K-line evidence.
+
+    Downgrades are free (the model may see context the program missed).
+    Upgrades to medium/strong without any K-number reference anywhere in the
+    stage-2 text produce one retry hint; every computation hiccup fails soft.
+    """
+    if kline_frame is None:
+        return []
+    if stage2.get("_auto_stub"):
+        return []
+    try:
+        from pa_agent.ai.kline_features import compute_kline_geometry_features
+        from pa_agent.ai.node_prefills import prefill_signal_quality, rank_quality
+
+        geo = compute_kline_geometry_features(kline_frame, limit=1)
+        if not geo:
+            return []
+        pre_quality = prefill_signal_quality(geo[0])[0]
+    except Exception:  # noqa: BLE001 best-effort quality check
+        return []
+    bar_analysis = stage2.get("bar_analysis")
+    if not isinstance(bar_analysis, dict):
+        return []
+    signal_bar = bar_analysis.get("signal_bar")
+    if not isinstance(signal_bar, dict):
+        return []
+    model_quality = str(signal_bar.get("quality") or "").strip().lower()
+    if model_quality not in ("weak", "medium", "strong", "invalid"):
+        return []
+    if rank_quality(model_quality) <= rank_quality(pre_quality):
+        return []
+    # invalid -> weak is a free conservative lift; everything else needs a cite
+    if model_quality == "weak" and pre_quality == "invalid":
+        return []
+    decision = stage2.get("decision")
+    texts = [
+        str(decision.get("reasoning") or "") if isinstance(decision, dict) else "",
+        str(signal_bar.get("reason") or ""),
+    ]
+    decision_trace = stage2.get("decision_trace")
+    if isinstance(decision_trace, list):
+        texts.extend(
+            str(item.get("reason") or "") for item in decision_trace
+            if isinstance(item, dict)
+        )
+    import re
+
+    if any(re.search(r"K\d+", t) for t in texts):
+        return []
+    return [
+        f"signal_bar.quality={model_quality!r} upgrades the program prefill "
+        f"{pre_quality!r} without any K-line citation; either downgrade or cite "
+        "the concrete bar (e.g. K1) and structure in signal_bar.reason/reasoning."
+    ]
 
 
 def _validate_stage2_section9(

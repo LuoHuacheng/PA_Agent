@@ -227,6 +227,8 @@ class MultiSymbolMonitor:
         self._next_refresh_at: float | None = None
         #: Per-symbol structure-failure negation streak (dir + consecutive bars).
         self._structure_exit_streak: dict[str, dict[str, object]] = {}
+        #: C3 light-mode: quiet-bar counter per symbol::timeframe key.
+        self._light_quiet: dict[str, int] = {}
         #: Direction-gate rejection counters keyed by gate name (G1/G2...).
         self._direction_gate_stats: dict[str, int] = {}
         self._load_state()
@@ -526,11 +528,14 @@ class MultiSymbolMonitor:
             ):
                 raise ValueError("data source returned an older closed bar")
 
-            decision = self._analyze(
-                frame,
-                record_sink=state,
-                **self._incremental_kwargs(state, now),
+            htf_block = self._fetch_htf_context(
+                state, target.symbol, target.timeframe
             )
+            call_kwargs = self._incremental_kwargs(state, now)
+            call_kwargs["record_sink"] = state
+            if htf_block:
+                call_kwargs["htf_block"] = htf_block
+            decision = self._analyze(frame, **call_kwargs)
             if self._on_result is not None:
                 try:
                     self._on_result(frame, decision)
@@ -649,6 +654,7 @@ class MultiSymbolMonitor:
         previous_record: Any = None,
         incremental_new_bar_count: int | None = None,
         record_sink: Any = None,
+        htf_block: str = "",
     ) -> dict | None:
         from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
         from pa_agent.util.threading import CancelToken
@@ -662,12 +668,16 @@ class MultiSymbolMonitor:
             exp_reader=self._ctx.exp_reader,
             settings=self._settings,
         )
+        key = self._key_text((frame.symbol, frame.timeframe))
+        light_judge = self._light_mode_judge(key, previous_record)
         record = orchestrator.submit(
             frame,
             CancelToken(),
             lambda _event: None,
             previous_record=previous_record,
             incremental_new_bar_count=incremental_new_bar_count,
+            light_skip_judge=light_judge,
+            htf_block=htf_block,
         )
         if record_sink is not None and record is not None:
             record_sink.previous_record = record
@@ -810,6 +820,92 @@ class MultiSymbolMonitor:
             "[方向闸门] %s %s 拦截 %s: %s", frame.symbol, frame.timeframe, gates, detail
         )
         return True
+
+    def _fetch_htf_context(self, state: _TargetState, symbol: str, timeframe: str) -> str:
+        """D1: fetch higher-timeframe bars and summarize them programmatically.
+
+        Gated by monitoring.htf_context_enabled (default off). The source is
+        re-subscribed per timeframe and switched back afterwards; every fetch
+        failure degrades to no HTF context, never to a poll error.
+        """
+        if not getattr(self._cfg, "htf_context_enabled", False):
+            return ""
+        timeframes = [
+            str(t) for t in (getattr(self._cfg, "htf_timeframes", None) or [])
+            if str(t) and str(t) != timeframe
+        ]
+        if not timeframes:
+            return ""
+        source = state.source
+        if source is None:
+            return ""
+        parts: dict[str, str] = {}
+        now = self._clock()
+        try:
+            from pa_agent.ai.htf_summary import (
+                build_htf_context_text,
+                summarize_htf,
+            )
+            from pa_agent.data.snapshot import build_analysis_frame
+
+            bar_count = int(self._settings.general.analysis_bar_count)
+            for tf in timeframes:
+                try:
+                    source.subscribe(symbol, tf)
+                    bars = source.latest_snapshot(bar_count + INDICATOR_WARMUP_BARS + 5)
+                    htf_frame = build_analysis_frame(
+                        bars,
+                        bar_count,
+                        symbol,
+                        tf,
+                        now_ms=int(now * 1000),
+                    )
+                    if htf_frame is not None:
+                        parts[tf] = summarize_htf(htf_frame)
+                except Exception as exc:  # noqa: BLE001 best-effort HTF fetch
+                    logger.warning(
+                        "HTF context fetch failed for %s %s: %s", symbol, tf, exc
+                    )
+        finally:
+            try:
+                source.subscribe(symbol, timeframe)
+            except Exception:  # noqa: BLE001 restore original subscription
+                logger.warning(
+                    "HTF fetch: re-subscribe failed for %s %s", symbol, timeframe
+                )
+        return build_htf_context_text(parts)
+
+    def _light_mode_judge(self, key: str, previous_record: Any):
+        """Return a stage1->reason judge when light mode is enabled (C3).
+
+        Called by the orchestrator after stage 1 completes with the real
+        stage-1 JSON. The judge resets on structure events / active plans and
+        only returns a skip reason after max_quiet_bars consecutive quiet
+        bars; a non-empty reason means the model Stage-2 call is skipped.
+        """
+        if not getattr(self._cfg, "light_mode_enabled", False):
+            return None
+
+        def _judge(stage1_json: dict) -> str:
+            from pa_agent.monitoring.light_gate import (
+                record_has_active_plan,
+                stage1_of_record,
+                structure_event_detected,
+            )
+
+            if record_has_active_plan(previous_record):
+                self._light_quiet[key] = 0
+                return ""
+            if structure_event_detected(stage1_of_record(previous_record), stage1_json):
+                self._light_quiet[key] = 0
+                return ""
+            max_quiet = int(getattr(self._cfg, "light_mode_max_quiet_bars", 3) or 3)
+            self._light_quiet[key] = self._light_quiet.get(key, 0) + 1
+            if self._light_quiet[key] < max_quiet:
+                return ""
+            return f"连续安静 {self._light_quiet[key]} 根无结构事件"
+
+        return _judge
 
     def _evaluate_structure_exit(self, frame: Any, record: Any) -> None:
         """React to diagnosis negation while a pa-entry position is open.
