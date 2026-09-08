@@ -381,6 +381,30 @@ class MonitoringSettings(BaseModel):
     poll_retry_seconds: int = Field(default=5, ge=1, le=120)
 
 
+class FeedbackSettings(BaseModel):
+    """结果回灌闭环（Phase A）：base-rate 统计与校准工具的参数。
+
+    全部默认关/默认安全：enabled 打开只影响离线统计与 prompt 注入，
+    不触碰执行路径（binance_usdm_* 节才是自动交易开关）。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    #: 统计滚动窗口（自然日）。
+    days: int = Field(default=30, ge=1, le=365)
+    #: 分组至少需多少已平仓样本才给出胜率/期望（门控，禁止小样本硬编）。
+    min_samples: int = Field(default=10, ge=1, le=1000)
+    #: 注入 stage2 的历史先验最大行数。
+    max_prompt_lines: int = Field(default=6, ge=1, le=30)
+    #: 决策可使用的分组键（strategy_file / cycle_direction）。
+    group_bys: list[str] = Field(
+        default_factory=lambda: ["strategy_file", "cycle_direction"]
+    )
+    #: 决策记录与成交归属的最大时间窗（小时）。
+    join_hours: int = Field(default=48, ge=1, le=720)
+
+
 class Settings(BaseModel):
     """Root settings object persisted to config/settings.json."""
 
@@ -409,6 +433,7 @@ class Settings(BaseModel):
         default_factory=BinanceUSDMTestnetSettings
     )
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
+    feedback: FeedbackSettings = Field(default_factory=FeedbackSettings)
 
 
 def provider_api_key_configured(settings: Settings | None) -> bool:

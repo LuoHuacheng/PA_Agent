@@ -121,6 +121,17 @@
   "tushare": {
     "token": ""
   },
+  "feedback": {
+    "enabled": false,
+    "days": 30,
+    "min_samples": 10,
+    "max_prompt_lines": 6,
+    "group_bys": [
+      "strategy_file",
+      "cycle_direction"
+    ],
+    "join_hours": 48
+  },
   "binance_usdm_environment": "testnet",
   "binance_usdm_live": {
     "enabled": false,
