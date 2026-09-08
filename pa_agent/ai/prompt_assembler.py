@@ -1750,6 +1750,7 @@ class PromptAssembler:
             if omit_kline_block
             else "本消息下方附有完整 K 线表与几何特征。\n\n"
         )
+        feedback_stats = self._feedback_stats_block()
         return (
             f"{_STAGE2_API_TASK_RULE}\n\n"
             "## 阶段二任务\n\n"
@@ -1766,8 +1767,25 @@ class PromptAssembler:
             f"请根据以上诊断和K线数据,按《二元决策.txt》§3–§11、§14 输出 JSON 决策结果"
             f"(含 decision_trace 与 terminal)。\n"
             f"注意:如果判断不下单,entry_price、take_profit_price、take_profit_price_2、stop_loss_price、order_direction 必须全部为 null。\n\n"
+            f"{feedback_stats + chr(10) + chr(10) if feedback_stats else ''}"
             f"{_STAGE2_TAIL_REMINDER}"
         )
+
+    def _feedback_stats_block(self) -> str:
+        """Phase-A 历史胜率先验块:只在 feedback.enabled 时注入到阶段二末尾.
+
+        动态文本放在 user 消息尾部(最终输出提醒之前), 静态前缀保持
+        byte-identical 以复用 KV cache; 任何失败都静默返回空串,
+        绝不打断分析流程.
+        """
+        try:
+            from pa_agent.config.settings import load_settings
+            from pa_agent.feedback.base_rate_injector import load_stats_block
+
+            feedback = load_settings().feedback
+            return load_stats_block(feedback)
+        except Exception:  # noqa: BLE001 - best-effort injection
+            return ""
 
     def stage2_system_prompt_only(
         self,
