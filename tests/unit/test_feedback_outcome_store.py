@@ -17,6 +17,7 @@ import pytest
 from pa_agent.feedback.outcome_store import (
     build_audit_summary,
     build_outcome_rows,
+    export_experience_cases,
     load_csv_fallback,
     load_decision_records,
     merge_all,
@@ -390,6 +391,64 @@ def test_build_audit_summary_counts_drift(tmp_path):
     assert summary["pending_only_materials"] == 2
     assert summary["income_diff_by_symbol"][SYM] == pytest.approx(0.0)
     assert summary["decisions_pending"] == 1 and summary["decisions_csv"] == 1
+
+
+
+def test_export_experience_cases_writes_success_and_failure(tmp_path):
+    rows = [_decision_row(1000)]
+    orders = _orders()
+    out = build_outcome_rows(
+        [
+            _attached_matched(0, opened_at=2000, closed_at=3000),  # +9.96R win
+            dict(_attached_matched(0, opened_at=4000, closed_at=5000)),
+        ],
+        rows,
+        orders,
+    )
+    out[1]["win_r"] = -1.5
+    out[1]["outcome"] = "loss"
+    out[1]["close_reason"] = "stop"
+    exp = tmp_path / "experience"
+    written = export_experience_cases(out, exp, min_abs_r=1.0)
+    assert len(written) == 2
+    ok = exp / "trading_range" / "success_cases"
+    bad = exp / "trading_range" / "failure_cases"
+    succ = list(ok.glob("*.json"))
+    fail = list(bad.glob("*.json"))
+    assert len(succ) == 1 and len(fail) == 1
+    import json as _json
+
+    content = _json.loads(succ[0].read_text(encoding="utf-8"))
+    assert content["direction"] == "neutral"
+    assert content["detected_patterns"] == ["ais", "failed_breakout"]
+    assert content["result"].startswith("win +")
+    # idempotent: rerun adds nothing
+    assert export_experience_cases(out, exp, min_abs_r=1.0) == []
+
+
+def test_export_skips_open_and_below_threshold(tmp_path):
+    rows = [_decision_row(1000)]
+    open_row = dict(_attached_matched(0, opened_at=2000, closed_at=None))
+    weak = dict(_attached_matched(0, opened_at=3000, closed_at=4000))
+    out = build_outcome_rows([open_row, weak], rows, _orders())
+    out[1]["win_r"] = 0.5  # below the |1R| threshold
+    assert export_experience_cases(out, tmp_path / "exp", min_abs_r=1.0) == []
+
+
+def test_export_prunes_old_entries(tmp_path):
+    rows = [_decision_row(1000)]
+    exp = tmp_path / "exp"
+    out = build_outcome_rows(
+        [_attached_matched(0, opened_at=2000, closed_at=3000)], rows, _orders()
+    )
+    export_experience_cases(out, exp, min_abs_r=1.0, keep_per_dir=1)
+    newer = build_outcome_rows(
+        [_attached_matched(0, opened_at=7000, closed_at=8000)], rows, _orders()
+    )
+    export_experience_cases(newer, exp, min_abs_r=1.0, keep_per_dir=1)
+    files = list((exp / "trading_range" / "success_cases").glob("*.json"))
+    assert len(files) == 1  # the oldest was pruned
+
 
 
 # ---------------------------------------------------------------------------

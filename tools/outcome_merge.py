@@ -46,6 +46,8 @@ def main() -> int:
     ap.add_argument("--hours", type=int, default=0,
                     help="rolling window of the last N hours (overrides --days)")
     ap.add_argument("--symbols", default="", help="comma list; default whitelist + CSV")
+    ap.add_argument("--export-experience", action="store_true",
+                    help="export |win_r|>=1R closed cases into experience/ (D2)")
     args = ap.parse_args()
 
     settings = load_settings()
@@ -117,6 +119,11 @@ def main() -> int:
     print(f"新 OutcomeRows: {audit['rows_outcome']} (uid 幂等去重落盘)")
     print("income 对账:", audit["income_diff_by_symbol"])
     print("audit:", audit_path)
+    if args.export_experience:
+        from pa_agent.feedback.outcome_store import export_experience_cases
+
+        written = export_experience_cases(rows, ROOT / "experience")
+        print(f"经验库导出: {len(written)} 条 -> experience/<cycle>/(success|failure)_cases")
     return 0
 
 

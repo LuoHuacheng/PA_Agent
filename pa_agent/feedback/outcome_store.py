@@ -488,6 +488,88 @@ def write_audit_json(audit: dict, path: Path) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(audit, fh, ensure_ascii=False, indent=1)
 
+# ---------------------------------------------------------------------------
+# experience library export (Phase D, Task D2)
+# ---------------------------------------------------------------------------
+
+
+def export_experience_cases(
+    rows: list[dict],
+    experience_root: Path,
+    *,
+    min_abs_r: float = 1.0,
+    keep_per_dir: int = 200,
+) -> list[Path]:
+    """Write closed outcome rows with |win_r| >= *min_abs_r* into the
+    experience library (success_cases / failure_cases per cycle_position).
+
+    Content carries the keys ExperienceReader scores on (direction,
+    detected_patterns) plus a compact setup/result summary; the prompt-side
+    renderer truncates to the configured char budget anyway. Old files beyond
+    *keep_per_dir* per directory are pruned (newest kept).
+    """
+    written: list[Path] = []
+    for row in rows:
+        if row.get("outcome") not in ("win", "loss"):
+            continue
+        win_r = row.get("win_r")
+        if win_r is None or abs(float(win_r)) < min_abs_r:
+            continue
+        cycle = str(row.get("cycle_position") or "unknown").strip().lower()
+        if not cycle:
+            cycle = "unknown"
+        case_type = "success" if row.get("outcome") == "win" else "failure"
+        subdir = experience_root / cycle / f"{case_type}_cases"
+        subdir.mkdir(parents=True, exist_ok=True)
+        ts_open = row.get("ts_open")
+        if ts_open is None:
+            continue
+        dt = datetime.fromtimestamp(int(ts_open) / 1000.0, tz=_TZ8)
+        symbol = str(row.get("symbol") or "UNKNOWN").replace("/", "-")
+        timeframe = str(row.get("timeframe") or "?").replace("/", "-")
+        filename = f"{dt:%Y-%m-%d_%H-%M-%S}_{symbol}_{timeframe}.json"
+        path = subdir / filename
+        if path.exists():
+            continue
+        content = {
+            "cycle_position": cycle,
+            "direction": str(row.get("diag_direction") or row.get("direction") or ""),
+            "detected_patterns": list(row.get("patterns") or ()),
+            "symbol": str(row.get("symbol") or ""),
+            "timeframe": str(row.get("timeframe") or ""),
+            "setup": (
+                f"{row.get('order_type')} {row.get('direction')} "
+                f"entry={row.get('entry_avg')} stop={row.get('stop')} "
+                f"target={row.get('target')}"
+            ),
+            "result": (
+                f"{row.get('outcome')} {float(win_r):+.2f}R "
+                f"(close={row.get('close_reason')})"
+            ),
+            "conf": row.get("conf"),
+            "source": str(row.get("source") or ""),
+        }
+        path.write_text(
+            json.dumps(content, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+        written.append(path)
+        _prune_experience_dir(subdir, keep_per_dir)
+    return written
+
+
+def _prune_experience_dir(subdir: Path, keep: int) -> None:
+    files = sorted(
+        (p for p in subdir.glob("*.json")),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    from contextlib import suppress
+
+    for stale in files[keep:]:
+        with suppress(OSError):
+            stale.unlink()
+
+
 
 # ---------------------------------------------------------------------------
 # audit helpers
