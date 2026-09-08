@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import sys
 import time
@@ -16,6 +15,7 @@ if str(HERE) not in sys.path:
 
 from pa_agent.config.settings import load_settings
 from pa_agent.trading.binance_usdm_testnet import BinanceUSDMTestnetClient
+from pa_agent.trading.replay_pairing import cid_variants, rebuild_trades as _rebuild_trades_from_fills
 
 TZ = timezone(timedelta(hours=8))
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ZECUSDT"]
@@ -43,33 +43,6 @@ def window_bounds(days: int, *, hours: int | None = None):
     start = today - timedelta(days=days - 1)
     end = today + timedelta(days=1)
     return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
-
-
-def _num_forms(v):
-    """Candidate numeric forms for the signal-id hash."""
-    if v is None or str(v).strip() == "":
-        return [None]
-    f = float(str(v))
-    s = {f}
-    if f == int(f):
-        s.add(int(f))
-    s.add(str(f))
-    return list(s)
-
-
-def cid_variants(sym, direction, otype, entry, stop, target):
-    """clientOrderId candidates from the decision material hash."""
-    out = []
-    for e in _num_forms(entry):
-        for s in _num_forms(stop):
-            for t in _num_forms(target):
-                if e is None or s is None or t is None:
-                    continue
-                mat = {"symbol": sym, "direction": direction, "type": otype,
-                       "entry": e, "stop": s, "target": t}
-                h = hashlib.sha256(json.dumps(mat, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-                out.append("pa-entry-" + h[:27])
-    return out
 
 
 def load_decision_index(symbols):
@@ -179,60 +152,25 @@ def _match_decision(t, dec_idx, pending_rows, order_time):
 
 
 def rebuild_trades(cache_dir, symbols, dec_idx, pending_rows):
-    """LIFO pairing; one trade per pa-entry signal (open trades included)."""
+    """LIFO pairing; one trade per pa-entry signal (open trades included).
+
+    The LIFO rebuild itself lives in pa_agent.trading.replay_pairing
+    (pure/dict based); this wrapper loads the cached account payloads, keeps
+    the order_time index used by the nearest-time decision fallback, and
+    reproduces the legacy per-trade decision attachment.
+    """
     orders_all = json.load(open(cache_dir / "orders.json", encoding="utf-8"))
     trades_all = json.load(open(cache_dir / "user_trades.json", encoding="utf-8"))
-    order_by_id = {(s, o["orderId"]): o for s, lst in orders_all.items() for o in lst}
     order_time = {}
     for s, lst in orders_all.items():
         for o in lst:
             c = str(o.get("clientOrderId") or "")
             if c:
                 order_time.setdefault(c, (s, o["time"]))
-    all_trades = []
-    for sym in symbols:
-        queue = []
-        for fl in sorted(trades_all.get(sym, []), key=lambda x: (x["time"], x["id"])):
-            qty = float(fl["qty"])
-            delta = qty if fl["side"] == "BUY" else -qty
-            px = float(fl["price"])
-            rpnl = float(fl.get("realizedPnl") or 0)
-            comm = -abs(float(fl.get("commission") or 0))
-            o = order_by_id.get((sym, fl["orderId"]), {})
-            cid = str(o.get("clientOrderId") or "")
-            is_entry = cid.startswith("pa-entry-")
-            rem = qty
-            while rem > 1e-12 and queue and queue[-1]["side"] != (1 if delta > 0 else -1):
-                E = queue[-1]
-                take = min(rem, E["rem"])
-                E["rem"] -= take
-                E["realized"] += rpnl * (take / qty)
-                E["fees"] += comm * (take / qty)
-                E["close_px"] = px
-                rem -= take
-                if E["rem"] < 1e-12:
-                    E["closed_at"] = fl["time"]
-                    all_trades.append(E)
-                    queue.pop()
-            if rem > 1e-12:
-                side = 1 if delta > 0 else -1
-                last = queue[-1] if queue else None
-                if last is not None and last["cid"] == cid and last["side"] == side:
-                    tot = last["orig"] + rem
-                    last["avg"] = (last["avg"] * last["orig"] + px * rem) / tot
-                    last["orig"] = tot
-                    last["rem"] += rem
-                    last["fees"] += comm * (rem / qty)
-                else:
-                    queue.append({"sym": sym, "side": side, "orig": rem, "rem": rem,
-                                  "avg": px, "realized": 0.0, "fees": comm * (rem / qty),
-                                  "cid": cid if is_entry else "manual",
-                                  "opened_at": fl["time"], "closed_at": None, "close_px": None})
-        all_trades += queue
     out = []
-    for t in all_trades:
+    for t in _rebuild_trades_from_fills(orders_all, trades_all, symbols):
         inner = _match_decision(t, dec_idx, pending_rows, order_time)
-        rec = {"sym": t["sym"], "side": t["side"], "qty": t["orig"], "entry": t["avg"],
+        rec = {"sym": t["sym"], "side": t["side"], "qty": t["qty"], "entry": t["entry"],
                "realized": t["realized"], "fees": t["fees"], "cid": t["cid"],
                "opened_at": t["opened_at"], "closed_at": t["closed_at"],
                "close_px": t["close_px"], "conf": None, "stop": None,
