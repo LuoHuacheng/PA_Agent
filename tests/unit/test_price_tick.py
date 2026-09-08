@@ -76,14 +76,17 @@ def test_stage2_normalizer_passes_breakout_price_check() -> None:
                 "entry_basis_bar": "K1",
                 "entry_basis_extreme": "high",
                 "entry_price": 104.0,
-                "take_profit_price": 120.0,
-                "stop_loss_price": 99.0,
+                # RR cap: (tp1-entry)/(entry-stop) <= 2.0 需满足, 否则程序拒单
+                "take_profit_price": 111.0,
+                "take_profit_price_2": 118.0,
+                "stop_loss_price": 102.0,
                 "estimated_win_rate": 55,
             },
         },
         kline_frame=frame,
     )
-    assert obj["decision"]["entry_price"] > 104.0
+    assert obj["decision"]["order_type"] == "突破单"
+    assert obj["decision"]["entry_price"] > 104.0  # snap 到突破侧上一档 tick
     msgs = JsonValidator._check_breakout_price_extreme(obj, frame)
     assert msgs == []
 

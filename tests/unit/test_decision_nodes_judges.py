@@ -637,6 +637,7 @@ def test_normalize_stage2_upgrades_9_0_for_planned_limit() -> None:
             "order_direction": "做空",
             "entry_price": 101.0,
             "take_profit_price": 98.0,
+            "take_profit_price_2": 96.0,
             "stop_loss_price": 103.0,
             "reasoning": "test",
             "diagnosis_confidence": 60,

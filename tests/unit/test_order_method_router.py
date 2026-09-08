@@ -30,6 +30,7 @@ def test_model_breakout_preserved_for_broad_channel() -> None:
         "entry_basis_extreme": "low",
         "stop_loss_price": 4228.399,
         "take_profit_price": 4183.278,
+        "take_profit_price_2": 4160.0,
     }
     trace = [{"node_id": "10.3", "answer": "是", "reason": "ok"}]
     stage1 = {"cycle_position": "broad_channel"}

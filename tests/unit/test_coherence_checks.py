@@ -190,19 +190,23 @@ def test_bar_type_mismatch_near_threshold_does_not_error_in_strict() -> None:
     assert errs == []
 
 
-def test_structural_inside_outside_mismatch_still_errors_in_strict() -> None:
+def test_directional_bar_type_mismatch_still_errors_in_strict() -> None:
+    """strict 下真正对立的方向矛盾(trend_bear vs 程序 trend_bull)仍报错。
+
+    注: inside/outside 与趋势分类重叠不互斥(如 inside+trend_bull 合法),
+    只有 bull/bear 对立才构成 contradiction(与实现 P1-5 语义一致)。
+    """
     frame = KlineFrame(
         symbol="XAUUSD",
         timeframe="15m",
         bars=(
-            # K1 inside K2
             KlineBar(
                 seq=1,
                 ts_open=2,
                 open=105.0,
-                high=109.0,
-                low=101.0,
-                close=106.0,
+                high=111.0,
+                low=102.0,
+                close=110.0,
                 volume=1.0,
                 closed=True,
             ),
@@ -221,7 +225,7 @@ def test_structural_inside_outside_mismatch_still_errors_in_strict() -> None:
         indicators=IndicatorBundle(ema20=(100.0, 100.0), atr14=(10.0, 10.0)),
     )
     stage1 = {
-        "bar_by_bar_summary": [{"bar": "K1", "bar_type": "trend_bull", "reason": "x"}]
+        "bar_by_bar_summary": [{"bar": "K1", "bar_type": "trend_bear", "reason": "x"}]
     }
     errs = validate_bar_by_bar_vs_features(stage1, kline_frame=frame, strict=True)
     assert any("contradicts" in e for e in errs)

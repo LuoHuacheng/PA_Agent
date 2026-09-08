@@ -123,8 +123,12 @@ def test_p2_direction_equals_argmax(pred: dict):
         return
     order = ("bullish", "bearish", "neutral")
     max_val = max(probs[k] for k in order)
-    expected = next(k for k in order if probs[k] == max_val)
-    assert direction == expected, f"direction={direction}, expected={expected}"
+    winners = [k for k in order if probs[k] == max_val]
+    if len(winners) > 1:
+        # 平局: 实现保留模型的语义选择(若其为 winner), 不强制第一个
+        assert direction in winners, f"direction={direction}, winners={winners}"
+    else:
+        assert direction == winners[0], f"direction={direction}, expected={winners[0]}"
 
 
 # ── P3: unpredictable branch null consistency ────────────────────────────────

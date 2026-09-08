@@ -52,13 +52,20 @@ def test_analysis_frame_seq_bijection(n: int, extra: int) -> None:
     extra=st.integers(min_value=0, max_value=20),
 )
 @h_settings(max_examples=200)
-def test_live_frame_forming_bar_is_seq1(n: int, extra: int) -> None:
-    """build_live_frame keeps forming bar at seq=1 when present at index 0."""
+def test_live_frame_forming_bar_is_seq0(n: int, extra: int) -> None:
+    """build_live_frame puts the forming bar at seq=0; closed bars stay 1..n
+    (so closed-bar seq matches the analysis frame exactly)."""
     raw = _bars_with_forming(n, extra)
-    frame = build_live_frame(raw, n, symbol="TEST", timeframe="1h")
+    # fake bars use 1970-era second timestamps (~1000s): a now_ms inside the
+    # same hour makes has_forming_bar_at_head treat bars[0] as forming.
+    frame = build_live_frame(
+        raw, n, symbol="TEST", timeframe="1h", now_ms=2_000_000
+    )
     assert frame is not None
-    assert frame.bars[0].seq == 1
+    assert frame.bars[0].seq == 0
     assert frame.bars[0].closed is False
+    assert frame.bars[1].seq == 1
+    assert frame.bars[1].closed is True
 
 
 @given(
