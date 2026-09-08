@@ -100,9 +100,9 @@ class TestFreeChatKeepsReasoningWhenToggled:
         session.send("q2", cancel)
 
         messages: list[dict] = client.stream_chat.call_args_list[1][0][0]
-        assert messages[3]["role"] == "assistant"
-        assert messages[3]["content"] == "reply 1"
-        assert messages[3].get("reasoning_content") == "reasoning 1"
+        assert messages[4]["role"] == "assistant"  # prefix3 + q1 之后的回复
+        assert messages[4]["content"] == "reply 1"
+        assert messages[4].get("reasoning_content") == "reasoning 1"
 
     def test_previous_turns_keep_reasoning_in_api(self):
         """On the second send, the first assistant turn in history_for_api
@@ -119,10 +119,10 @@ class TestFreeChatKeepsReasoningWhenToggled:
         session.send("question 2", cancel)
 
         messages: list[dict] = client.stream_chat.call_args_list[1][0][0]
-        assert len(messages) == 5
-        assert messages[3]["role"] == "assistant"
-        assert messages[3]["content"] == "reply 1"
-        assert messages[3].get("reasoning_content") == "reasoning 1"
+        assert len(messages) == 6
+        assert messages[4]["role"] == "assistant"
+        assert messages[4]["content"] == "reply 1"
+        assert messages[4].get("reasoning_content") == "reasoning 1"
 
     def test_three_turns_all_assistant_messages_have_reasoning_in_api(self):
         """After 3 sends with toggle on, every assistant message in every
@@ -142,7 +142,8 @@ class TestFreeChatKeepsReasoningWhenToggled:
 
         for call_args in client.stream_chat.call_args_list:
             messages: list[dict] = call_args[0][0]
-            for msg in messages:
+            # 跳过 3 条稳定 prefix(系统/分析引用/程序化 recall, 无 reasoning)
+            for msg in messages[3:]:
                 if msg.get("role") == "assistant":
                     assert "reasoning_content" in msg, (
                         f"reasoning_content missing from assistant message: {msg}"
@@ -249,5 +250,7 @@ class TestFreeChatKeepsReasoningWhenToggled:
         session.keep_reasoning_in_resend = True
         session.send("q2", cancel)
         msgs_second: list[dict] = client.stream_chat.call_args_list[1][0][0]
-        followup_asst = next(m for m in msgs_second if m.get("role") == "assistant")
+        followup_asst = next(
+            m for m in msgs_second[3:] if m.get("role") == "assistant"
+        )
         assert followup_asst.get("reasoning_content") == "reasoning 1"

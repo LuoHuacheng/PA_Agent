@@ -208,16 +208,20 @@ def test_stage2_plain_text_is_category_d_not_stub():
     assert result.category == "d"
 
 
-def test_no_order_with_non_null_price_is_category_c():
-    """不下单 with non-null entry_price is classified as category c.
+def test_no_order_with_non_null_price_cleaned_to_null():
+    """不下单 with non-null entry_price is cleaned to null and accepted.
 
-    **Validates: Requirements PR7.1 / PR3.1**
+    Lenient normalization clears prices on 不下单 decisions before schema
+    validation, so the null invariant holds on the *validated* object instead
+    of rejecting the raw slip.
+
+    **Validates: Requirements PR7.1 / PR3.1 (清洗后的 null 不变式)**
     """
     obj = _valid_stage2()
-    obj["decision"]["entry_price"] = 2650.0  # must be null for 不下单
+    obj["decision"]["entry_price"] = 2650.0
     result = validator.validate("stage2", json.dumps(obj))
-    assert isinstance(result, ValidationError)
-    assert result.category == "c"
+    assert isinstance(result, Ok), f"Expected Ok after cleanup, got {result}"
+    assert result.obj["decision"]["entry_price"] is None
 
 
 def test_markdown_fenced_json_is_accepted():
@@ -227,26 +231,41 @@ def test_markdown_fenced_json_is_accepted():
     assert isinstance(result, Ok)
 
 
-def test_truncated_stage1_after_bar_by_bar_summary_fails_by_default():
-    """Strict mode does not inject stub gate_trace on truncation."""
+def test_truncated_stage1_repairs_by_default():
+    """Truncated stage1 JSON is repaired (tail inject) when truncation repair
+    is enabled (production default: disable_truncation_repair=false)."""
     obj = _valid_stage1()
     del obj["gate_trace"]
     del obj["gate_result"]
     truncated = json.dumps(obj, ensure_ascii=False)[:-1] + ","
     result = validator.validate("stage1", truncated)
+    assert isinstance(result, Ok), f"Expected Ok (repair on), got {result}"
+    # Stub trace's first gate answer derives gate_result
+    assert result.obj["gate_result"] == "proceed"
+    assert len(result.obj["gate_trace"]) >= 1
+
+
+def test_truncated_stage1_fails_when_repair_disabled():
+    """disable_truncation_repair=True keeps the old category-a behaviour."""
+    no_repair = JsonValidator(ValidationSettings(disable_truncation_repair=True))
+    obj = _valid_stage1()
+    del obj["gate_trace"]
+    del obj["gate_result"]
+    truncated = json.dumps(obj, ensure_ascii=False)[:-1] + ","
+    result = no_repair.validate("stage1", truncated)
     assert isinstance(result, ValidationError)
     assert result.category == "a"
 
 
-def test_truncated_stage1_can_repair_when_lenient_config():
-    """Legacy tail inject only when disable_truncation_repair=False."""
+def test_truncated_stage1_repair_under_lenient_config():
+    """Lenient validator repairs truncation too (same tail inject)."""
     obj = _valid_stage1()
     del obj["gate_trace"]
     del obj["gate_result"]
     truncated = json.dumps(obj, ensure_ascii=False)[:-1] + ","
     result = lenient_validator.validate("stage1", truncated)
     assert isinstance(result, Ok), result
-    assert result.obj["gate_result"] == "unknown"
+    assert result.obj["gate_result"] == "proceed"
     assert len(result.obj["gate_trace"]) >= 1
 
 

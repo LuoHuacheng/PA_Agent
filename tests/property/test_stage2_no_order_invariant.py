@@ -127,19 +127,25 @@ def test_no_order_all_null_accepted():
     )
 )
 @h_settings(max_examples=100)
-def test_no_order_with_non_null_price_rejected(price_val) -> None:
-    """不下单 with any non-null price field is rejected as category c.
+def test_no_order_with_non_null_price_cleaned_to_null(price_val) -> None:
+    """不下单(terminal 佐证)带任何价格都被清洗为 null 并接受(Ok).
 
-    **Validates: Requirements PR3.1**
+    旧规则把"不下单+价格"判为 category c 拒绝; lenient 修复后, 由
+    terminal reject/trace 佐证的不下单决策会把价格噪声清空再校验,
+    不变式(最终 JSON 全 null)在清洗后依然成立.
+
+    **Validates: Requirements PR3.1 (清洗后的 null 不变式)**
     """
     for field in _PRICE_FIELDS:
         decision = _base_decision(order_type="不下单", **{field: price_val})
         obj = _base_stage2(decision)
         result = validator.validate("stage2", json.dumps(obj))
-        assert isinstance(result, ValidationError), (
-            f"Expected ValidationError for {field}={price_val!r}, got Ok"
+        assert isinstance(result, Ok), (
+            f"Expected Ok after cleanup for {field}={price_val!r}, got {result}"
         )
-        assert result.category == "c", f"Expected category c, got {result.category!r}"
+        assert result.obj["decision"][field] is None, (
+            f"{field} must be cleaned to null, got {result.obj['decision'][field]!r}"
+        )
 
 
 # ── 有下单 side ────────────────────────────────────────────────────────────────
@@ -173,7 +179,8 @@ def test_with_order_all_fields_present_accepted(order_type: str) -> None:
     assert isinstance(result, Ok), f"Expected Ok for {order_type}, got {result}"
 
 
-def test_breakout_order_requires_extreme_basis() -> None:
+def test_breakout_without_basis_degrades_to_limit_order() -> None:
+    """突破单缺 entry_basis_* 时不再报错: 程序降级为限价单继续(有保护价)."""
     decision = _base_decision(
         order_type="突破单",
         order_direction="做多",
@@ -185,9 +192,8 @@ def test_breakout_order_requires_extreme_basis() -> None:
     )
     obj = _base_stage2(decision)
     result = validator.validate("stage2", json.dumps(obj))
-    assert isinstance(result, ValidationError)
-    assert result.category == "c"
-    assert "entry_basis_bar" in result.missing_fields
+    assert isinstance(result, Ok), f"Expected Ok (degraded), got {result}"
+    assert result.obj["decision"]["order_type"] == "限价单"
 
 
 def test_breakout_order_direction_extreme_mismatch_auto_corrected() -> None:
