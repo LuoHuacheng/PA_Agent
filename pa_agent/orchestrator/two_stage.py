@@ -351,6 +351,7 @@ class TwoStageOrchestrator:
         previous_record: AnalysisRecord | None = None,
         incremental_new_bar_count: int | None = None,
         light_skip_judge: Callable[[dict], str] | None = None,
+        htf_block: str = "",
     ) -> AnalysisRecord:
         """Run the two-stage analysis pipeline and return an AnalysisRecord.
 
@@ -375,6 +376,8 @@ class TwoStageOrchestrator:
         """
         # ── Step 1: Build partial record ──────────────────────────────────────
         record = _build_empty_record(frame, self._settings)
+        if htf_block:
+            record = record.model_copy(update={"htf_text": htf_block})
 
         # ── Step 2: Pre-Stage-1 cancel check ─────────────────────────────────
         if cancel_token.is_set():
@@ -427,7 +430,9 @@ class TwoStageOrchestrator:
                 provider_settings=getattr(self._settings, "provider", None),
             )
         else:
-            messages_s1 = self._assembler.build_stage1(frame, analysis_mode=analysis_mode)
+            messages_s1 = self._assembler.build_stage1(
+                frame, analysis_mode=analysis_mode, htf_block=htf_block
+            )
 
         # ── Step 5: Call AI for Stage 1 ───────────────────────────────────────
         logger.debug("\n" + "="*80)

@@ -1071,10 +1071,13 @@ class PromptAssembler:
 
     # ── Stage 1 ───────────────────────────────────────────────────────────────
 
-    def build_stage1(self, frame: KlineFrame, *, analysis_mode: str = "original") -> list[dict]:
+    def build_stage1(self, frame: KlineFrame, *, analysis_mode: str = "original",
+                     htf_block: str = "") -> list[dict]:
         """Build the message list for Stage 1 (market diagnosis)."""
         system_content = self._build_stage1_system_prompt()
-        user_content = self._build_stage1_user_prompt(frame, analysis_mode=analysis_mode)
+        user_content = self._build_stage1_user_prompt(
+            frame, analysis_mode=analysis_mode, htf_block=htf_block
+        )
 
         return [
             {"role": "system", "content": system_content},
@@ -1321,7 +1324,8 @@ class PromptAssembler:
             return ""
 
     def _build_stage1_user_prompt(
-        self, frame: KlineFrame, *, analysis_mode: str = "original"
+        self, frame: KlineFrame, *, analysis_mode: str = "original",
+        htf_block: str = "",
     ) -> str:
         """Build the Stage 1 task turn; stage-specific rules stay out of system."""
         pattern_block = self._stage1_pattern_supplement()
@@ -1353,6 +1357,7 @@ class PromptAssembler:
             "---\n\n"
             f"## 当前分析目标\n\n"
             f"品种:{frame.symbol} 周期:{frame.timeframe} K线数量:{n_bars}\n"
+            f"{htf_block + chr(10) if htf_block else ''}"
             f"（K线序号：1=最新已收盘，最大 K{n_bars}；"
             f"每个决策节点的 bar_range 由你自行选择子区间，勿超出 K{n_bars}-K1）\n\n"
             f"## ⚠️ 分析窗口分层规则（与程序 §2.2/§2.3/§2.4 预填一致，必须遵守）\n\n"

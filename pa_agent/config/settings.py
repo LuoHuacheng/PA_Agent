@@ -385,6 +385,10 @@ class MonitoringSettings(BaseModel):
     #: C3 轻量模式: 无结构事件连续安静达 N 根时跳过阶段二(默认关, monitor only).
     light_mode_enabled: bool = False
     light_mode_max_quiet_bars: int = Field(default=3, ge=1, le=24)
+    #: D1 HTF 背景摘要: 每根 K 线收盘额外拉取高周期程序特征(默认关).
+    htf_context_enabled: bool = False
+    htf_timeframes: list[str] = Field(default_factory=lambda: ["1h", "4h"])
+    htf_max_summary_chars: int = Field(default=400, ge=100, le=2000)
 
 
 class FeedbackSettings(BaseModel):
