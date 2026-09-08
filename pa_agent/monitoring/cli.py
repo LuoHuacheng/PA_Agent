@@ -371,6 +371,7 @@ def run_monitor() -> int:
         from pa_agent.trading.binance_usdm_testnet import (
             resume_breakeven_guards,
             resume_pending_limit_watchers,
+            resume_stop_watchdogs,
             resume_time_stops,
             resume_tp_runners,
         )
@@ -379,6 +380,7 @@ def run_monitor() -> int:
         resume_breakeven_guards(settings)
         resume_time_stops(settings)
         resume_tp_runners(settings)
+        resume_stop_watchdogs(settings)
     except Exception:
         logger.exception("恢复 Binance 测试网挂单 watcher 失败")
     # user-data websocket: 订单/账户事件推送替代常驻轮询. REST 快照轮询保留

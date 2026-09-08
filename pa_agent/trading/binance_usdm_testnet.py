@@ -783,6 +783,15 @@ class BinanceUSDMTestnetClient:
             signed=True,
         )
 
+    def algo_order_status(self, *, client_algo_id: str) -> dict[str, Any]:
+        """Query a conditional algo order by its client id."""
+        return self._request(
+            "GET",
+            "/fapi/v1/algoOrder",
+            {"clientAlgoId": client_algo_id},
+            signed=True,
+        )
+
     def close_market_position(self, *, symbol: str, side: str, quantity: Decimal) -> None:
         self._request(
             "POST",
@@ -1732,12 +1741,188 @@ def _drop_guard(symbol: str) -> None:
             del guards[symbol]
             _save_state(state)
 
+# ---------------------------------------------------------------------------
+# 止损单补挂校验 (resting-order verification & re-hang)
+# ---------------------------------------------------------------------------
+# 背景(2026-09-08 事故): TP1 部分止盈/保本移动阶段, 记录指向的 algo 止损单
+# 已被撤/已死(精度 bug 挂新失败后旧单早已撤掉), 程序只信注册表不查实单,
+# 持仓裸奔数小时. 以下助手在每次"信任 resting 单"前 GET /fapi/v1/algoOrder
+# 校验; 单已死则按候选价补挂并回写注册表, 绝不裸奔.
+
+#: Algo 服务中只有 NEW 表示条件单仍在等待触发(实测: NEW=挂单中, CANCELED=已撤).
+_ALGO_LIVE_STATUSES = frozenset({"NEW"})
+
+
+def _algo_status_live(status: str) -> bool:
+    """True 仅当 algo 订单仍在 resting (NEW)。"""
+    return status in _ALGO_LIVE_STATUSES
+
+
+def _rehang_stop_candidates(
+    *,
+    side: str,
+    entry: Decimal,
+    stop0: Decimal,
+    mark: Decimal,
+    stage_tp2: bool,
+    floor_pct: float,
+) -> list[Decimal]:
+    """Ordered protective stop prices to try when the recorded stop is gone.
+
+    TP2/trigger stage prefers the breakeven price (entry); the plain phase
+    prefers the original static stop (stop0). Candidates whose trigger is
+    already satisfied (-2021 immediate-trigger) are dropped. When nothing is
+    placeable, a fresh stop at min_stop_distance_pct outside the mark is
+    appended last so a breached-but-unprotected position still gets downside
+    protection instead of running naked.
+    """
+    exit_side = "SELL" if side == "BUY" else "BUY"
+    candidates: list[Decimal] = []
+    if stage_tp2:
+        candidates.extend((entry, stop0))
+    else:
+        candidates.extend((stop0, entry))
+    if floor_pct and floor_pct > 0:
+        factor = Decimal(str(floor_pct)) / Decimal("100")
+        if side == "BUY":
+            candidates.append(mark * (Decimal("1") - factor))
+        else:
+            candidates.append(mark * (Decimal("1") + factor))
+    return [
+        price
+        for price in candidates
+        if price is not None
+        and price > 0
+        and not _stop_would_immediately_trigger(exit_side, price, mark)
+    ]
+
+
+#: 补挂逐候选尝试时, 仅这类业务拒绝视为"该价位挂不了"换下一候选; 网络/限流等
+#: 瞬时错误原样上抛, 由调用方限次重试(不许把止损悄悄降级到更差价位).
+_REHANG_SKIP_MARKERS = ('"-1111"', '"-2021"', "-1111", "-2021")
+
+
+def _stop_resting_alive(client: "BinanceUSDMTestnetClient", client_algo_id: str) -> bool:
+    """True when the algo stop really rests on the exchange (NEW).
+
+    Terminal/missing states (CANCELED/EXPIRED/triggered/unknown id) return
+    False; transient transport/rate-limit errors re-raise for caller retry.
+    """
+    try:
+        payload = client.algo_order_status(client_algo_id=client_algo_id)
+        status = payload.get("algoStatus") if isinstance(payload, dict) else None
+    except BinanceAPIError as exc:
+        if _is_missing_algo_order_error(exc):
+            return False
+        raise
+    return _algo_status_live(str(status or ""))
+
+
+def _rehang_protective_stop(
+    client: "BinanceUSDMTestnetClient",
+    *,
+    symbol: str,
+    side: str,
+    entry: Decimal,
+    stop0: Decimal,
+    stage_tp2: bool,
+    floor_pct: float,
+) -> tuple[bool, str, str]:
+    """Place the best placeable replacement STOP for a missing protective stop.
+
+    Tries every candidate from _rehang_stop_candidates in order; business
+    rejections (-1111 precision / -2021 immediate) move to the next candidate,
+    transient errors raise. Returns (ok, new_stop_algo_id, note).
+    """
+    exit_side = "SELL" if side == "BUY" else "BUY"
+    mark = current_mark_price(client, symbol)
+    for price in _rehang_stop_candidates(
+        side=side, entry=entry, stop0=stop0, mark=mark,
+        stage_tp2=stage_tp2, floor_pct=floor_pct,
+    ):
+        candidate_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
+        try:
+            client.place_close_algo_order(
+                symbol=symbol,
+                side=exit_side,
+                order_type="STOP_MARKET",
+                stop_price=price,
+                client_algo_id=candidate_id,
+            )
+        except BinanceAPIError as exc:
+            message = str(exc)
+            if any(marker in message for marker in _REHANG_SKIP_MARKERS):
+                logger.warning(
+                    "Re-hang candidate %s rejected for %s (%s); trying next",
+                    _decimal_text(price),
+                    symbol,
+                    exc,
+                )
+                continue
+            raise
+        return True, candidate_id, f"re-hung protective stop at {_decimal_text(price)}"
+    return (
+        False,
+        "",
+        "no placeable re-hang candidate (mark=" + _decimal_text(mark) + ")",
+    )
+
+
+def _ensure_protective_stop(
+    client: "BinanceUSDMTestnetClient",
+    *,
+    symbol: str,
+    record: dict[str, Any],
+    entry: Decimal,
+    stage_tp2: bool,
+    floor_pct: float,
+) -> tuple[str, str, str]:
+    """Verify the recorded protective stop really rests; re-hang when gone.
+
+    Returns (status, stop_algo_id, note) with status one of:
+      alive  - recorded stop verified resting (NEW); nothing to do
+      rehung - recorded stop was gone; replacement placed and registry updated
+      error  - transient API failure / no placeable candidate (caller retries)
+    The caller must hold the per-symbol manager lock.
+    """
+    side = str(record.get("side") or "")
+    current_stop = str(record.get("stop_algo_id") or "")
+    if side not in ("BUY", "SELL") or not current_stop:
+        return "error", "", "invalid guard record"
+    try:
+        alive = _stop_resting_alive(client, current_stop)
+    except BinanceAPIError as exc:
+        return "error", current_stop, f"algo status query failed: {exc}"
+    if alive:
+        return "alive", current_stop, ""
+    stop0 = _positive_decimal(record.get("stop0"))
+    if stop0 is None:
+        return "error", current_stop, "guard record missing stop0"
+    try:
+        ok, new_stop, note = _rehang_protective_stop(
+            client,
+            symbol=symbol,
+            side=side,
+            entry=entry,
+            stop0=stop0,
+            stage_tp2=stage_tp2,
+            floor_pct=floor_pct,
+        )
+    except BinanceAPIError as exc:
+        return "error", current_stop, f"re-hang placement failed: {exc}"
+    if not ok:
+        return "error", current_stop, note
+    _patch_guard(symbol, stop_algo_id=new_stop)
+    return "rehung", new_stop, note
+
 
 def _breakeven_guard_loop(
     client: BinanceUSDMTestnetClient,
     symbol: str,
     trigger: str,
     poll_seconds: float,
+    *,
+    floor_pct: float = 0.0,
 ) -> None:
     """Poll an open position; once float profit reaches the trigger, replace
     the resting STOP algo order with one at the entry price (breakeven).
@@ -1831,6 +2016,44 @@ def _breakeven_guard_loop(
                     client_algo_id=new_stop_id,
                 )
             except BinanceAPIError as exc:
+                # 挂保本失败并不代表安全: 若记录指向的旧止损其实已死(历史 bug/
+                # 手动撤单/精度错误), "原止损 stays in place" 就是裸奔。先校验
+                # 再决定限次重试(旧单活着)还是立即补挂(旧单已死)。
+                guard_status, guard_stop, guard_note = _ensure_protective_stop(
+                    client,
+                    symbol=symbol,
+                    record=fresh,
+                    entry=entry,
+                    stage_tp2=True,
+                    floor_pct=floor_pct,
+                )
+                if guard_status == "error":
+                    consecutive_errors += 1
+                    logger.error(
+                        "Breakeven stop placement failed for %s (%s) and "
+                        "re-hang verification failed: %s",
+                        symbol,
+                        stop_algo_id,
+                        guard_note,
+                    )
+                    if consecutive_errors >= 5:
+                        logger.error(
+                            "Breakeven guard gave up for %s after repeated errors; "
+                            "record kept for restart resume",
+                            symbol,
+                        )
+                        return
+                    time.sleep(poll_seconds)
+                    continue
+                if guard_status == "rehung":
+                    logger.warning(
+                        "Breakeven guard: original stop %s for %s was gone; %s",
+                        stop_algo_id,
+                        symbol,
+                        guard_note,
+                    )
+                    _patch_guard(symbol, moved=True, stop_algo_id=guard_stop)
+                    return
                 consecutive_errors += 1
                 logger.error(
                     "Breakeven stop placement failed for %s (%s), original stop "
@@ -1885,6 +2108,7 @@ def _tp_runner_loop(
     client: BinanceUSDMTestnetClient,
     symbol: str,
     poll_seconds: float,
+    floor_pct: float = 0.0,
 ) -> None:
     """Poll a position protected by a partial (reduceOnly) TP1 order.
 
@@ -2028,51 +2252,122 @@ def _tp_runner_loop(
                         return
                     time.sleep(poll_seconds)
                     continue
-            if moved:
-                new_stop_id = current_stop  # 保本已由 guard 完成, SL 不动
-            elif mark is not None and _stop_would_immediately_trigger(
+            if moved or (mark is not None and _stop_would_immediately_trigger(
                 exit_side, entry, mark
-            ):
-                # 浮盈已回吐(mark 回到入场另一侧): 保本 STOP 会立即触发被拒(-2021).
-                # 保留原 SL 并标记 moved: TP2 阶段照常推进, 不再反复尝试挂保本.
-                logger.info(
-                    "TP runner: mark %s already through entry %s for %s; "
-                    "keeping original stop %s and proceeding with TP2",
-                    _decimal_text(mark),
-                    _decimal_text(entry),
-                    symbol,
-                    current_stop,
-                )
-                moved = True
-                _patch_guard(symbol, moved=True)
-                new_stop_id = current_stop
-            else:
-                # C1: 先挂新保本 STOP 再撤旧 SL - 任一步失败旧止损仍 resting, 不裸奔。
-                new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
-                try:
-                    client.place_close_algo_order(
-                        symbol=symbol,
-                        side=exit_side,
-                        order_type="STOP_MARKET",
-                        stop_price=entry,
-                        client_algo_id=new_stop_id,
+            )):
+                # 保本不再重挂(guard 已移 / mark 已回吐穿 entry)。进 TP2 前先
+                # 校验记录指向的止损单真实 resting: 2026-09-08 事故中记录仍指向
+                # 早已撤掉的单, 程序却"保留原止损"裸奔数小时 → 已死必须补挂。
+                if not moved:
+                    logger.info(
+                        "TP runner: mark %s already through entry %s for %s; "
+                        "verifying protective stop %s",
+                        _decimal_text(mark),
+                        _decimal_text(entry),
+                        symbol,
+                        current_stop,
                     )
-                except BinanceAPIError as exc:
+                    moved = True
+                    _patch_guard(symbol, moved=True)
+                runner_status, runner_stop, runner_note = _ensure_protective_stop(
+                    client,
+                    symbol=symbol,
+                    record=fresh,
+                    entry=entry,
+                    stage_tp2=True,
+                    floor_pct=floor_pct,
+                )
+                if runner_status == "error":
                     consecutive_errors += 1
                     logger.error(
-                        "TP runner breakeven stop placement failed for %s (kept original stop): %s",
+                        "TP runner: protective-stop verification failed for %s "
+                        "(%s): %s",
                         symbol,
-                        exc,
+                        current_stop,
+                        runner_note,
                     )
                     if consecutive_errors >= 5:
                         logger.error(
-                            "TP runner gave up placing breakeven stop for %s after "
-                            "repeated errors; original stop stays in place",
+                            "TP runner gave up verifying stop for %s after repeated "
+                            "errors; record kept for restart resume",
                             symbol,
                         )
                         return
                     time.sleep(poll_seconds)
                     continue
+                if runner_status == "rehung":
+                    logger.warning(
+                        "TP runner: recorded stop %s for %s was gone; %s",
+                        current_stop,
+                        symbol,
+                        runner_note,
+                    )
+                new_stop_id = runner_stop
+            else:
+                # C1: 先挂新保本 STOP 再撤旧 SL。挂新前先校验旧单真的 resting:
+                # 旧单已死时"任一步失败旧止损仍 resting"的假设不成立, 必须先补挂。
+                runner_status, runner_stop, runner_note = _ensure_protective_stop(
+                    client,
+                    symbol=symbol,
+                    record=fresh,
+                    entry=entry,
+                    stage_tp2=True,
+                    floor_pct=floor_pct,
+                )
+                if runner_status == "error":
+                    consecutive_errors += 1
+                    logger.error(
+                        "TP runner: protective-stop verification failed for %s "
+                        "(%s): %s",
+                        symbol,
+                        current_stop,
+                        runner_note,
+                    )
+                    if consecutive_errors >= 5:
+                        logger.error(
+                            "TP runner gave up verifying stop for %s after repeated "
+                            "errors; record kept for restart resume",
+                            symbol,
+                        )
+                        return
+                    time.sleep(poll_seconds)
+                    continue
+                if runner_status == "rehung":
+                    logger.warning(
+                        "TP runner: recorded stop %s for %s was gone; %s",
+                        current_stop,
+                        symbol,
+                        runner_note,
+                    )
+                    new_stop_id = runner_stop
+                    moved = True  # 替代单已挂: 跳过 C1, 也无需撤旧(旧单已死)
+                    _patch_guard(symbol, moved=True, stop_algo_id=new_stop_id)
+                else:
+                    new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
+                    try:
+                        client.place_close_algo_order(
+                            symbol=symbol,
+                            side=exit_side,
+                            order_type="STOP_MARKET",
+                            stop_price=entry,
+                            client_algo_id=new_stop_id,
+                        )
+                    except BinanceAPIError as exc:
+                        consecutive_errors += 1
+                        logger.error(
+                            "TP runner breakeven stop placement failed for %s (kept original stop): %s",
+                            symbol,
+                            exc,
+                        )
+                        if consecutive_errors >= 5:
+                            logger.error(
+                                "TP runner gave up placing breakeven stop for %s after "
+                                "repeated errors; original stop stays in place",
+                                symbol,
+                            )
+                            return
+                        time.sleep(poll_seconds)
+                        continue
             if not moved:
                 # 撤旧 SL: -2011/-2013 视为已撤; 其他错误限次重试, 放弃时新旧并存,
                 # 由交易所对空仓 closePosition 的清理语义兜底(与旧版一致)。
@@ -2321,6 +2616,7 @@ def _maybe_guard(
                 "symbol": symbol,
                 "trigger": str(config.breakeven_stop_trigger),
                 "poll_seconds": float(config.breakeven_poll_seconds),
+                "floor_pct": float(config.min_stop_distance_pct),
             },
             daemon=True,
         )
@@ -2338,6 +2634,7 @@ def _maybe_guard(
                 "client": client,
                 "symbol": symbol,
                 "poll_seconds": float(config.breakeven_poll_seconds),
+                "floor_pct": float(config.min_stop_distance_pct),
             },
             daemon=True,
         )
@@ -2349,6 +2646,20 @@ def _maybe_guard(
             str(config.tp_partial_close_pct).rstrip("0").rstrip("."),
             _decimal_text(target2),
         )
+        # 部分止盈记录在 runner 结束后(partial_done / TP1 已触发而 runner 退出)
+        # 没有任何线程再校验止损单 → 附加一个看护线程兜底补挂。
+        watchdog = threading.Thread(
+            target=_stop_watchdog_loop,
+            kwargs={
+                "client": client,
+                "symbol": symbol,
+                "poll_seconds": float(config.breakeven_poll_seconds),
+                "floor_pct": float(config.min_stop_distance_pct),
+            },
+            daemon=True,
+        )
+        watchdog.start()
+        logger.info("Stop watchdog started for %s", symbol)
     time_stop_minutes = int(config.time_stop_minutes or 0)
     if time_stop_minutes > 0:
         ts_thread = threading.Thread(
@@ -2412,6 +2723,7 @@ def resume_breakeven_guards(
                 "symbol": symbol,
                 "trigger": str(config.breakeven_stop_trigger),
                 "poll_seconds": float(config.breakeven_poll_seconds),
+                "floor_pct": float(config.min_stop_distance_pct),
             },
             daemon=True,
         )
@@ -2476,6 +2788,7 @@ def resume_tp_runners(
                 "client": active,
                 "symbol": symbol,
                 "poll_seconds": float(config.breakeven_poll_seconds),
+                "floor_pct": float(config.min_stop_distance_pct),
             },
             daemon=True,
         )
@@ -2533,6 +2846,192 @@ def resume_time_stops(
         thread.start()
         resumed += 1
         logger.info("Resumed time-stop manager for %s", symbol)
+    return resumed
+
+
+def _stop_watchdog_loop(
+    *,
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    poll_seconds: float,
+    floor_pct: float = 0.0,
+) -> None:
+    """Watch records whose managers already finished (moved / partial_done /
+    TP1-fired remainder): verify the recorded algo stop really rests on the
+    exchange and re-hang it when missing, so a dead stop never leaves the
+    position naked until the next restart (2026-09-08 incident). Exits when
+    the record is gone or the position closes (residual TP cleaned, record
+    dropped). Plain unmoved legacy records are left to the breakeven guard.
+    """
+    consecutive_errors = 0
+    while True:
+        record = _read_guard(symbol)
+        if record is None:
+            return
+        side = str(record.get("side") or "")
+        qty = _positive_decimal(record.get("qty"))
+        partial_qty = _positive_decimal(record.get("partial_qty"))
+        if side not in ("BUY", "SELL"):
+            return  # 残缺记录: 不归看护管
+        legacy = qty is None or partial_qty is None
+        if legacy and not record.get("moved"):
+            return  # unmoved 旧 guard 记录: 由 guard resume 看守
+        try:
+            info = current_position(client, symbol)
+            amount = info["amount"]
+            entry = info["entry"]
+        except BinanceAPIError as exc:
+            if _is_rate_limit_reason(str(exc)):
+                # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数.
+                _guard_rate_limit_wait(poll_seconds)
+                continue
+            consecutive_errors += 1
+            logger.warning(
+                "Stop watchdog poll failed for %s (attempt %d): %s",
+                symbol,
+                consecutive_errors,
+                exc,
+            )
+            if consecutive_errors >= 5:
+                logger.error(
+                    "Stop watchdog gave up polling %s after repeated API errors; "
+                    "record kept for restart resume",
+                    symbol,
+                )
+                return
+            time.sleep(poll_seconds)
+            continue
+        if (side == "BUY" and amount < 0) or (side == "SELL" and amount > 0):
+            return  # not our position anymore
+        terminal = (
+            bool(record.get("moved"))
+            or bool(record.get("partial_done"))
+            or (not legacy and amount < qty)
+        )
+        if not terminal:
+            time.sleep(poll_seconds)  # guard/runner 仍在看守, 不重复校验
+            continue
+        if amount == 0:
+            # 仓位已平: 撤残留部分单/TP2 单后移除记录(撤单幂等, -2011 视为已清).
+            tp_algo_id = str(record.get("tp_algo_id") or "")
+            if tp_algo_id:
+                try:
+                    client.cancel_algo_order(client_algo_id=tp_algo_id)
+                except BinanceAPIError as exc:
+                    if not _is_missing_algo_order_error(exc):
+                        consecutive_errors += 1
+                        logger.error(
+                            "Stop watchdog residual TP cancel failed for %s (%s): %s",
+                            symbol,
+                            tp_algo_id,
+                            exc,
+                        )
+                        if consecutive_errors >= 5:
+                            return
+                        time.sleep(poll_seconds)
+                        continue
+            _drop_guard(symbol)
+            logger.info("Stop watchdog: %s position closed; record dropped", symbol)
+            return
+        if entry is None:
+            return  # 拿不到入场价, 保本价无从谈起
+        with _manager_lock(symbol):
+            fresh = _read_guard(symbol)
+            if fresh is None:
+                return
+            current_stop = str(fresh.get("stop_algo_id") or "")
+            if not current_stop:
+                return
+            status, _rehung_id, note = _ensure_protective_stop(
+                client,
+                symbol=symbol,
+                record=fresh,
+                entry=entry,
+                stage_tp2=True,
+                floor_pct=floor_pct,
+            )
+        if status == "error":
+            consecutive_errors += 1
+            logger.error(
+                "Stop watchdog verify/re-hang failed for %s (%s): %s",
+                symbol,
+                current_stop,
+                note,
+            )
+            if consecutive_errors >= 5:
+                logger.error(
+                    "Stop watchdog gave up for %s after repeated errors; "
+                    "record kept for restart resume",
+                    symbol,
+                )
+                return
+            time.sleep(poll_seconds)
+            continue
+        if status == "rehung":
+            logger.warning(
+                "Stop watchdog: %s recorded stop %s was gone; %s",
+                symbol,
+                current_stop,
+                note,
+            )
+        consecutive_errors = 0
+        time.sleep(poll_seconds)
+
+
+def resume_stop_watchdogs(
+    settings: Settings | None = None,
+    *,
+    client: BinanceUSDMTestnetClient | None = None,
+) -> int:
+    """Re-arm protective-stop watchdogs after a restart.
+
+    Runner/guard threads do not survive a restart. Records whose managers had
+    already finished (partial_done / moved) or that sit mid-TP2 previously had
+    NO watcher at all: a stop that died server-side (cancel race / precision
+    bug / manual removal) left the position naked until the next restart.
+    Plain unmoved legacy guard records stay with the breakeven-guard resume.
+    Returns the number of watchdogs resumed.
+    """
+    configure_binance_environment(settings)
+    config = binance_env.active_cfg(settings)
+    if not config.enabled or config.dry_run or config.emergency_stop:
+        return 0
+    with _STATE_LOCK:
+        guards = _load_state().get("guards")
+        records = (
+            {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
+            if isinstance(guards, dict)
+            else {}
+        )
+    if not records:
+        return 0
+    try:
+        active = client or BinanceUSDMTestnetClient(config.api_key, config.api_secret)
+    except ValueError as exc:
+        logger.error("Cannot resume stop watchdogs: %s", exc)
+        return 0
+    resumed = 0
+    for symbol, record in records.items():
+        side = str(record.get("side") or "")
+        if side not in ("BUY", "SELL"):
+            continue
+        qty = _positive_decimal(record.get("qty"))
+        partial_qty = _positive_decimal(record.get("partial_qty"))
+        if (qty is None or partial_qty is None) and not record.get("moved"):
+            continue  # 纯 unmoved 旧 guard 记录: 留给 guard resume
+        thread = threading.Thread(
+            target=_stop_watchdog_loop,
+            kwargs={
+                "client": active,
+                "symbol": symbol,
+                "poll_seconds": float(config.breakeven_poll_seconds),
+                "floor_pct": float(config.min_stop_distance_pct),
+            },
+            daemon=True,
+        )
+        thread.start()
+        resumed += 1
+        logger.info("Resumed stop watchdog for %s", symbol)
     return resumed
 
 

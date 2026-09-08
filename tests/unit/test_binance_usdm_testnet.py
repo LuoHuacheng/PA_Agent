@@ -83,6 +83,11 @@ class FakeClient:
     def cancel_algo_order(self, **kwargs: object) -> None:
         self.calls.append(("cancel_protection", kwargs))
 
+    def algo_order_status(self, *, client_algo_id: str) -> dict:
+        # 默认视为 resting(NEW); 死单场景由测试子类覆盖.
+        self.calls.append(("algo_order_status", client_algo_id))
+        return {"clientAlgoId": client_algo_id, "algoStatus": "NEW"}
+
     def close_market_position(self, **kwargs: object) -> None:
         self.calls.append(("rollback", kwargs))
 
@@ -2004,6 +2009,7 @@ def test_maybe_guard_partial_registers_and_arms_runner(monkeypatch) -> None:
     targets = [target for target, _kwargs in captured]
     assert binance_usdm_testnet._breakeven_guard_loop in targets
     assert binance_usdm_testnet._tp_runner_loop in targets
+    assert binance_usdm_testnet._stop_watchdog_loop in targets, "部分止盈须附带看护线程"
     runner_kwargs = [kwargs for target, kwargs in captured
                      if target is binance_usdm_testnet._tp_runner_loop]
     assert runner_kwargs and runner_kwargs[0]["symbol"] == "BTCUSDT"
@@ -2030,7 +2036,10 @@ def test_maybe_guard_partial_without_breakeven_still_arms_runner(monkeypatch) ->
         partial_qty=Decimal("1"),
     )
     targets = [target for target, _kwargs in captured]
-    assert targets == [binance_usdm_testnet._tp_runner_loop]
+    assert targets == [
+        binance_usdm_testnet._tp_runner_loop,
+        binance_usdm_testnet._stop_watchdog_loop,
+    ]
     record = binance_usdm_testnet._read_guard("BTCUSDT")
     assert record is not None and record["partial_done"] is False
 
@@ -2644,4 +2653,266 @@ def test_tp_runner_skips_breakeven_when_mark_crossed_back(monkeypatch) -> None:
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# 补挂校验: 记录止损单必须真实 resting, 缺失即补挂(防裸奔) / resume 看护
+# ---------------------------------------------------------------------------
+# 事故背景(2026-09-08): TP1 部分止盈后, 保本 guard 撤掉原 STOP 又因触发价
+# 精度问题(-1111)挂不上新单; 记录仍指向已撤销的旧单, 重启 resume 只信记录
+# 不查实单 → 持仓裸奔数小时. 本组测试: 校验(verify)+补挂(rehang)+看护(watchdog).
+
+
+def test_client_algo_order_status_queries_by_id_and_live_predicate() -> None:
+    """algoOrder 状态查询走 GET clientAlgoId; 只有 NEW 视为 resting。"""
+    seen: list[str] = []
+
+    def opener(request, **_kw: object) -> _OkResponse:
+        seen.append(str(request.full_url))
+        return _OkResponse({"algoStatus": "NEW", "clientAlgoId": "pa-sl-x0001"})
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "test-key", "test-secret", opener=opener
+    )
+    rec = client.algo_order_status(client_algo_id="pa-sl-x0001")
+    assert rec["algoStatus"] == "NEW"
+    assert len(seen) == 1
+    assert "algoOrder" in seen[0] and "clientAlgoId=pa-sl-x0001" in seen[0]
+    live = binance_usdm_testnet._algo_status_live
+    assert live("NEW") is True
+    for dead in ("CANCELED", "EXPIRED", "", "TRIGGERED", "FAILED"):
+        assert live(dead) is False, dead
+
+
+def test_rehang_stop_price_ladder_stage_and_floor() -> None:
+    """补挂候选价: TP2/触发阶段 entry 优先, 静态阶段 stop0 优先;
+    立即触发(-2021)候选跳过; 最后兜底 mark 外 min-distance floor。"""
+    cands = binance_usdm_testnet._rehang_stop_candidates
+    # 多单 BUY: entry 100 / stop0 90
+    assert cands(side="BUY", entry=Decimal("100"), stop0=Decimal("90"),
+                 mark=Decimal("105"), stage_tp2=False,
+                 floor_pct=0.45) == [Decimal("90"), Decimal("100"), Decimal("104.5275")]
+    assert cands(side="BUY", entry=Decimal("100"), stop0=Decimal("90"),
+                 mark=Decimal("105"), stage_tp2=True,
+                 floor_pct=0.45) == [Decimal("100"), Decimal("90"), Decimal("104.5275")]
+    # mark 已回吐到 95(entry 与 stop0 之间): entry 立即触发被剔除
+    assert cands(side="BUY", entry=Decimal("100"), stop0=Decimal("90"),
+                 mark=Decimal("95"), stage_tp2=True,
+                 floor_pct=0.45) == [Decimal("90"), Decimal("94.5725")]
+    # mark 已跌破 stop0: entry/stop0 均立即触发 → floor = mark*(1-0.45%)
+    assert cands(side="BUY", entry=Decimal("100"), stop0=Decimal("90"),
+                 mark=Decimal("80"), stage_tp2=True,
+                 floor_pct=0.45) == [Decimal("79.64")]
+    # 无 floor 配置且无候选 → 空列表
+    assert cands(side="BUY", entry=Decimal("100"), stop0=Decimal("90"),
+                 mark=Decimal("80"), stage_tp2=True, floor_pct=0.0) == []
+    # 空单 SELL: entry 100 / stop0 110; BUY 离场单 mark 升破 trigger 才立即触发.
+    # mark 105 已升破 entry 100 → entry 候选剔除(会 -2021); floor=mark*(1+0.45%)
+    assert cands(side="SELL", entry=Decimal("100"), stop0=Decimal("110"),
+                 mark=Decimal("105"), stage_tp2=False,
+                 floor_pct=0.45) == [Decimal("110"), Decimal("105.4725")]
+    assert cands(side="SELL", entry=Decimal("100"), stop0=Decimal("110"),
+                 mark=Decimal("105"), stage_tp2=True,
+                 floor_pct=0.45) == [Decimal("110"), Decimal("105.4725")]
+    # 空单 mark 已升破 stop0(130): floor 在 mark 上方 mark*(1+0.45%)
+    assert cands(side="SELL", entry=Decimal("100"), stop0=Decimal("110"),
+                 mark=Decimal("130"), stage_tp2=True,
+                 floor_pct=0.45) == [Decimal("130.585")]
+    assert cands(side="SELL", entry=Decimal("100"), stop0=Decimal("110"),
+                 mark=Decimal("130"), stage_tp2=True, floor_pct=0.0) == []
+
+
+class _DeadStopClient(FakeClient):
+    """algo 状态查询 mixin: 记录内 id 已 CANCELED, 其它一律 NEW。
+
+    不定义 __init__(MRO 安全): 组合类须在自身 __init__ 里设置 self._dead。
+    """
+
+    def algo_order_status(self, *, client_algo_id: str) -> dict:
+        self.calls.append(("algo_order_status", client_algo_id))
+        status = "CANCELED" if client_algo_id in self._dead else "NEW"
+        return {"clientAlgoId": client_algo_id, "algoStatus": status}
+
+
+def test_tp_runner_rehangs_when_recorded_stop_dead(monkeypatch) -> None:
+    """TP1 半仓已成交但记录止损已死(CANCELED): runner 进 TP2 前必须补挂,
+    不许"保留原止损"裸奔; mark 在 entry 下方时退回 stop0。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+
+    class DeadStopRunnerClient(PartialRunnerClient, _DeadStopClient):
+        def __init__(self) -> None:
+            super().__init__([2, 1])
+            self._dead = {"pa-sl-old0001"}
+
+        def mark_price(self, symbol: str) -> Decimal:
+            self.calls.append(("mark_price", symbol))
+            return Decimal("99")  # entry 100 之下 -> entry 保本不可挂
+
+    _register_tp_record()
+    client = DeadStopRunnerClient()
+    binance_usdm_testnet._tp_runner_loop(
+        client=client, symbol="BTCUSDT", poll_seconds=1.0, floor_pct=0.45
+    )
+    stops = [c[1] for c in client.calls
+             if c[0] == "protection" and c[1]["order_type"] == "STOP_MARKET"]
+    assert [s["stop_price"] for s in stops] == [Decimal("90")], stops
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["stop_algo_id"] != "pa-sl-old0001"
+    assert record["stop_algo_id"].startswith("pa-sl-")
+    assert record["moved"] is True
+    assert record["partial_done"] is True
+    tp2 = [c[1] for c in client.calls
+           if c[0] == "protection" and c[1]["order_type"] == "TAKE_PROFIT_MARKET"]
+    assert [t["stop_price"] for t in tp2] == [Decimal("150")]
+    sl_cancels = [c[1] for c in client.calls
+                  if c[0] == "cancel_protection"
+                  and c[1]["client_algo_id"].startswith("pa-sl-")]
+    assert not sl_cancels, "已死止损无需再撤(补挂路径不得触发撤旧)"
+
+
+def test_tp_runner_floor_rehang_when_mark_below_static_stop(monkeypatch) -> None:
+    """mark 已跌破原静态止损: entry/stop0 都立即触发, 补挂在 mark 下方
+    min-distance floor(0.45%), 仓位绝不裸奔。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+
+    class BelowStopClient(PartialRunnerClient, _DeadStopClient):
+        def __init__(self) -> None:
+            super().__init__([2, 1])
+            self._dead = {"pa-sl-old0001"}
+
+        def mark_price(self, symbol: str) -> Decimal:
+            self.calls.append(("mark_price", symbol))
+            return Decimal("80")  # 低于 stop0 90 -> 只能挂 floor
+
+    _register_tp_record()
+    client = BelowStopClient()
+    binance_usdm_testnet._tp_runner_loop(
+        client=client, symbol="BTCUSDT", poll_seconds=1.0, floor_pct=0.45
+    )
+    stops = [c[1] for c in client.calls
+             if c[0] == "protection" and c[1]["order_type"] == "STOP_MARKET"]
+    assert [s["stop_price"] for s in stops] == [Decimal("79.64")], stops
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["partial_done"] is True and record["moved"] is True
+
+
+def test_tp_runner_retries_when_no_rehang_candidate(monkeypatch) -> None:
+    """无 floor 且 mark 已破止损位: 无候选可挂 → runner 限次重试后保留记录
+    (供重启/resume 再补), 不谎报 partial_done。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+
+    class NoFloorClient(PartialRunnerClient, _DeadStopClient):
+        def __init__(self) -> None:
+            super().__init__([2, 1])
+            self._dead = {"pa-sl-old0001"}
+
+        def mark_price(self, symbol: str) -> Decimal:
+            self.calls.append(("mark_price", symbol))
+            return Decimal("80")
+
+    _register_tp_record()
+    client = NoFloorClient()
+    binance_usdm_testnet._tp_runner_loop(
+        client=client, symbol="BTCUSDT", poll_seconds=1.0, floor_pct=0.0
+    )
+    assert len(sleeps) >= 4, "heal 失败应限次退避重试"
+    assert not [c[1] for c in client.calls
+                if c[0] == "protection" and c[1]["order_type"] == "STOP_MARKET"]
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["partial_done"] is False, "无候选可挂不得谎报完成"
+    assert record["moved"] is True, "TP1 已触发: 进入 TP2 语义, guard 不再挂 entry"
+    assert record["stop_algo_id"] == "pa-sl-old0001", "无候选时记录句柄保留供补挂"
+
+
+def test_guard_heals_dead_stop_after_breakeven_rejected(monkeypatch) -> None:
+    """guard 达 1R 挂保本被拒(如 -1111)且原止损已死: 补挂候选价, 不许裸奔退出。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+
+    class RejectEntryClient(MarkSeqClient, _DeadStopClient):
+        def __init__(self) -> None:
+            super().__init__([111])  # 1R 之上
+            self._dead = {"pa-sl-old0001"}
+
+        def place_close_algo_order(self, **kwargs: object) -> None:
+            super().place_close_algo_order(**kwargs)
+            if (kwargs.get("order_type") == "STOP_MARKET"
+                    and kwargs.get("stop_price") == Decimal("100")):
+                raise BinanceAPIError(
+                    'Binance HTTP 400: {"code":-1111,"msg":"Precision is over the maximum defined for this asset."}'
+                )
+
+    _register_test_guard()  # stop0=90, target=120, moved=False
+    client = RejectEntryClient()
+    binance_usdm_testnet._breakeven_guard_loop(
+        client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0,
+        floor_pct=0.45,
+    )
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["moved"] is True, "补挂成功后 guard 应结束"
+    assert record["stop_algo_id"].startswith("pa-sl-")
+    assert record["stop_algo_id"] != "pa-sl-old0001"
+    stops = [c[1] for c in client.calls
+             if c[0] == "protection" and c[1]["order_type"] == "STOP_MARKET"]
+    placed = [s["stop_price"] for s in stops if s.get("stop_price") == Decimal("90")]
+    assert placed, "补挂必须落到 stop0 90"
+    assert not [c[1] for c in client.calls if c[0] == "cancel_protection"]
+
+
+def test_watchdog_heals_dead_stop_and_drops_on_flat(monkeypatch) -> None:
+    """TP2 阶段看护: 记录止损死 → 补挂; 仓位平 → 撤残留 TP 并移除记录。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+
+    class WatchClient(PartialRunnerClient, _DeadStopClient):
+        def __init__(self) -> None:
+            super().__init__([1, 1, 0])
+            self._dead = {"pa-sl-old0001"}
+
+        def mark_price(self, symbol: str) -> Decimal:
+            self.calls.append(("mark_price", symbol))
+            return Decimal("99")
+
+    _register_tp_record(extra={"moved": True, "partial_done": True})
+    client = WatchClient()
+    binance_usdm_testnet._stop_watchdog_loop(
+        client=client, symbol="BTCUSDT", poll_seconds=1.0, floor_pct=0.45
+    )
+    stops = [c[1] for c in client.calls
+             if c[0] == "protection" and c[1]["order_type"] == "STOP_MARKET"]
+    assert [s["stop_price"] for s in stops] == [Decimal("90")], stops
+    cancels = [c[1] for c in client.calls if c[0] == "cancel_protection"]
+    assert cancels and cancels[-1]["client_algo_id"] == "pa-tp-part0001"
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+    assert len(sleeps) >= 1
+
+
+def test_resume_stop_watchdogs_arms_terminal_records(monkeypatch) -> None:
+    """重启恢复: 拉起所有"已无 runner 看守"的记录(含 partial_done / moved),
+    让补挂校验在重启后立刻生效; 纯 unmoved 旧 guard 记录留给 guard resume。"""
+    captured = _capture_threads(monkeypatch)
+    settings = _partial_settings()
+    _register_tp_record("BTCUSDT")  # partial 未完成 -> TP runner resume 会管
+    _register_tp_record("ETHUSDT", extra={"moved": True, "partial_done": True})
+    _legacy_record(time.time(), "ADAUSDT")  # unmoved 旧 guard 记录
+    binance_usdm_testnet._register_guard(
+        "SOLUSDT",
+        {"stop_algo_id": "pa-sl-moved", "stop0": "90", "target": "120",
+         "side": "BUY", "conf": 60, "ts": time.time(), "moved": True},
+    )
+    count = binance_usdm_testnet.resume_stop_watchdogs(settings, client=FakeClient())
+    entries = sorted((target, kwargs["symbol"]) for target, kwargs in captured)
+    assert count == 3, count
+    assert [(binance_usdm_testnet._stop_watchdog_loop, s) for s in
+            ("BTCUSDT", "ETHUSDT", "SOLUSDT")] == entries
+    kwargs = next(k for _t, k in captured if k["symbol"] == "ETHUSDT")
+    assert kwargs["floor_pct"] == settings.binance_usdm_testnet.min_stop_distance_pct
+    assert kwargs["poll_seconds"] == settings.binance_usdm_testnet.breakeven_poll_seconds
+    assert binance_usdm_testnet._read_guard("ADAUSDT") is not None, "旧 guard 记录不得动"
 
