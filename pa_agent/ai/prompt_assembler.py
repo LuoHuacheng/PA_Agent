@@ -1311,6 +1311,7 @@ class PromptAssembler:
                 f"**长程背景**（当前仅 {n_bars} 根，不足 41 根，与近期窗口重叠；"
                 f"以程序预填 §2.2 为准）：\n"
             )
+        cycle_block = self._render_cycle_candidates_block(frame)
         return (
             "## 阶段一任务\n\n"
             "你现在只执行阶段一：市场诊断与闸门判断。不要评估具体下单、止损、止盈或仓位。\n\n"
@@ -1342,9 +1343,23 @@ class PromptAssembler:
             f"{feature_table}\n\n"
             + (f"{simple_features_block}\n\n" if simple_features_block else "")
             + (f"{prefill_hint}\n\n" if prefill_hint else "")
+            + (f"{cycle_block}\n\n" if cycle_block else "")
             + f"请根据以上数据，严格输出阶段一 JSON 诊断结果。\n\n"
             f"{_STAGE1_TAIL_REMINDER}"
         )
+
+    def _render_cycle_candidates_block(self, frame: KlineFrame) -> str:
+        """Task B1: program cycle candidate block for the stage-1 user turn."""
+        try:
+            from pa_agent.ai.cycle_candidates import (
+                build_metrics,
+                render_cycle_candidates_block as render,
+                score_cycle,
+            )
+
+            return render(score_cycle(build_metrics(frame)))
+        except Exception:  # noqa: BLE001 - best-effort routing hint
+            return ""
 
     def _build_incremental_stage1_user_prompt(
         self,

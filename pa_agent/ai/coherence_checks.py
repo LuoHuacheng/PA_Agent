@@ -402,8 +402,56 @@ def validate_stage1_coherence(
     from pa_agent.ai.pattern_routing import validate_detected_patterns_vs_key_signals
 
     errors.extend(validate_detected_patterns_vs_key_signals(stage1))
+    errors.extend(check_cycle_candidate_route(stage1, kline_frame))
 
     return errors
+
+
+def check_cycle_candidate_route(stage1: dict[str, Any], kline_frame: Any) -> list[str]:
+    """Task B1: cycle_position must land inside the clear program candidate set.
+
+    Only enforced when constrain_worthy() says the program read is clear
+    (confident top score + gap). alternative_cycle_position matching also
+    passes (the model documents an ambiguity instead of contradicting it),
+    and a node_overrides entry for 1.2 with concrete K-line evidence is the
+    escape hatch. Everything fails soft: any computation hiccup returns no
+    error so routing never blocks analysis.
+    """
+    if kline_frame is None:
+        return []
+    if str(stage1.get("gate_result", "")).lower() != "proceed":
+        return []
+    try:
+        from pa_agent.ai.cycle_candidates import (
+            build_metrics,
+            constrain_worthy,
+            score_cycle,
+        )
+
+        candidates = constrain_worthy(score_cycle(build_metrics(kline_frame)))
+    except Exception:  # noqa: BLE001 best-effort routing check
+        return []
+    if not candidates:
+        return []
+    allowed = {c.cycle for c in candidates}
+    cycle = str(stage1.get("cycle_position", "") or "").strip().lower()
+    alt = str(stage1.get("alternative_cycle_position", "") or "").strip().lower()
+    if cycle in allowed or alt in allowed:
+        return []
+    overrides = stage1.get("node_overrides")
+    if isinstance(overrides, list) and any(
+        str(o.get("node_id", "")).strip() == "1.2" and isinstance(o, dict)
+        for o in overrides
+    ):
+        return []
+    evidence = " / ".join(
+        f"{c.cycle}({c.score:.0f}: {c.evidence})" for c in candidates[:3]
+    )
+    return [
+        f"cycle_position {cycle!r} (alt={alt!r}) not in program cycle candidates: "
+        f"{evidence}. Either pick one of the candidates or submit a "
+        f"node_overrides entry with node_id=1.2 citing concrete K-line evidence."
+    ]
 
 
 def validate_bar_by_bar_vs_features(
