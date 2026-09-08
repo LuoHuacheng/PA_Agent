@@ -20,6 +20,7 @@ from pa_agent.feedback.outcome_store import (
     load_csv_fallback,
     load_decision_records,
     merge_all,
+    prefer_pending_over_csv,
     symbol_income_diff,
     symbols_scope,
     write_audit_json,
@@ -389,6 +390,30 @@ def test_build_audit_summary_counts_drift(tmp_path):
     assert summary["pending_only_materials"] == 2
     assert summary["income_diff_by_symbol"][SYM] == pytest.approx(0.0)
     assert summary["decisions_pending"] == 1 and summary["decisions_csv"] == 1
+
+
+# ---------------------------------------------------------------------------
+# source preference
+# ---------------------------------------------------------------------------
+
+
+def test_prefer_pending_over_csv_drops_near_duplicate_csv_rows():
+    pending = [_decision_row(1000)]
+    csv_dup = [_decision_row(1000 + 1000)]  # same material, +1s (save lag)
+    csv_other = [dict(_decision_row(2000))]  # different material/time
+    csv_other[0]["decision"] = dict(_decision_row(2000)["decision"])
+    csv_other[0]["decision"]["entry_price"] = 66000.0
+    merged = prefer_pending_over_csv(pending, csv_dup + csv_other)
+    assert len(merged) == 2  # pending + the genuinely different csv row
+    assert merged[0]["source"] == "pending"
+    assert merged[1]["decision"]["entry_price"] == 66000.0
+
+
+def test_prefer_pending_keeps_csv_outside_tolerance():
+    pending = [_decision_row(1000)]
+    old_csv = [_decision_row(1000 - 3600_000)]  # one hour earlier: real retry
+    merged = prefer_pending_over_csv(pending, old_csv, tolerance_ms=300_000)
+    assert len(merged) == 2
 
 
 # ---------------------------------------------------------------------------

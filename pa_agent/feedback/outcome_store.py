@@ -314,6 +314,43 @@ def _normalize_row(
 
 
 # ---------------------------------------------------------------------------
+# source preference
+# ---------------------------------------------------------------------------
+
+
+def prefer_pending_over_csv(
+    pending_rows: list[dict],
+    csv_rows: list[dict],
+    tolerance_ms: int = 900_000,
+) -> list[dict]:
+    """Merge S2+S3 preferring the richer pending source for same-material rows.
+
+    The same executed order is normally logged twice: as a full pending JSON
+    (with strategy_files / detected_patterns) and as a trade_records CSV row
+    written a few seconds later. Feeding both into attach_decisions makes the
+    slightly-later CSV row win the nearest-time disambiguation, degrading the
+    base-rate grouping keys to empty. CSV duplicates within *tolerance_ms* of
+    a pending record with the same material are dropped; genuine csv-only
+    rows (records cleaned up / GUI-only) are kept.
+    """
+    pending_keys: dict[tuple[str, ...], int] = {}
+    for row in pending_rows:
+        key = _material_key(row)
+        ts = int(row.get("record_ts") or 0)
+        if key not in pending_keys or ts > pending_keys[key]:
+            pending_keys[key] = ts
+    merged = list(pending_rows)
+    for row in csv_rows:
+        key = _material_key(row)
+        ts = int(row.get("record_ts") or 0)
+        p_ts = pending_keys.get(key)
+        if p_ts is not None and abs(ts - p_ts) <= tolerance_ms:
+            continue  # same order already covered by the richer pending record
+        merged.append(row)
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # outcome rows
 # ---------------------------------------------------------------------------
 
@@ -432,7 +469,11 @@ def write_outcome_csv(rows: list[dict], path: Path) -> None:
                 if uid:
                     existing[uid] = dict(row)
     for row in rows:
-        existing.setdefault(str(row.get("uid") or ""), {k: _cell(row.get(k)) for k in OUTCOME_FIELDNAMES})
+        # uid collisions get refreshed (a richer pending source may arrive
+        # after an earlier csv-only pass); identical reruns stay byte-stable
+        existing[str(row.get("uid") or "")] = {
+            k: _cell(row.get(k)) for k in OUTCOME_FIELDNAMES
+        }
     ordered = [existing[k] for k in sorted(existing)]
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8-sig", newline="") as fh:
@@ -537,7 +578,7 @@ def merge_all(
         records_root, symbols=symbols, days=days, now_ms=now_ms
     )
     csv_rows = load_csv_fallback(csv_dir, symbols=symbols, days=days, now_ms=now_ms)
-    decision_rows = pending_rows + csv_rows
+    decision_rows = prefer_pending_over_csv(pending_rows, csv_rows)
 
     trades = rebuild_trades(orders, fills, symbols)
     attached, attach_audit = attach_decisions(trades, decision_rows, join_hours=join_hours)
