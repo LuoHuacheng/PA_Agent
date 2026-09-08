@@ -321,6 +321,11 @@ def run_monitor() -> int:
 
     previous_sigint = signal.signal(signal.SIGINT, request_stop)
     previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
+    # WS 健康状态由下方 user-data 流回调维护; 快照轮询器据此切换周期:
+    # 流在线 -> 对账放宽到 300s, 流断开 -> 自动回落基础周期(60s)兜底.
+    ws_stream_health = {"connected": False}
+    _WS_HEALTHY_POLL_SECONDS = 300.0
+
     try:
         from pa_agent.trading.binance_usdm_testnet import start_account_snapshot_poller
 
@@ -329,10 +334,16 @@ def run_monitor() -> int:
         if settings.binance_usdm_testnet.enabled and (
             settings.binance_usdm_testnet.api_key or ""
         ).strip():
+            base_poll = float(settings.binance_usdm_testnet.breakeven_poll_seconds)
+
+            def _snapshot_poll_period() -> float:
+                return _WS_HEALTHY_POLL_SECONDS if ws_stream_health["connected"] else base_poll
+
             start_account_snapshot_poller(
                 api_key=settings.binance_usdm_testnet.api_key,
                 api_secret=settings.binance_usdm_testnet.api_secret,
-                poll_seconds=float(settings.binance_usdm_testnet.breakeven_poll_seconds),
+                poll_seconds=base_poll,
+                poll_period_provider=_snapshot_poll_period,
                 stale_after_seconds=(
                     float(settings.binance_usdm_testnet.snapshot_stale_seconds)
                     if settings.binance_usdm_testnet.snapshot_stale_seconds > 0
@@ -357,28 +368,36 @@ def run_monitor() -> int:
         resume_tp_runners(settings)
     except Exception:
         logger.exception("恢复 Binance 测试网挂单 watcher 失败")
-    # P0 user-data websocket: 订单/账户事件推送替代常驻轮询. REST 快照轮询保留
-    # 作为低频对账兜底(事件仅在两次对账之间把状态拉新, 不承担正确性).
-    # 事件处理器跑在 WS 线程, 只做"节流后触发快照刷新", 不碰下单路径.
+    # user-data websocket: 订单/账户事件推送替代常驻轮询. REST 快照轮询保留
+    # 作为低频对账兜底, 且周期随 WS 健康状态自适应(在线 300s / 断开回落 60s).
+    # 事件处理器跑在 WS 线程, 只做"节流后触发快照刷新 + 唤醒 fill watcher",
+    # 不碰下单路径; 断开/重连通过 Telegram 通知(10 分钟冷却防刷屏).
     user_stream: Any | None = None
+    mark_stream: Any | None = None
     try:
         binance_cfg = settings.binance_usdm_testnet
         if binance_cfg.enabled and binance_cfg.user_data_stream_enabled:
-            from pa_agent.trading.binance_user_data import (
-                BinanceUserDataStream,
-                UserDataEventHandlers,
-            )
             from pa_agent.trading.binance_usdm_testnet import (
                 BinanceUSDMTestnetClient,
                 account_snapshot_poller,
+                notify_user_order_update,
+            )
+            from pa_agent.trading.binance_user_data import (
+                BinanceMarkPriceStream,
+                BinanceUserDataStream,
+                UserDataEventHandlers,
             )
 
             stream_client = BinanceUSDMTestnetClient(
                 binance_cfg.api_key, binance_cfg.api_secret
             )
             ws_url = str(binance_cfg.user_data_stream_ws_url or "").strip()
-            event_refresh_gap = 10.0
+            event_refresh_gap = float(
+                binance_cfg.user_data_event_refresh_gap_seconds
+            )
             last_event_ts = [0.0]
+            reconnect_count = [0]
+            notice_cooldown_ts = [0.0]
 
             def _refresh_snapshot_after_event() -> None:
                 now = time.time()
@@ -392,10 +411,41 @@ def run_monitor() -> int:
                     except Exception:
                         logger.exception("WS 事件触发的快照刷新失败")
 
+            def _on_order_update(msg: dict) -> None:
+                notify_user_order_update(msg)
+                _refresh_snapshot_after_event()
+
+            def _send_stream_notice(text: str) -> None:
+                now = time.time()
+                if now - notice_cooldown_ts[0] < 600.0:
+                    return
+                notice_cooldown_ts[0] = now
+                try:
+                    from pa_agent.notify.telegram_notifier import send_telegram_message
+
+                    send_telegram_message(f"[监控] {text}", settings=settings)
+                except Exception:
+                    logger.exception("发送 user-data 流告警失败")
+
+            def _on_connected() -> None:
+                ws_stream_health["connected"] = True
+                reconnect_count[0] += 1
+                if reconnect_count[0] > 1:
+                    _send_stream_notice(
+                        f"user-data 流已重连(第 {reconnect_count[0]} 次)"
+                    )
+                _refresh_snapshot_after_event()
+
+            def _on_disconnected() -> None:
+                ws_stream_health["connected"] = False
+                if not stop_event.is_set():  # 正常停止不告警
+                    _send_stream_notice("user-data 流断开, 已切回 REST 轮询兜底")
+
             handlers = UserDataEventHandlers(
-                on_order_update=lambda _msg: _refresh_snapshot_after_event(),
+                on_order_update=_on_order_update,
                 on_account_update=lambda _msg: _refresh_snapshot_after_event(),
-                on_connected=_refresh_snapshot_after_event,
+                on_connected=_on_connected,
+                on_disconnected=_on_disconnected,
             )
             user_stream = BinanceUserDataStream(
                 create_listen_key=stream_client.create_listen_key,
@@ -405,7 +455,30 @@ def run_monitor() -> int:
                 ws_base=ws_url or None,
             )
             user_stream.start()
-            logger.info("User-data websocket stream started (P0 event push)")
+            logger.info("User-data websocket stream started (event push)")
+
+            # 公共 mark-price 流: 订阅监控品种, 推送到快照 poller 的 mark 槽,
+            # 让守护线程的 mark 读取不再依赖 REST(断线时 poller REST 兜底).
+            mark_symbols = [
+                t.symbol for t in settings.monitoring.targets if t.enabled
+            ] or [binance_cfg.symbol]
+            if mark_symbols:
+                try:
+                    poller = account_snapshot_poller()
+                    if poller is not None:
+                        mark_stream = BinanceMarkPriceStream(
+                            mark_symbols,
+                            on_update=lambda sym, price: poller.update_mark_price(
+                                sym, price
+                            ),
+                            ws_base=ws_url or None,
+                        )
+                        mark_stream.start()
+                        logger.info(
+                            "Mark-price stream started for %d symbols", len(mark_symbols)
+                        )
+                except Exception:
+                    logger.exception("启动 mark-price 流失败(维持 REST mark 拉取)")
     except Exception:
         logger.exception("启动 user-data websocket 流失败(降级为纯 REST 轮询)")
     monitor: MultiSymbolMonitor | None = None
@@ -431,6 +504,12 @@ def run_monitor() -> int:
                 logger.info("User-data websocket stream stopped")
             except Exception:
                 logger.exception("停止 user-data websocket 流失败")
+        if mark_stream is not None:
+            try:
+                mark_stream.stop(timeout=3.0)
+                logger.info("Mark-price stream stopped")
+            except Exception:
+                logger.exception("停止 mark-price 流失败")
         if monitor is not None:
             _shutdown_monitor_process(
                 monitor,

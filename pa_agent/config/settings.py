@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -240,6 +244,8 @@ class BinanceUSDMTestnetSettings(BaseModel):
     user_data_stream_enabled: bool = False
     # 用户数据流 WS 网关; 留空 = 默认测试网网关。live 迁移时换成主网网关。
     user_data_stream_ws_url: str = ""
+    # WS 事件触发快照刷新/唤醒的最小间隔(秒): 事件风暴防抖.
+    user_data_event_refresh_gap_seconds: int = Field(default=10, ge=1, le=300)
     # --- 日线大趋势护栏 (逆势单保护) ---
     # 以币种日线 close 的 trend_30d_days 天涨跌幅定义大趋势; |涨跌| <=
     # trend_30d_neutral_pct 视为无趋势 (不做限制). 仅作用于白名单内的币种.
@@ -402,10 +408,6 @@ def provider_api_key_configured(settings: Settings | None) -> bool:
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────
-import json
-import logging
-import os
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -482,13 +484,16 @@ def load_settings(path: Path | None = None) -> Settings:
     migrated_feishu = _migrate_legacy_feishu_json(raw, path)
     settings = Settings.model_validate(raw)
     dirty = migrated_feishu
-    if settings.pushplus.enabled and not settings.pushplus.token.strip():
-        if not (os.environ.get("PUSHPLUS_TOKEN") or "").strip():
-            settings.pushplus.enabled = False
-            logger.info(
-                "PushPlus enabled but token empty — auto-disabled (Feishu notifications unaffected)"
-            )
-            dirty = True
+    if (
+        settings.pushplus.enabled
+        and not settings.pushplus.token.strip()
+        and not (os.environ.get("PUSHPLUS_TOKEN") or "").strip()
+    ):
+        settings.pushplus.enabled = False
+        logger.info(
+            "PushPlus enabled but token empty — auto-disabled (Feishu notifications unaffected)"
+        )
+        dirty = True
     if dirty:
         save_settings(settings, path)
     return settings

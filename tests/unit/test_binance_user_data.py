@@ -10,12 +10,14 @@ import json
 import sys
 import threading
 import time
+from decimal import Decimal
 from typing import ClassVar
 
 import pytest
 
 from pa_agent.trading import binance_user_data as bud
 from pa_agent.trading.binance_user_data import (
+    BinanceMarkPriceStream,
     BinanceUserDataStream,
     UserDataEventHandlers,
 )
@@ -242,4 +244,51 @@ def test_listen_key_property_reflects_created_key(stream) -> None:
         assert stream.listen_key() == "KEY-1"
     finally:
         stream.stop()
+
+
+def test_disconnected_hook_fires_on_close() -> None:
+    """连接关闭(on_close)触发 on_disconnected 回调. """
+    events: list[str] = []
+    s = BinanceUserDataStream(
+        create_listen_key=lambda: "KEY-D",
+        keepalive_listen_key=lambda k: None,
+        handlers=UserDataEventHandlers(
+            on_connected=lambda: events.append("connected"),
+            on_disconnected=lambda: events.append("disconnected"),
+        ),
+    )
+    s._on_open(None)
+    s._on_close(None)
+    assert events == ["connected", "disconnected"]
+
+
+def test_mark_price_stream_parses_updates() -> None:
+    """markPrice 帧解析为 Decimal 并回调; 组合流 URL 正确. """
+    got: list[tuple[str, Decimal]] = []
+    s = BinanceMarkPriceStream(
+        ["BTCUSDT", "ethusdt"],
+        on_update=lambda sym, price: got.append((sym, price)),
+    )
+    assert s._stream_url().startswith("wss://")
+    assert "btcusdt@markPrice/ethusdt@markPrice" in s._stream_url()
+    s._on_message(None, json.dumps({"stream": "btcusdt@markPrice", "data": {"e": "markPriceUpdate", "s": "BTCUSDT", "p": "62345.50"}}))
+    s._on_message(None, "garbage")
+    s._on_message(None, json.dumps({"data": {"s": "BTCUSDT"}}))  # no price
+    assert got == [("BTCUSDT", Decimal("62345.50"))]
+
+
+def test_mark_price_stream_start_stop(monkeypatch) -> None:
+    """start/stop 生命周期与重连退避(注入 sleep 直接放行)."""
+    s = BinanceMarkPriceStream(
+        ["BTCUSDT"],
+        on_update=lambda sym, price: None,
+        sleep=lambda d: None,
+    )
+    assert s.start() is True
+    assert s.start() is False
+    s.stop()
+    assert s.start() is True
+    s.stop()
+
+
 

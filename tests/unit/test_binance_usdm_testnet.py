@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002 - Chinese docstrings
 """Tests for isolated Binance USDⓈ-M Testnet execution."""
 
 from __future__ import annotations
@@ -1669,6 +1670,8 @@ def test_place_algo_order_reduce_only_quantity_payload() -> None:
 
     def opener(request, **_kw: object) -> _OkResponse:
         seen.append(str(request.full_url))
+        if "exchangeInfo" in str(request.full_url):
+            return _OkResponse({"symbols": []})  # no PRICE_FILTER -> legacy price
         return _OkResponse({"code": 200, "msg": "success"})
 
     client = binance_usdm_testnet.BinanceUSDMTestnetClient(
@@ -1683,9 +1686,11 @@ def test_place_algo_order_reduce_only_quantity_payload() -> None:
         quantity=Decimal("1.5"),
         close_position=False,
     )
-    assert "quantity=1.5" in seen[0], seen[0]
-    assert "reduceOnly=true" in seen[0], seen[0]
-    assert "closePosition" not in seen[0], seen[0]
+    algo_urls = [u for u in seen if "algoOrder" in u]
+    assert algo_urls, seen
+    assert "quantity=1.5" in algo_urls[0], algo_urls[0]
+    assert "reduceOnly=true" in algo_urls[0], algo_urls[0]
+    assert "closePosition" not in algo_urls[0], algo_urls[0]
     seen.clear()
     client.place_close_algo_order(
         symbol="BTCUSDT",
@@ -1694,8 +1699,44 @@ def test_place_algo_order_reduce_only_quantity_payload() -> None:
         stop_price=Decimal("90"),
         client_algo_id="pa-sl-x0001",
     )
-    assert "closePosition=true" in seen[0], seen[0]
-    assert "quantity" not in seen[0], seen[0]
+    algo_urls = [u for u in seen if "algoOrder" in u]
+    assert algo_urls, seen
+    assert "closePosition=true" in algo_urls[0], algo_urls[0]
+    assert "quantity" not in algo_urls[0], algo_urls[0]
+
+
+def test_place_algo_order_rounds_trigger_price_to_tick() -> None:
+    """-1111 回归: algo 触发价按 PRICE_FILTER tick 向下取整, exchangeInfo 走缓存。"""
+    seen: list[str] = []
+
+    def opener(request, **_kw: object) -> _OkResponse:
+        seen.append(str(request.full_url))
+        if "exchangeInfo" in str(request.full_url):
+            return _OkResponse({
+                "symbols": [{
+                    "symbol": "ETHUSDT",
+                    "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.01"}],
+                }]
+            })
+        return _OkResponse({"code": 200, "msg": "success"})
+
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient(
+        "test-key", "test-secret", opener=opener
+    )
+    for raw in ("2480.6789", "90.555"):  # 两次同 symbol: 第二次命中缓存
+        client.place_close_algo_order(
+            symbol="ETHUSDT",
+            side="SELL",
+            order_type="STOP_MARKET",
+            stop_price=Decimal(raw),
+            client_algo_id="pa-sl-round" + raw[:2],
+        )
+    algo_urls = [u for u in seen if "algoOrder" in u]
+    assert len(algo_urls) == 2
+    assert "triggerPrice=2480.67" in algo_urls[0], algo_urls[0]  # round down
+    assert "triggerPrice=90.55" in algo_urls[1], algo_urls[1]
+    assert len([u for u in seen if "exchangeInfo" in u]) == 1, "exchangeInfo 应只拉一次"
+
 
 
 def test_attach_protection_partial_places_half_qty_tp1_and_full_sl() -> None:
@@ -2501,6 +2542,58 @@ def test_tp_runner_cleanup_failure_keeps_record_for_resume(monkeypatch) -> None:
     assert record is not None
     assert record["tp_algo_id"] == "pa-tp-part0001"  # 句柄仍在, resume 可重试
     assert record["partial_done"] is False
+
+
+# ---------------------------------------------------------------------------
+# user-data stream -> fill watcher wake-up (B3)
+# ---------------------------------------------------------------------------
+
+
+def test_notify_user_order_update_wakes_registered_watcher() -> None:
+    """订单事件按 clientOrderId 唤醒对应 watcher, 不误伤其它 watcher. """
+    wake_a = binance_usdm_testnet._register_watcher_wake("pa-entry-AAA")
+    wake_b = binance_usdm_testnet._register_watcher_wake("pa-entry-BBB")
+    try:
+        assert wake_a.is_set() is False
+        binance_usdm_testnet.notify_user_order_update(
+            {"e": "ORDER_TRADE_UPDATE", "o": {"c": "pa-entry-AAA", "s": "BTCUSDT"}}
+        )
+        assert wake_a.is_set() is True
+        assert wake_b.is_set() is False, "其它 watcher 不应被唤醒"
+        binance_usdm_testnet.notify_user_order_update({"e": "ACCOUNT_UPDATE", "o": {}})
+        binance_usdm_testnet.notify_user_order_update({"e": "ORDER_TRADE_UPDATE", "o": {"c": "unknown"}})
+    finally:
+        binance_usdm_testnet._unregister_watcher_wake("pa-entry-AAA")
+        binance_usdm_testnet._unregister_watcher_wake("pa-entry-BBB")
+
+
+def test_watcher_wake_registry_cleans_up_on_exit(monkeypatch) -> None:
+    """watcher 结束后注册表无残留(任意退出路径)."""
+    class OneStatusClient(FakeClient):
+        def order_status(self, *, symbol: str, client_id: str) -> str:
+            return "FILLED"
+
+    client = OneStatusClient()
+    binance_usdm_testnet._persist_pending(
+        "BTCUSDT",
+        {"client_id": "pa-entry-clean", "signal_id": "clean-signal"},
+    )
+    monkeypatch.setattr(binance_usdm_testnet.time, "monotonic", lambda: 0.0)
+    binance_usdm_testnet._watch_limit_entry(
+        client=client,
+        symbol="BTCUSDT",
+        client_id="pa-entry-clean",
+        side="BUY",
+        stop=Decimal("90"),
+        target=Decimal("120"),
+        quantity=Decimal("0.2"),
+        signal_id="clean-signal",
+        timeout_seconds=1.0,
+        poll_interval=0.1,
+    )
+    with binance_usdm_testnet._watcher_wake_lock:
+        assert "pa-entry-clean" not in binance_usdm_testnet._watcher_wake_events
+
 
 
 

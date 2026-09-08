@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002 - Chinese docstrings
 """Account-snapshot poller: batched Binance reads replace per-symbol polls."""
 from __future__ import annotations
 
@@ -287,5 +288,56 @@ def test_poller_skips_refresh_while_banned(monkeypatch) -> None:
         assert client.batch_calls == before, "banned poller must not issue requests"
     finally:
         poller.stop()
+
+
+def test_poller_period_provider_drives_cycle_and_stale() -> None:
+    """provider 动态周期: stale 阈值随周期放大(防直连回退)."""
+    current = [300.0]
+    client = FakeBatchedClient()
+    poller = bn.AccountSnapshotPoller(
+        client,
+        poll_seconds=60.0,
+        poll_period_provider=lambda: current[0],
+        clock=lambda: 1_000.0,
+    )
+    assert poller._current_period() == 300.0
+    poller.refresh()
+    # 动态周期 300s -> stale = max(72, 300*1.2=360) = 360
+    assert poller.snapshot_ready(now=1_360.0) is True
+    assert poller.snapshot_ready(now=1_360.1) is False
+    current[0] = 60.0
+    assert poller.snapshot_ready(now=1_072.0) is True  # 60s 周期 -> stale 回落 72
+    assert poller.snapshot_ready(now=1_073.0) is False
+
+
+def test_pushed_mark_price_is_preferred_by_current_mark_price(monkeypatch) -> None:
+    """WS 推送的 mark 优先于快照/直连; 无推送时回退路径不变. """
+    poller = bn.AccountSnapshotPoller(
+        FakeBatchedClient(), poll_seconds=60.0, clock=lambda: 1_000.0
+    )
+    poller.update_mark_price("BTCUSDT", Decimal("101.5"))
+    monkeypatch.setattr(bn, "_snapshot_poller", poller)
+
+    class RestSpy:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def mark_price(self, symbol: str) -> Decimal:
+            self.calls += 1
+            return Decimal("999")
+
+    client = RestSpy()
+    # WS 推送的 mark(clock 1000, age=0) -> 直接命中, 不落 REST
+    mark = bn.current_mark_price(client, "BTCUSDT")
+    assert mark == Decimal("101.5")
+    assert client.calls == 0
+    # 快照就绪但 WS mark 槽无值(新 symbol) -> 回退快照
+    poller.refresh()  # REST 快照包含 BTCUSDT/ETHUSDT marks
+    poller._marks_last_ok = 0.0  # 模拟 WS 通道停摆
+    mark2 = bn.current_mark_price(client, "ETHUSDT")
+    assert mark2 == Decimal("3.2")
+    assert client.calls == 0
+
+
 
 

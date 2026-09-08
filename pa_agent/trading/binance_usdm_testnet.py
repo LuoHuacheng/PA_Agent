@@ -54,6 +54,43 @@ def _manager_lock(symbol: str) -> threading.Lock:
 
 _ENTRY_CLIENT_PREFIX = "pa-entry-"
 
+# --- user-data stream -> fill watcher wake-up registry --------------------
+# The limit-entry watcher polls REST order status every poll_interval. With the
+# user-data websocket live, an ORDER_TRADE_UPDATE for a resting clientOrderId
+# should wake its watcher immediately; the watcher still confirms via REST, so
+# correctness never depends on the event (missed events only cost latency).
+# Entries are removed by the watcher on every exit path; a stale entry after a
+# hard kill is a tiny dict slot and is overwritten on the next watcher run.
+_watcher_wake_events: dict[str, "threading.Event"] = {}
+_watcher_wake_lock = threading.Lock()
+
+
+def _register_watcher_wake(client_id: str) -> "threading.Event":
+    """Register (or reuse) the wake event for one limit-entry watcher."""
+    with _watcher_wake_lock:
+        event = _watcher_wake_events.get(client_id)
+        if event is None:
+            event = threading.Event()
+            _watcher_wake_events[client_id] = event
+        return event
+
+
+def _unregister_watcher_wake(client_id: str) -> None:
+    with _watcher_wake_lock:
+        _watcher_wake_events.pop(client_id, None)
+
+
+def notify_user_order_update(payload: dict[str, Any]) -> None:
+    """Wake the fill watcher whose clientOrderId just got a user-data event."""
+    order = payload.get("o") or {}
+    client_id = str(order.get("c") or "")
+    if not client_id:
+        return
+    with _watcher_wake_lock:
+        event = _watcher_wake_events.get(client_id)
+    if event is not None:
+        event.set()
+
 # Bounded retry for transient transport failures (torn TLS connections, stale
 # timestamps under high latency). Only idempotent-safe requests are retried:
 # every GET, and POSTs that carry an explicit idempotency key
@@ -312,6 +349,9 @@ class BinanceUSDMTestnetClient:
         self._api_secret = api_secret.encode("utf-8")
         self._opener = opener
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
+        # exchangeInfo is a big full-market response: cache per-symbol results
+        # briefly so tick rounding never triggers an extra full fetch.
+        self._info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def _request(
         self, method: str, path: str, params: dict[str, Any] | None = None, *, signed: bool = False
@@ -386,12 +426,23 @@ class BinanceUSDMTestnetClient:
         """Close the user-data stream (no more events after this)."""
         self._request("DELETE", "/fapi/v1/listenKey", {"listenKey": listen_key})
 
+    _EXCHANGE_INFO_TTL_SECONDS = 300.0
+
     def exchange_info(self, symbol: str) -> dict[str, Any]:
+        now = time.monotonic()
+        cached = self._info_cache.get(symbol)
+        if cached is not None and now - cached[0] < self._EXCHANGE_INFO_TTL_SECONDS:
+            return cached[1]
         response = self._request("GET", "/fapi/v1/exchangeInfo")
-        for item in response.get("symbols", []) if isinstance(response, dict) else []:
-            if item.get("symbol") == symbol:
-                return item
-        raise BinanceAPIError(f"Testnet does not list symbol {symbol}")
+        item = None
+        for candidate in response.get("symbols", []) if isinstance(response, dict) else []:
+            if candidate.get("symbol") == symbol:
+                item = candidate
+                break
+        if item is None:
+            raise BinanceAPIError(f"Testnet does not list symbol {symbol}")
+        self._info_cache[symbol] = (now, item)
+        return item
 
     def mark_price(self, symbol: str) -> Decimal:
         result = self._request("GET", "/fapi/v1/premiumIndex", {"symbol": symbol})
@@ -627,6 +678,15 @@ class BinanceUSDMTestnetClient:
         close_position: bool = True,
     ) -> None:
         # Binance migrated conditional orders to the Algo Service in December 2025.
+        # triggerPrice must respect the symbol's PRICE_FILTER tick size, or the
+        # exchange answers -1111 "Precision is over the maximum defined for
+        # this asset" (seen on breakeven stops placed at raw average-fill
+        # prices). Round down to tick before signing; exchange_info is cached.
+        try:
+            info = self.exchange_info(symbol)
+            stop_price = _price_for_tick(stop_price, info)
+        except BinanceAPIError:
+            pass  # keep legacy behavior: never block a protective order on tick data
         params: dict[str, Any] = {
             "algoType": "CONDITIONAL",
             "symbol": symbol,
@@ -1337,6 +1397,7 @@ class AccountSnapshotPoller:
         *,
         poll_seconds: float = _SNAPSHOT_DEFAULT_POLL_SECONDS,
         stale_after_seconds: float | None = None,
+        poll_period_provider: Callable[[], float] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._client = client
@@ -1347,9 +1408,14 @@ class AccountSnapshotPoller:
                 float(poll_seconds) * _SNAPSHOT_STALE_AUTO_FACTOR,
             )
         self._stale_after = float(stale_after_seconds)
+        # When set, the live period is re-read before every cycle (e.g. a WS
+        # health probe: wide interval while the user-data stream is up, tight
+        # interval while it is down so REST polling carries the load).
+        self._poll_period_provider = poll_period_provider
         self._clock = clock
         self._positions: dict[str, dict[str, Any]] = {}
         self._marks: dict[str, Decimal] = {}
+        self._marks_last_ok: float = 0.0
         self._last_ok: float = 0.0
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -1372,10 +1438,19 @@ class AccountSnapshotPoller:
         self._thread = None
 
     def _run(self) -> None:
+        period = (
+            self._poll_period_provider()
+            if self._poll_period_provider is not None
+            else self._poll_seconds
+        )
         while not self._stop.wait(
-            self._poll_seconds
-            * (1.0 + random.uniform(0.0, _SNAPSHOT_POLL_JITTER_FRACTION))
+            period * (1.0 + random.uniform(0.0, _SNAPSHOT_POLL_JITTER_FRACTION))
         ):
+            period = (
+                self._poll_period_provider()
+                if self._poll_period_provider is not None
+                else self._poll_seconds
+            )
             if rate_limiter.is_banned():
                 # 共享 IP 封禁期间完全不请求（熔断器到期后下一周期自然恢复），
                 # 避免给封禁续命；熔断状态由请求层在错误抛出处统一记录。
@@ -1403,12 +1478,31 @@ class AccountSnapshotPoller:
                 self._positions = positions
                 self._last_ok = self._clock()
 
+    def _current_period(self) -> float:
+        """Live poll period for this moment (provider-aware)."""
+        if self._poll_period_provider is not None:
+            try:
+                return float(self._poll_period_provider())
+            except (TypeError, ValueError):
+                return self._poll_seconds
+        return self._poll_seconds
+
     def snapshot_ready(self, now: float | None = None) -> bool:
-        """True when a recent successful snapshot exists (age <= stale limit)."""
+        """True when a recent successful snapshot exists (age <= stale limit).
+
+        With a dynamic poll period the freshness limit follows the live
+        period, otherwise the snapshot would go stale during every long cycle
+        and send all readers back to direct REST (the very burst the shared
+        poller exists to avoid).
+        """
         if self._last_ok <= 0:
             return False
         now = self._clock() if now is None else now
-        return (now - self._last_ok) <= self._stale_after
+        stale_after = max(
+            self._stale_after,
+            self._current_period() * _SNAPSHOT_STALE_AUTO_FACTOR,
+        )
+        return (now - self._last_ok) <= stale_after
 
     def position(self, symbol: str) -> dict[str, Any] | None:
         """Snapshot row for symbol (amount/entry); None == flat or unknown."""
@@ -1418,6 +1512,29 @@ class AccountSnapshotPoller:
 
     def mark_price(self, symbol: str) -> Decimal | None:
         with self._lock:
+            return self._marks.get(symbol)
+
+    def update_mark_price(self, symbol: str, price: Decimal) -> None:
+        """Push one mark price (from the public markPrice stream)."""
+        with self._lock:
+            self._marks[symbol] = price
+            self._marks_last_ok = self._clock()
+
+    def mark_price_fresh(
+        self, symbol: str, *, max_age_seconds: float = 15.0, now: float | None = None
+    ) -> Decimal | None:
+        """Mark pushed recently by the WS channel, else None.
+
+        Guards prefer this over the snapshot when the REST snapshot is not
+        fresh (WS mark ticks every ~3s; REST positions refresh far less often
+        while the user-data stream is healthy).
+        """
+        with self._lock:
+            if self._marks_last_ok <= 0:
+                return None
+            current = self._clock() if now is None else now
+            if current - self._marks_last_ok > max_age_seconds:
+                return None
             return self._marks.get(symbol)
 
 
@@ -1435,6 +1552,7 @@ def start_account_snapshot_poller(
     api_secret: str,
     poll_seconds: float = _SNAPSHOT_DEFAULT_POLL_SECONDS,
     stale_after_seconds: float | None = None,
+    poll_period_provider: Callable[[], float] | None = None,
 ) -> bool:
     """Start the shared poller; returns True only when it newly started."""
     global _snapshot_poller, _snapshot_poller_started
@@ -1450,6 +1568,7 @@ def start_account_snapshot_poller(
             client,
             poll_seconds=poll_seconds,
             stale_after_seconds=stale_after_seconds,
+            poll_period_provider=poll_period_provider,
         )
         poller.start()
         _snapshot_poller = poller
@@ -1481,12 +1600,17 @@ def current_position(client: BinanceUSDMTestnetClient, symbol: str) -> dict[str,
 
 
 def current_mark_price(client: BinanceUSDMTestnetClient, symbol: str) -> Decimal:
-    """Best available mark price: fresh snapshot first, else direct REST."""
+    """Best available mark price: WS push, then fresh snapshot, else REST."""
     poller = _snapshot_poller
-    if poller is not None and poller.snapshot_ready():
-        mark = poller.mark_price(symbol)
-        if mark is not None:
-            return mark
+    if poller is not None:
+        fresh_mark = getattr(poller, "mark_price_fresh", None)
+        pushed = fresh_mark(symbol) if fresh_mark is not None else None
+        if pushed is not None:
+            return pushed
+        if poller.snapshot_ready():
+            mark = poller.mark_price(symbol)
+            if mark is not None:
+                return mark
     _raise_if_banned()
     return client.mark_price(symbol)
 
@@ -2457,6 +2581,7 @@ def _watch_limit_entry(
     roll back any partial fill when the order ends (timeout / cancel).
     """
     deadline = time.monotonic() + timeout_seconds
+    wake = _register_watcher_wake(client_id)
     while True:
         try:
             status = client.order_status(symbol=symbol, client_id=client_id)
@@ -2477,11 +2602,13 @@ def _watch_limit_entry(
                     conf=conf,
                     target2=target2,
                 )
+                _unregister_watcher_wake(client_id)
                 return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 continue
-            time.sleep(min(poll_interval, remaining))
+            wake.clear()
+            wake.wait(min(poll_interval, remaining))
             continue
         if status == "FILLED":
             try:
@@ -2503,6 +2630,7 @@ def _watch_limit_entry(
                 except BinanceAPIError:
                     logger.exception("Failed to close filled limit position for %s", symbol)
                 logger.error("Limit entry filled but protection failed for %s: %s", symbol, exc)
+                _unregister_watcher_wake(client_id)
                 return
             _remember_signal(signal_id)
             if config is not None:
@@ -2515,6 +2643,7 @@ def _watch_limit_entry(
                 )
             _drop_pending(symbol, client_id)
             logger.info("Testnet limit entry filled and protected: %s %s", symbol, client_id)
+            _unregister_watcher_wake(client_id)
             return
         if status in ("CANCELED", "EXPIRED", "REJECTED"):
             # The entry may already have filled partially before it ended
@@ -2533,6 +2662,7 @@ def _watch_limit_entry(
                 conf=conf,
                 target2=target2,
             )
+            _unregister_watcher_wake(client_id)
             return
         if time.monotonic() >= deadline:
             _cancel_and_settle(
@@ -2549,11 +2679,13 @@ def _watch_limit_entry(
                 conf=conf,
                 target2=target2,
             )
+            _unregister_watcher_wake(client_id)
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             continue
-        time.sleep(min(poll_interval, remaining))
+        wake.clear()
+        wake.wait(min(poll_interval, remaining))
 
 
 def resume_pending_limit_watchers(

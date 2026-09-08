@@ -24,6 +24,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from decimal import Decimal
 from typing import Any
 
 logger = logging.getLogger("pa_agent.trading.binance_user_data")
@@ -58,12 +59,14 @@ class UserDataEventHandlers:
         on_account_update: Callable[[dict[str, Any]], None] | None = None,
         on_other_event: Callable[[str, dict[str, Any]], None] | None = None,
         on_connected: Callable[[], None] | None = None,
+        on_disconnected: Callable[[], None] | None = None,
         on_listen_key_expired: Callable[[], None] | None = None,
     ) -> None:
         self.on_order_update = on_order_update
         self.on_account_update = on_account_update
         self.on_other_event = on_other_event
         self.on_connected = on_connected
+        self.on_disconnected = on_disconnected
         self.on_listen_key_expired = on_listen_key_expired
 
 class BinanceUserDataStream:
@@ -255,6 +258,12 @@ class BinanceUserDataStream:
 
     def _on_close(self, _app: Any, *_args: object) -> None:
         logger.info("User-data stream closed")
+        disconnected = self._handlers.on_disconnected
+        if disconnected is not None:
+            try:
+                disconnected()
+            except Exception:
+                logger.exception("on_disconnected handler failed")
 
     def _keepalive_loop(self) -> None:
         while not self._stop.wait(self._keepalive_interval):
@@ -275,4 +284,119 @@ class BinanceUserDataStream:
                 if app is not None:
                     with contextlib.suppress(Exception):  # pragma: no cover
                         app.close()
+
+class BinanceMarkPriceStream:
+    """Combined public mark-price stream for a fixed symbol set.
+
+    One websocket subscribes to <symbol>@markPrice (updates ~3s) for every
+    symbol and pushes Decimal prices through on_update. This replaces the
+    per-cycle all_mark_prices REST batch while the socket is up; REST fallback
+    (snapshot poller / direct mark_price) covers disconnects, so the stream is
+    strictly an optimization and never a correctness dependency.
+    """
+
+    def __init__(
+        self,
+        symbols: list[str],
+        *,
+        on_update: Callable[[str, Decimal], None],
+        ws_base: str | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if not ws_base:
+            ws_base = _DEFAULT_WS_BASE
+        if not symbols:
+            raise ValueError("mark-price stream needs at least one symbol")
+        self._symbols = [str(s).upper() for s in symbols]
+        self._on_update = on_update
+        self._ws_base = ws_base.rstrip("/")
+        self._sleep = sleep
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._app: Any = None
+        self._lock = threading.Lock()
+
+    def start(self) -> bool:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run, name="binance-mark-price", daemon=True
+            )
+            self._thread.start()
+            return True
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop.set()
+        app = self._app
+        if app is not None:
+            with contextlib.suppress(Exception):  # pragma: no cover
+                app.close()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+        self._thread = None
+
+    def _stream_url(self) -> str:
+        streams = "/".join(f"{s.lower()}@markPrice" for s in self._symbols)
+        return f"{self._ws_base}/stream?streams={streams}"
+    def _run(self) -> None:
+        import websocket  # lazy, same as user-data stream
+
+        delays = _RECONNECT_DELAYS_SECONDS
+        index = 0
+        while not self._stop.is_set():
+            app = websocket.WebSocketApp(
+                self._stream_url(),
+                on_open=self._on_open,
+                on_message=self._on_message,
+                on_error=self._on_error,
+                on_close=self._on_close,
+            )
+            self._app = app
+            try:
+                app.run_forever(
+                    ping_interval=_PING_INTERVAL_SECONDS,
+                    ping_timeout=_PING_TIMEOUT_SECONDS,
+                )
+            finally:
+                self._app = None
+            if self._stop.is_set():
+                break
+            delay = delays[min(index, len(delays) - 1)]
+            index += 1
+            if self._sleep(delay) is False:
+                break
+
+    def _on_open(self, _app: Any) -> None:
+        logger.info("Mark-price stream connected (%d symbols)", len(self._symbols))
+
+    def _on_message(self, _app: Any, message: str) -> None:
+        try:
+            payload = json.loads(message)
+        except (TypeError, ValueError):
+            return
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            return
+        symbol = str(data.get("s") or "")
+        raw = data.get("p")
+        if not symbol or raw is None:
+            return
+        try:
+            price = Decimal(str(raw))
+        except Exception:
+            return
+        try:
+            self._on_update(symbol, price)
+        except Exception:
+            logger.exception("mark-price update handler failed for %s", symbol)
+
+    def _on_error(self, _app: Any, error: Exception) -> None:
+        logger.warning("Mark-price stream error: %s", error)
+
+    def _on_close(self, _app: Any, *_args: object) -> None:
+        logger.info("Mark-price stream closed")
+
+
 
