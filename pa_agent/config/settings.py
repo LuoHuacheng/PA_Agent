@@ -43,6 +43,9 @@ class PromptSettings(BaseModel):
     experience_max_chars_per_entry: int = Field(default=400, ge=100, le=4000)
     #: Inject pattern判定表 + 速查 brief into Stage 1 user prompt (reduces missed tags).
     stage1_inject_pattern_briefs: bool = True
+    #: 阶段一 K 线表最多渲染的最近 K 行数; 0 = 不裁剪(默认, 全量). 裁剪时
+    #: 更早的 K 线以十根滚轴概览补充 (Phase C A/B 实验开关).
+    stage1_kline_rows_limit: int = Field(default=0, ge=0, le=60)
 
 
 class ValidationSettings(BaseModel):

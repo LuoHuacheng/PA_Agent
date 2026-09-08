@@ -30,7 +30,8 @@
     "stage2_load_full_strategy_library": false,
     "experience_max_entries": 0,
     "experience_max_chars_per_entry": 400,
-    "stage1_inject_pattern_briefs": true
+    "stage1_inject_pattern_briefs": true,
+    "stage1_kline_rows_limit": 0
   },
   "validation": {
     "normalization_mode": "strict",

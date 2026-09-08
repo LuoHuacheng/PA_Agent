@@ -989,6 +989,38 @@ class PromptAssembler:
         lines.append(_KLINE_INDICATOR_NOTE)
         return "\n".join(lines)
 
+    def _stage1_kline_limit(self) -> int | None:
+        """Configured stage-1 table row cap (0/None = full table)."""
+        cfg = self._prompt_settings
+        if cfg is None:
+            return None
+        try:
+            value = int(getattr(cfg, "stage1_kline_rows_limit", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    @staticmethod
+    def _render_kline_rollup_block(frame: KlineFrame, limit: int | None) -> str:
+        """Ten-bar rollup of the bars trimmed away by the table limit; '' when
+        the limit is unset or covers the whole frame."""
+        if not limit or limit >= len(frame.bars):
+            return ""
+        bars = frame.bars
+        lines = ["#### 更早 K 线概览(程序压缩, 精确价位以程序结构位/特征为准)"]
+        for start in range(int(limit), len(bars), 10):
+            chunk = bars[start:start + 10]
+            if not chunk:
+                continue
+            hi = max(float(b.high) for b in chunk)
+            lo = min(float(b.low) for b in chunk)
+            first, last = chunk[0], chunk[-1]
+            lines.append(
+                f"- K{first.seq}-K{last.seq}: 高{hi:.10g} 低{lo:.10g} "
+                f"收 {last.close:.10g}->{first.close:.10g}"
+            )
+        return "\n".join(lines)
+
     @staticmethod
     def _render_kline_feature_table(frame: KlineFrame, limit: int | None = None) -> str:
         """Render方案 A single-bar geometry features for prompt grounding."""
@@ -1300,8 +1332,10 @@ class PromptAssembler:
             _stage1_output_reminder_for_mode(analysis_mode),
         ]
         stage1_context = "\n\n---\n\n".join(p for p in stage1_parts if p)
-        kline_table = self._render_kline_table(frame)
-        feature_table = self._render_kline_feature_table(frame)
+        kline_limit = self._stage1_kline_limit()
+        kline_table = self._render_kline_table(frame, kline_limit)
+        feature_table = self._render_kline_feature_table(frame, kline_limit)
+        rollup_block = self._render_kline_rollup_block(frame, kline_limit)
         simple_features_block = self._render_simple_market_features_block(frame)
         n_bars = len(frame.bars)
         if n_bars > 40:
@@ -1338,6 +1372,7 @@ class PromptAssembler:
             f"## K线数据(序号1=最新已收盘K线,序号越大越早;不含当前未收盘K线;"
             f"阳阴列由程序按收盘价与开盘价计算:收盘>开盘=阳线,收盘<开盘=阴线,相等=平)\n\n"
             f"{kline_table}\n\n"
+            f"{rollup_block + chr(10) if rollup_block else ''}"
             "## K线几何特征(程序预计算；「类型」列为单字段 bar_type，判定优先级：inside/outside > doji/trend/flat/other；"
             "不替代周期判断；基于当前 N 根已收盘 K 线，指标非全历史延续)\n\n"
             f"{feature_table}\n\n"
