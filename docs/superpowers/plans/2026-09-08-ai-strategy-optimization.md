@@ -234,5 +234,8 @@ D) 信息面补强：HTF 程序化摘要、经验库自动沉淀。
 - 运行态(不入库)：feedback.enabled=true(closed>=50)；stage1_kline_rows_limit=40 A/B 中(本地估 71,000→68,432 tokens/轮)；首份校准报告：胜率 38.5%、Brier 0.2728、上涨通道 +1.63R / 区间系 -0.3R。
 - Phase B 已完成提交(c56fb3c, 9f3b24e)，待实跑冒烟；Phase C：C1/C2 完成、去重路线判死、C3 light_mode 未开发；Phase D 未开工。
 - 分支 feat/phase-a-feedback-loop 未合并 main。
+- Phase C 完成：C1 audit(阶段一60,280/阶段二115,772 tokens中位,缓存66%/34%)、C2 表裁剪开关(默认关)、C3 轻量模式(默认关, commit 95005f1)。
+- Phase D 完成：D2 经验案例自动沉淀(commit 2222997, 28 条真实案例已导出, 经验库 reader 启用 max_entries=8)；D1 HTF 程序化摘要(commit 560f02f, monitor 可选拉取 1h/4h 注入 stage1, 默认关)。
+- 待运行时验证项：monitor 实跑冒烟(light/HTF 先关)、A/B(kline 40)观察 2-4 天、每周 outcome_merge+calibration、B 后重试率对比。
 - **双源漂移与历史口径变化**：CSV/pending 匹配不到的行进 audit 不硬凑；trade_pnl_report 改 0→loss 后历史 CSV 按新口径重算一次并复核 diff（net==0 极罕见）。
 - **无成交源期**：dry_run/disabled/无 testnet key 时 outcomes.csv 为空属正常，audit 报"无成交源"不报错；存量历史无市价单成交、只有限价计划，统计显著性不足前不做结论（min_samples 门控兜底）。
