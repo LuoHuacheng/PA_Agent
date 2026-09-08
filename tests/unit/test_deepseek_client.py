@@ -188,8 +188,9 @@ def test_chat_sends_max_tokens_when_thinking():
     assert kwargs["max_tokens"] == 384_000
 
 
-def test_chat_kkai_sends_thinking_object_not_reasoning_effort():
-    """KKAI Claude: thinking budget in extra_body; reasoning_effort rejected upstream."""
+def test_chat_kkai_deepseek_v4_uses_adaptive_thinking():
+    """KKAI 网关 + deepseek-v4 模型: thinking.type=adaptive + output_config.effort
+    (DeepSeek v4+ 协议; 网关对 v4 模型不再接受 enabled/budget_tokens)。"""
     settings = _make_settings()
     settings.base_url = "https://api.kkone.vip/v1"
     settings.thinking = True
@@ -204,11 +205,13 @@ def test_chat_kkai_sends_thinking_object_not_reasoning_effort():
         client.chat([{"role": "user", "content": "hi"}])
 
     kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
-    assert kwargs["extra_body"]["thinking"] == {"type": "enabled", "budget_tokens": 383_999}
-    assert "reasoning_effort" not in kwargs
+    assert kwargs["extra_body"]["thinking"] == {"type": "adaptive"}
+    assert kwargs["extra_body"]["output_config"] == {"effort": "high"}
+    assert kwargs["reasoning_effort"] == "high"
 
 
-def test_chat_kkai_thinking_off_sends_no_thinking_params():
+def test_chat_kkai_thinking_off_sends_no_reasoning_effort():
+    """thinking 关闭: extra_body 只含 thinking.disabled, 顶层不带 reasoning_effort。"""
     settings = _make_settings()
     settings.base_url = "https://api.kkone.vip/v1"
     settings.thinking = False
@@ -222,8 +225,8 @@ def test_chat_kkai_thinking_off_sends_no_thinking_params():
         client.chat([{"role": "user", "content": "hi"}])
 
     kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
+    assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in kwargs
-    assert "extra_body" not in kwargs
 
 
 def test_chat_yunwu_opus_47_sends_adaptive_thinking():
@@ -267,6 +270,7 @@ def test_chat_yunwu_thinking_off_sends_nothing():
 
 
 def test_stream_kkai_passes_thinking_extra_body():
+    """stream 路径同样携带 v4 adaptive thinking extra_body。"""
     settings = _make_settings()
     settings.base_url = "https://api.kkone.vip/v1"
     settings.thinking = True
@@ -302,8 +306,8 @@ def test_stream_kkai_passes_thinking_extra_body():
         )
 
     kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
-    assert kwargs["extra_body"]["thinking"]["budget_tokens"] == 383_999
-    assert "reasoning_effort" not in kwargs
+    assert kwargs["extra_body"]["thinking"] == {"type": "adaptive"}
+    assert kwargs["extra_body"]["output_config"] == {"effort": "medium"}
     assert reply.reasoning_content == "think"
 
 

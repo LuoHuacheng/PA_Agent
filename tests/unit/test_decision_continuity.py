@@ -19,9 +19,9 @@ from pa_agent.data.base import KlineBar, KlineFrame, IndicatorBundle
 
 
 def _ms(iso: str) -> int:
-    # Treat local ISO as UTC in tests; only deltas matter.
-    dt = datetime.strptime(iso, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    return int(dt.timestamp() * 1000)
+    # Records are local-naive ISO (timestamp_local_iso / snapshot_ts_local_ms
+    # semantics): parse as local time so deltas match production behaviour.
+    return int(datetime.strptime(iso, "%Y-%m-%d %H:%M:%S").timestamp() * 1000)
 
 
 def _frame(
@@ -235,7 +235,7 @@ def test_render_prompt_mentions_neutral_ais():
 
 def test_audit_relation_flip_label():
     prev = {
-        "record_time": "2026-06-22 22:49:07",
+        "record_time": "2026-06-30 14:20:07",  # 与默认 frame 快照(14:25)相近
         "order_direction": "做空",
         "order_type": "限价单",
         "entry_price": "4196.79",
@@ -270,9 +270,9 @@ def test_build_continuity_context_auto_cancels_after_3_bars_unfilled_limit():
                 "decision": {
                     "order_direction": "做多",
                     "order_type": "限价单",
-                    "entry_price": 5000.0,  # not touched by _frame() low
-                    "stop_loss_price": 4980.0,
-                    "take_profit_price": 5050.0,
+                    "entry_price": 4180.0,  # below frame low(4190): 未触发
+                    "stop_loss_price": 4160.0,
+                    "take_profit_price": 4240.0,
                 }
             },
         },
@@ -295,9 +295,9 @@ def test_build_continuity_context_auto_cancels_on_cycle_change_unfilled_limit():
                 "decision": {
                     "order_direction": "做多",
                     "order_type": "限价单",
-                    "entry_price": 5000.0,
-                    "stop_loss_price": 4980.0,
-                    "take_profit_price": 5050.0,
+                    "entry_price": 4180.0,  # below frame low(4190): 未触发
+                    "stop_loss_price": 4160.0,
+                    "take_profit_price": 4240.0,
                 }
             },
         },
@@ -319,9 +319,9 @@ def test_build_continuity_context_auto_cancels_on_direction_change_unfilled_limi
                 "decision": {
                     "order_direction": "做多",
                     "order_type": "限价单",
-                    "entry_price": 7459.05,
-                    "stop_loss_price": 7454.13,
-                    "take_profit_price": 7466.42,
+                    "entry_price": 4180.0,  # below frame low(4190): 未触发
+                    "stop_loss_price": 4160.0,
+                    "take_profit_price": 4240.0,
                 }
             },
         },
