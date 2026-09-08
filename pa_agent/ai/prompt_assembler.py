@@ -1766,6 +1766,7 @@ class PromptAssembler:
             else "本消息下方附有完整 K 线表与几何特征。\n\n"
         )
         feedback_stats = self._feedback_stats_block()
+        node_prefill_block = self._render_node_prefills_block(frame, stage1_json)
         return (
             f"{_STAGE2_API_TASK_RULE}\n\n"
             "## 阶段二任务\n\n"
@@ -1778,6 +1779,7 @@ class PromptAssembler:
             f"{compact_s1}"
             f"\n```\n\n"
             f"{kline_block}"
+            f"{node_prefill_block + chr(10) if node_prefill_block else ''}"
             f"{prev_pred_block + chr(10) if prev_pred_block else ''}"
             f"请根据以上诊断和K线数据,按《二元决策.txt》§3–§11、§14 输出 JSON 决策结果"
             f"(含 decision_trace 与 terminal)。\n"
@@ -1800,6 +1802,28 @@ class PromptAssembler:
             feedback = load_settings().feedback
             return load_stats_block(feedback)
         except Exception:  # noqa: BLE001 - best-effort injection
+            return ""
+
+    def _render_node_prefills_block(
+        self, frame: KlineFrame, stage1_json: dict
+    ) -> str:
+        """Task B2: §6.3 boundary / §9.0 signal-bar quality program prefills."""
+        try:
+            from pa_agent.ai.kline_features import compute_kline_geometry_features
+            from pa_agent.ai.market_features import compute_simple_market_features
+            from pa_agent.ai.node_prefills import (
+                prefill_boundary,
+                prefill_signal_quality,
+                render_node_prefills_block as render,
+            )
+
+            _ = stage1_json  # boundary/quality are frame-local; context used later
+            features = compute_simple_market_features(frame)
+            boundary = prefill_boundary(features)
+            geo = compute_kline_geometry_features(frame, limit=1)
+            quality = prefill_signal_quality(geo[0]) if geo else None
+            return render(boundary=boundary, quality=quality)
+        except Exception:  # noqa: BLE001 - best-effort prefill block
             return ""
 
     def stage2_system_prompt_only(

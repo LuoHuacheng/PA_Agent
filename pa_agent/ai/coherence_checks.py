@@ -745,7 +745,68 @@ def validate_stage2_coherence(
         )
         errors.extend(_validate_stage2_section9(stage2, decision_trace))
 
+    errors.extend(validate_signal_quality_vs_prefill(stage2, kline_frame))
+
     return errors
+
+
+def validate_signal_quality_vs_prefill(
+    stage2: dict[str, Any], kline_frame: Any
+) -> list[str]:
+    """Task B2: §9.0 signal-bar quality upgrades need cited K-line evidence.
+
+    Downgrades are free (the model may see context the program missed).
+    Upgrades to medium/strong without any K-number reference anywhere in the
+    stage-2 text produce one retry hint; every computation hiccup fails soft.
+    """
+    if kline_frame is None:
+        return []
+    if stage2.get("_auto_stub"):
+        return []
+    try:
+        from pa_agent.ai.kline_features import compute_kline_geometry_features
+        from pa_agent.ai.node_prefills import prefill_signal_quality, rank_quality
+
+        geo = compute_kline_geometry_features(kline_frame, limit=1)
+        if not geo:
+            return []
+        pre_quality = prefill_signal_quality(geo[0])[0]
+    except Exception:  # noqa: BLE001 best-effort quality check
+        return []
+    bar_analysis = stage2.get("bar_analysis")
+    if not isinstance(bar_analysis, dict):
+        return []
+    signal_bar = bar_analysis.get("signal_bar")
+    if not isinstance(signal_bar, dict):
+        return []
+    model_quality = str(signal_bar.get("quality") or "").strip().lower()
+    if model_quality not in ("weak", "medium", "strong", "invalid"):
+        return []
+    if rank_quality(model_quality) <= rank_quality(pre_quality):
+        return []
+    # invalid -> weak is a free conservative lift; everything else needs a cite
+    if model_quality == "weak" and pre_quality == "invalid":
+        return []
+    decision = stage2.get("decision")
+    texts = [
+        str(decision.get("reasoning") or "") if isinstance(decision, dict) else "",
+        str(signal_bar.get("reason") or ""),
+    ]
+    decision_trace = stage2.get("decision_trace")
+    if isinstance(decision_trace, list):
+        texts.extend(
+            str(item.get("reason") or "") for item in decision_trace
+            if isinstance(item, dict)
+        )
+    import re
+
+    if any(re.search(r"K\d+", t) for t in texts):
+        return []
+    return [
+        f"signal_bar.quality={model_quality!r} upgrades the program prefill "
+        f"{pre_quality!r} without any K-line citation; either downgrade or cite "
+        "the concrete bar (e.g. K1) and structure in signal_bar.reason/reasoning."
+    ]
 
 
 def _validate_stage2_section9(
