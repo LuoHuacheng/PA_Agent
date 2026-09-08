@@ -4017,8 +4017,14 @@ class MainWindow(QMainWindow):
                 from pa_agent.trading.binance_usdm_testnet import execute_market_signal
 
                 result = execute_market_signal(inner, settings, analysis_symbol=meta_symbol)
+                if settings is not None:
+                    from pa_agent.trading.binance_env import resolve_env
+
+                    exec_env_label = resolve_env(settings).label_zh
+                else:
+                    exec_env_label = "测试网"
                 logger.info(
-                    "Binance U本位 Testnet 自动执行: status=%s symbol=%s reason=%s",
+                    f"Binance U本位 {exec_env_label} 自动执行: status=%s symbol=%s reason=%s",
                     result.status,
                     result.symbol,
                     result.reason,

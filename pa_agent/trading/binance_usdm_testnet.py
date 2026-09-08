@@ -1,7 +1,12 @@
-"""Binance USDⓈ-M Futures Testnet order execution.
+"""Binance USDⓈ-M Futures order execution (testnet default, live opt-in).
 
-This module intentionally supports Testnet only. Credentials are read from the
-local gitignored ``settings.json`` file and never written to application logs.
+The execution environment follows ``settings.binance_usdm_environment``
+(default testnet: behaviour unchanged). Live (实盘) switches the REST/WS
+gateways, runtime state file and message labels via
+``pa_agent.trading.binance_env``; the live section still requires explicit
+``enabled`` / ``dry_run=false`` / ``emergency_stop=false`` before any order.
+Credentials are read from the local gitignored ``settings.json`` file and
+never written to application logs.
 """
 
 import csv
@@ -25,6 +30,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
+from pa_agent.trading import binance_env
+from pa_agent.trading.binance_env import BinanceTradeEnv
 from pa_agent.trading.rate_limit import parse_banned_until_ms, rate_limiter
 from pa_agent.util.trade_metrics import compute_risk_reward, passes_trader_equation
 
@@ -40,6 +47,39 @@ _STATE_LOCK = threading.Lock()
 # that run on separate daemon threads for the same symbol (guard vs runner).
 _MANAGER_LOCKS: dict[str, threading.Lock] = {}
 _MANAGER_LOCKS_GUARD = threading.Lock()
+
+# --- runtime execution environment (testnet/live) ------------------------
+# The environment follows settings.binance_usdm_environment and is adopted at
+# every public entry point that holds settings (execute/resume/pnl), so one
+# process stays on one environment. The runtime profile drives the client
+# default gateway, the per-environment state file and message labels.
+_runtime_env_lock = threading.Lock()
+_runtime_env: BinanceTradeEnv = binance_env.TESTNET_ENV
+
+
+def configure_binance_environment(settings: Settings | None) -> BinanceTradeEnv:
+    """Adopt the settings-declared execution environment (idempotent).
+
+    Public entry points call this automatically; the monitor also calls it at
+    startup so poller/WS wiring is consistent before any thread starts.
+    """
+    global _runtime_env
+    env = binance_env.resolve_env(settings)
+    with _runtime_env_lock:
+        if env.key != _runtime_env.key:
+            logger.info(
+                "Binance execution environment: %s (%s)",
+                env.label_zh,
+                env.key,
+            )
+            _runtime_env = env
+    return _runtime_env
+
+
+def active_environment() -> BinanceTradeEnv:
+    """Profile of the environment this process currently runs (default testnet)."""
+    with _runtime_env_lock:
+        return _runtime_env
 
 
 def _manager_lock(symbol: str) -> threading.Lock:
@@ -354,7 +394,11 @@ def _entry_client_id(signal_id: str) -> str:
 
 
 class BinanceUSDMTestnetClient:
-    """Small signed REST client for the Testnet U本位 API only."""
+    """Small signed REST client for the USDⓈ-M Futures API.
+
+    Connects to the process runtime environment's REST gateway by default
+    (testnet); pass *base_url* to pin a gateway explicitly.
+    """
 
     def __init__(
         self,
@@ -363,9 +407,13 @@ class BinanceUSDMTestnetClient:
         *,
         opener: Callable[..., Any] = urlopen,
         now_ms: Callable[[], int] | None = None,
+        base_url: str | None = None,
     ) -> None:
         if not api_key.strip() or not api_secret.strip():
-            raise ValueError("Binance Testnet API key and secret are required")
+            raise ValueError(
+                f"Binance {active_environment().label_en} API key and secret are required"
+            )
+        self._base_url = (base_url or active_environment().rest_base).rstrip("/")
         self._api_key = api_key
         self._api_secret = api_secret.encode("utf-8")
         self._opener = opener
@@ -400,7 +448,7 @@ class BinanceUSDMTestnetClient:
                 self._api_secret, query.encode("utf-8"), hashlib.sha256
             ).hexdigest()
         query = urlencode(payload)
-        url = f"{_TESTNET_BASE_URL}{path}" + (f"?{query}" if query else "")
+        url = f"{self._base_url}{path}" + (f"?{query}" if query else "")
         request = Request(url, method=method, headers={"X-MBX-APIKEY": self._api_key})
         try:
             with self._opener(request, timeout=_TIMEOUT_SECONDS) as response:
@@ -461,7 +509,7 @@ class BinanceUSDMTestnetClient:
                 item = candidate
                 break
         if item is None:
-            raise BinanceAPIError(f"Testnet does not list symbol {symbol}")
+            raise BinanceAPIError(f"{active_environment().label_en} does not list symbol {symbol}")
         self._info_cache[symbol] = (now, item)
         return item
 
@@ -787,10 +835,16 @@ def _execute_market_signal_once(
     client: BinanceUSDMTestnetClient | None = None,
     trend_30d_pct: float | None = None,
 ) -> ExecutionResult:
-    """Execute one validated market signal, with mandatory Testnet TP/SL protection."""
-    config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
+    """Execute one validated market signal, with mandatory TP/SL protection."""
+    configure_binance_environment(settings)
+    conflict = binance_env.env_conflicts(settings)
+    if conflict:
+        return ExecutionResult("rejected", conflict)
+    config = binance_env.active_cfg(settings)
     if not config.enabled:
-        return ExecutionResult("skipped", "Binance Testnet automation disabled")
+        return ExecutionResult(
+            "skipped", f"Binance {active_environment().label_en} automation disabled"
+        )
     if config.emergency_stop:
         return ExecutionResult("skipped", "Emergency stop enabled")
     if config.dry_run:
@@ -867,7 +921,7 @@ def _execute_market_signal_once(
             # rejecting the signal. Fails if hedge-mode positions are open.
             try:
                 active_client.set_one_way_mode()
-                logger.info("Testnet account switched to one-way position mode")
+                logger.info(f"{active_environment().label_en} account switched to one-way position mode")
             except BinanceAPIError:
                 return ExecutionResult(
                     "rejected",
@@ -1013,7 +1067,7 @@ def _execute_market_signal_once(
         )
         return ExecutionResult(
             "submitted",
-            "Testnet entry and protective orders submitted" + trend_note,
+            f"{active_environment().label_en} entry and protective orders submitted" + trend_note,
             symbol,
             _decimal_text(quantity),
             str(entry.get("orderId", "")),
@@ -1022,7 +1076,7 @@ def _execute_market_signal_once(
         message = str(exc)
         if "-2015" in message or "HTTP 401" in message:
             message += " (Hint: check configured API key/secret pair and futures permission.)"
-        logger.warning("Binance Testnet automatic order rejected: %s", message)
+        logger.warning(f"Binance {active_environment().label_en} automatic order rejected: %s", message)
         return ExecutionResult("failed", message, symbol)
 
 
@@ -1155,7 +1209,7 @@ def _execute_limit_signal(
     )
     watcher.start()
     logger.info(
-        "Testnet limit entry placed for %s: order=%s entry=%s qty=%s",
+        f"{active_environment().label_en} limit entry placed for %s: order=%s entry=%s qty=%s",
         symbol,
         entry_client_id,
         _decimal_text(entry_price),
@@ -1163,7 +1217,7 @@ def _execute_limit_signal(
     )
     return ExecutionResult(
         "pending",
-        "Testnet limit entry placed; awaiting fill",
+        f"{active_environment().label_en} limit entry placed; awaiting fill",
         symbol,
         _decimal_text(quantity),
         str(order.get("orderId", "")),
@@ -1201,7 +1255,7 @@ def _replace_pending_limit(
         status = client.order_status(symbol=symbol, client_id=old_client_id)
     except BinanceAPIError as exc:
         if _is_missing_order_error(exc):
-            logger.info("Removing stale Testnet pending entry for %s: %s", symbol, exc)
+            logger.info(f"Removing stale {active_environment().label_en} pending entry for %s: %s", symbol, exc)
             _drop_pending(symbol, old_client_id)
             return None
         logger.warning("Cannot inspect previous limit entry for %s: %s", symbol, exc)
@@ -1238,7 +1292,7 @@ def _replace_pending_limit(
             client.cancel_order(symbol=symbol, client_id=old_client_id)
         except BinanceAPIError as exc:
             return ExecutionResult("failed", f"Cannot replace pending limit entry: {exc}", symbol)
-        logger.info("Replaced stale Testnet limit entry %s for %s", old_client_id, symbol)
+        logger.info(f"Replaced stale {active_environment().label_en} limit entry %s for %s", old_client_id, symbol)
         if status == "PARTIALLY_FILLED":
             # Never discard a partial fill while replacing the entry: protect
             # it with the recorded SL/TP (or roll it back) first.
@@ -1320,7 +1374,7 @@ def _attach_protection(
             try:
                 client.cancel_algo_order(client_algo_id=client_algo_id)
             except BinanceAPIError:
-                logger.exception("Failed to cancel orphaned Testnet protective order")
+                logger.exception(f"Failed to cancel orphaned {active_environment().label_en} protective order")
         raise
     return stop_algo_id, target_algo_id, partial_qty
 
@@ -1574,6 +1628,7 @@ def start_account_snapshot_poller(
     poll_seconds: float = _SNAPSHOT_DEFAULT_POLL_SECONDS,
     stale_after_seconds: float | None = None,
     poll_period_provider: Callable[[], float] | None = None,
+    base_url: str | None = None,
 ) -> bool:
     """Start the shared poller; returns True only when it newly started."""
     global _snapshot_poller, _snapshot_poller_started
@@ -1581,7 +1636,7 @@ def start_account_snapshot_poller(
         if _snapshot_poller_started and _snapshot_poller is not None:
             return False
         try:
-            client = BinanceUSDMTestnetClient(api_key, api_secret)
+            client = BinanceUSDMTestnetClient(api_key, api_secret, base_url=base_url)
         except ValueError as exc:
             logger.error("Cannot start account snapshot poller: %s", exc)
             return False
@@ -2323,7 +2378,8 @@ def resume_breakeven_guards(
     Returns the number of guards resumed. Guards that already moved their stop
     (or whose position is gone) exit immediately on their first poll.
     """
-    config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
+    configure_binance_environment(settings)
+    config = binance_env.active_cfg(settings)
     if not config.enabled or config.dry_run or config.emergency_stop:
         return 0
     if str(config.breakeven_stop_trigger) == "off":
@@ -2380,7 +2436,8 @@ def resume_tp_runners(
 
     Returns the number of runners resumed.
     """
-    config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
+    configure_binance_environment(settings)
+    config = binance_env.active_cfg(settings)
     if not config.enabled or config.dry_run or config.emergency_stop:
         return 0
     if float(config.tp_partial_close_pct or 0.0) <= 0:
@@ -2436,7 +2493,8 @@ def resume_time_stops(
     Any record with a side and ts gets a manager (records at or past their
     deadline are closed on the first poll). Returns the resumed count.
     """
-    config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
+    configure_binance_environment(settings)
+    config = binance_env.active_cfg(settings)
     if not config.enabled or config.dry_run or config.emergency_stop:
         return 0
     minutes = int(config.time_stop_minutes or 0)
@@ -2513,7 +2571,7 @@ def _settle_after_entry_gone(
     # same-symbol position opened by some other order must keep its own levels.
     if (side == "BUY" and open_qty < 0) or (side == "SELL" and open_qty > 0):
         logger.info(
-            "Testnet %s: open %s position (%s) is opposite to %s; leaving it to its own protection",
+            f"{active_environment().label_en} %s: open %s position (%s) is opposite to %s; leaving it to its own protection",
             context,
             symbol,
             _decimal_text(open_qty),
@@ -2554,7 +2612,7 @@ def _settle_after_entry_gone(
         )
     _drop_pending(symbol, client_id)
     logger.info(
-        "Testnet %s; open %s position (%s) protected with SL/TP",
+        f"{active_environment().label_en} %s; open %s position (%s) protected with SL/TP",
         context,
         symbol,
         client_id,
@@ -2592,7 +2650,7 @@ def _cancel_and_settle(
         )
         return
     logger.info(
-        "Testnet limit entry %s; resting remainder canceled: %s %s", context, symbol, client_id
+        f"{active_environment().label_en} limit entry %s; resting remainder canceled: %s %s", context, symbol, client_id
     )
     _settle_after_entry_gone(
         client,
@@ -2635,7 +2693,7 @@ def _watch_limit_entry(
         try:
             status = client.order_status(symbol=symbol, client_id=client_id)
         except BinanceAPIError as exc:
-            logger.warning("Testnet limit fill check failed for %s: %s", symbol, exc)
+            logger.warning(f"{active_environment().label_en} limit fill check failed for %s: %s", symbol, exc)
             if time.monotonic() >= deadline:
                 _cancel_and_settle(
                     client,
@@ -2691,7 +2749,7 @@ def _watch_limit_entry(
             partial_qty=partial_qty,
                 )
             _drop_pending(symbol, client_id)
-            logger.info("Testnet limit entry filled and protected: %s %s", symbol, client_id)
+            logger.info(f"{active_environment().label_en} limit entry filled and protected: %s %s", symbol, client_id)
             _unregister_watcher_wake(client_id)
             return
         if status in ("CANCELED", "EXPIRED", "REJECTED"):
@@ -2752,7 +2810,8 @@ def resume_pending_limit_watchers(
 
     Returns the number of watchers resumed.
     """
-    config = settings.binance_usdm_testnet if settings is not None else BinanceUSDMTestnetSettings()
+    configure_binance_environment(settings)
+    config = binance_env.active_cfg(settings)
     if not config.enabled or config.dry_run or config.emergency_stop:
         return 0
     with _STATE_LOCK:
@@ -2767,7 +2826,7 @@ def resume_pending_limit_watchers(
     try:
         active_client = client or BinanceUSDMTestnetClient(config.api_key, config.api_secret)
     except ValueError as exc:
-        logger.error("Cannot resume Testnet limit watchers: %s", exc)
+        logger.error(f"Cannot resume {active_environment().label_en} limit watchers: %s", exc)
         return 0
     resumed = 0
     for symbol, record in records.items():
@@ -2787,7 +2846,7 @@ def resume_pending_limit_watchers(
             or target is None
             or quantity is None
         ):
-            logger.warning("Dropping incomplete Testnet pending record for %s", symbol)
+            logger.warning(f"Dropping incomplete {active_environment().label_en} pending record for %s", symbol)
             _drop_pending(symbol, client_id)
             continue
         timeout_seconds = float(config.limit_fill_timeout_minutes * 60)
@@ -2815,7 +2874,7 @@ def resume_pending_limit_watchers(
         watcher.start()
         resumed += 1
         logger.info(
-            "Resumed Testnet limit fill watcher for %s %s (remaining %.0fs)",
+            f"Resumed {active_environment().label_en} limit fill watcher for %s %s (remaining %.0fs)",
             symbol,
             client_id,
             timeout_seconds,
@@ -2872,15 +2931,14 @@ def report_daily_pnl(
     realized + commission + funding (actual bottom line). Returns the rows for
     programmatic use.
     """
+    configure_binance_environment(settings)
     active_client = client
     if active_client is None:
-        config = (
-            settings.binance_usdm_testnet
-            if settings is not None
-            else BinanceUSDMTestnetSettings()
-        )
+        config = binance_env.active_cfg(settings)
         if not config.api_key or not config.api_secret:
-            raise ValueError("Binance Testnet API key/secret missing in settings.json")
+            raise ValueError(
+                f"Binance {active_environment().label_en} API key/secret missing in settings.json"
+            )
         active_client = BinanceUSDMTestnetClient(config.api_key, config.api_secret)
     tz = timezone(timedelta(hours=tz_hours))
     now = datetime.now(tz)
@@ -2927,20 +2985,24 @@ def _signal_id(symbol: str, decision: dict[str, Any]) -> str:
 
 def _load_state() -> dict[str, Any]:
     """Load the runtime execution state file (empty dict when absent)."""
-    path = os.fspath(_RUNTIME_STATE_PATH)
+    path = os.fspath(
+        os.path.join(os.path.dirname(_RUNTIME_STATE_PATH), active_environment().state_file)
+    )
     try:
         with open(path, encoding="utf-8") as file:
             state = json.load(file)
     except FileNotFoundError:
         state = {}
     except (OSError, json.JSONDecodeError) as exc:
-        raise BinanceAPIError("Cannot read Testnet execution state") from exc
+        raise BinanceAPIError(f"Cannot read {active_environment().label_en} execution state") from exc
     return state if isinstance(state, dict) else {}
 
 
 def _save_state(state: dict[str, Any]) -> None:
     """Atomically persist the runtime execution state file."""
-    path = os.fspath(_RUNTIME_STATE_PATH)
+    path = os.fspath(
+        os.path.join(os.path.dirname(_RUNTIME_STATE_PATH), active_environment().state_file)
+    )
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp = f"{path}.tmp"
     try:
@@ -2949,7 +3011,7 @@ def _save_state(state: dict[str, Any]) -> None:
         os.replace(temp, path)
     except OSError as exc:
         # Fail closed: an unavailable state must not allow new orders.
-        raise BinanceAPIError("Cannot persist Testnet execution state") from exc
+        raise BinanceAPIError(f"Cannot persist {active_environment().label_en} execution state") from exc
 
 
 def _is_recent_signal(signal_id: str, cooldown_minutes: int) -> bool:

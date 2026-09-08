@@ -77,13 +77,15 @@ make uv-run
 
 完整操作界面说明见 [`PA_Agent使用文档.md`](PA_Agent使用文档.md)，配置字段说明见 [`config/README.md`](config/README.md)。
 
-### Binance U 本位 Futures Testnet 自动交易
+### Binance U 本位 Futures 自动交易（默认测试网，可一键切换实盘）
 
-默认关闭。此功能不支持实盘 URL，自动处理 `市价单` 与 `限价单`（`limit_order_enabled` 可关限价；`突破单` 需人工复核）。在 `config/settings.json` 的 `binance_usdm_testnet` 中，确认：
+默认关闭，运行于测试网（`binance_usdm_environment: "testnet"`）。同一套代码已支持 Live 实盘一键切换（切换与验证见下）。自动处理 `市价单` 与 `限价单`（`limit_order_enabled` 可关限价；`突破单` 需人工复核）。测试网配置在 `config/settings.json` 的 `binance_usdm_testnet` 中，确认：
 
 1. `enabled: true`，`emergency_stop: false`，先保持 `dry_run: true` 验证流程。
 2. 分析品种与 `symbol` 完全一致，且在 `symbol_whitelist` 内。
 3. 仅完成 dry-run 验证后，才将 `dry_run` 改为 `false`。
+
+**实盘(Live)切换**：只在配置层面操作，不切实盘单之前零风险——把 `binance_usdm_environment` 改为 `"live"`，将主网 API Key 填入同构的 `binance_usdm_live` 节并设 `enabled: true`。live 节默认全安全（`dry_run: true`、`emergency_stop: true`、密钥为空）；网关/WS/运行时状态文件随环境自动切换，与测试网完全隔离。两节不可同时 `enabled`（启动即拒绝）。实盘先 `dry_run` 全链路跑通，再用 `python tools/probe_binance_env.py --env live` 冒烟，最后才小仓位实弹。详见 `config/README.md`。
 
 密钥保存在本机、被 Git 忽略的 `config/settings.json` 的 `binance_usdm_testnet.api_key` 与 `api_secret` 中，绝不写入日志。不要分享、上传或提交该文件。API Key 应只启用交易权限，禁止提现。自动执行使用单向持仓模式；单笔名义价值受 `max_notional_usdt` 限制，杠杆上限 20 倍（`leverage` 可配置，默认 20）。
 

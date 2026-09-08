@@ -247,13 +247,27 @@ class MultiSymbolMonitor:
             last_processed_closed_ts=self._persisted_closed_ts.get(self._key_text(key)),
         )
 
+    @property
+    def _binance_cfg(self) -> Any:
+        """Active execution section: live when environment=live, else testnet."""
+        from pa_agent.trading.binance_env import active_cfg
+
+        return active_cfg(self._settings)
+
+    @property
+    def _binance_env(self) -> Any:
+        """Profile of the declared execution environment (gateways/labels)."""
+        from pa_agent.trading.binance_env import resolve_env
+
+        return resolve_env(self._settings)
+
     def _sync_whitelist_to_active(self, symbols: list[str]) -> None:
         """Make the execution whitelist exactly match the active monitor set.
 
         白名单与监控名单保持一致：监控外的币种只会收到信号推送、绝不自动
         执行（用户要求两名单一致，替换式同步，不再保留手动条目）。
         """
-        auto_cfg = self._settings.binance_usdm_testnet
+        auto_cfg = self._binance_cfg
         synced = list(dict.fromkeys(symbols))
         if auto_cfg.symbol_whitelist != synced:
             auto_cfg.symbol_whitelist = synced
@@ -407,7 +421,7 @@ class MultiSymbolMonitor:
         Returns True while analysis/pushes must stay paused. Announcements
         fire only on the pause/resume edges so a long ban does not spam.
         """
-        cfg = self._settings.binance_usdm_testnet
+        cfg = self._binance_cfg
         limiter = self._rate_limiter
         enabled = bool(getattr(cfg, "pause_monitoring_on_rate_limit", False))
         if not enabled or limiter is None:
@@ -426,11 +440,14 @@ class MultiSymbolMonitor:
                     level=logging.WARNING,
                 )
                 self._announce_rate_limit_change(
-                    "已暂停", f"检测到 Binance Testnet 限流(HTTP 418/-1003)，预计 {when} 自动恢复"
+                    "已暂停",
+                f"检测到 Binance {self._binance_env.label_en} 限流(HTTP 418/-1003)，预计 {when} 自动恢复"
                 )
             else:
                 self._report("Binance 限流解除：恢复行情监控（下一根 K 线收盘起）")
-                self._announce_rate_limit_change("已恢复", "Binance Testnet 限流解除，下一根 K 线收盘起生效")
+                self._announce_rate_limit_change(
+            "已恢复", f"Binance {self._binance_env.label_en} 限流解除，下一根 K 线收盘起生效"
+        )
         except Exception:  # announcements are best-effort
             logger.exception("Rate-limit transition announcement failed")
         return paused
@@ -750,7 +767,7 @@ class MultiSymbolMonitor:
         mode every rejection is logged and counted but the order still flows.
         Best-effort: gate errors never block anything.
         """
-        cfg = self._settings.binance_usdm_testnet
+        cfg = self._binance_cfg
         mode = str(getattr(cfg, "direction_gates_mode", "off") or "off").strip()
         if mode == "off":
             return False
@@ -803,7 +820,7 @@ class MultiSymbolMonitor:
         """
         if record is None:
             return
-        cfg = self._settings.binance_usdm_testnet
+        cfg = self._binance_cfg
         if not getattr(cfg, "enabled", False):
             return
         mode = str(getattr(cfg, "structure_exit_mode", "off") or "off").strip()
@@ -814,7 +831,9 @@ class MultiSymbolMonitor:
             from pa_agent.trading.binance_usdm_testnet import BinanceUSDMTestnetClient
             from pa_agent.trading.structure_exit import evaluate_structure_failure_exit
 
-            client = BinanceUSDMTestnetClient(cfg.api_key, cfg.api_secret)
+            client = BinanceUSDMTestnetClient(
+                cfg.api_key, cfg.api_secret, base_url=self._binance_env.rest_base
+            )
             verdict = evaluate_structure_failure_exit(
                 symbol=frame.symbol,
                 timeframe=frame.timeframe,
@@ -886,7 +905,7 @@ class MultiSymbolMonitor:
             exec_decision["atr_pct"] = atr_pct
         result = execute_market_signal(exec_decision, self._settings, analysis_symbol=frame.symbol)
         logger.info(
-            "Binance U本位 Testnet 自动执行: status=%s symbol=%s reason=%s",
+            f"Binance U本位 {self._binance_env.label_zh} 自动执行: status=%s symbol=%s reason=%s",
             result.status,
             result.symbol,
             result.reason,

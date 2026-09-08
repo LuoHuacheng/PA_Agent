@@ -305,6 +305,20 @@ def run_monitor() -> int:
     if not enabled_targets and not settings.monitoring.auto_discover.enabled:
         logger.error("monitoring.targets 中没有启用的品种，且 auto_discover 未开启。")  # noqa: RUF001
         return 2
+    # --- Binance 执行环境 (testnet/live) ---
+    # environment 决定 REST/WS 网关、运行时状态文件与通知标签。
+    # 配置冲突(双环境同开 / 实盘缺密钥)直接拒绝启动, 不留半启动进程。
+    from pa_agent.trading import binance_env
+    from pa_agent.trading.binance_usdm_testnet import configure_binance_environment
+
+    exec_env = binance_env.resolve_env(settings)
+    binance_cfg = binance_env.active_cfg(settings)
+    conflict = binance_env.env_conflicts(settings)
+    if conflict:
+        logger.error("Binance 环境配置错误: %s", conflict)
+        return 2
+    configure_binance_environment(settings)
+    logger.info("Binance 执行环境: %s (%s)", exec_env.label_zh, exec_env.key)
     if not _acquire_monitor_pid(MONITORING_PID_PATH):
         logger.error("监控已在运行，拒绝启动第二个实例。")  # noqa: RUF001
         return 1
@@ -331,22 +345,21 @@ def run_monitor() -> int:
 
         # 账户快照轮询器先行: 守护线程/结构退出检查都从批量快照读取,
         # 每周期 2 个批量请求取代 N 个品种的逐符号轮询(共享 IP 限流缓解)。
-        if settings.binance_usdm_testnet.enabled and (
-            settings.binance_usdm_testnet.api_key or ""
-        ).strip():
-            base_poll = float(settings.binance_usdm_testnet.breakeven_poll_seconds)
+        if binance_cfg.enabled and (binance_cfg.api_key or "").strip():
+            base_poll = float(binance_cfg.breakeven_poll_seconds)
 
             def _snapshot_poll_period() -> float:
                 return _WS_HEALTHY_POLL_SECONDS if ws_stream_health["connected"] else base_poll
 
             start_account_snapshot_poller(
-                api_key=settings.binance_usdm_testnet.api_key,
-                api_secret=settings.binance_usdm_testnet.api_secret,
+                api_key=binance_cfg.api_key,
+                api_secret=binance_cfg.api_secret,
+                base_url=exec_env.rest_base,
                 poll_seconds=base_poll,
                 poll_period_provider=_snapshot_poll_period,
                 stale_after_seconds=(
-                    float(settings.binance_usdm_testnet.snapshot_stale_seconds)
-                    if settings.binance_usdm_testnet.snapshot_stale_seconds > 0
+                    float(binance_cfg.snapshot_stale_seconds)
+                    if binance_cfg.snapshot_stale_seconds > 0
                     else None
                 ),
             )
@@ -375,7 +388,6 @@ def run_monitor() -> int:
     user_stream: Any | None = None
     mark_stream: Any | None = None
     try:
-        binance_cfg = settings.binance_usdm_testnet
         if binance_cfg.enabled and binance_cfg.user_data_stream_enabled:
             from pa_agent.trading.binance_usdm_testnet import (
                 BinanceUSDMTestnetClient,
@@ -389,9 +401,13 @@ def run_monitor() -> int:
             )
 
             stream_client = BinanceUSDMTestnetClient(
-                binance_cfg.api_key, binance_cfg.api_secret
+                binance_cfg.api_key,
+                binance_cfg.api_secret,
+                base_url=exec_env.rest_base,
             )
-            ws_url = str(binance_cfg.user_data_stream_ws_url or "").strip()
+            ws_url = (
+                str(binance_cfg.user_data_stream_ws_url or "").strip() or exec_env.ws_base
+            )
             event_refresh_gap = float(
                 binance_cfg.user_data_event_refresh_gap_seconds
             )

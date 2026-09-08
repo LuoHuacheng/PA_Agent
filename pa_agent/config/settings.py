@@ -394,7 +394,18 @@ class Settings(BaseModel):
     pushplus: PushPlusSettings = Field(default_factory=PushPlusSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     tushare: TushareSettings = Field(default_factory=TushareSettings)
+    #: 自动执行环境: "testnet" = 测试网(默认, 兼容既有配置), "live" = 实盘.
+    #: 切换后 REST/WS 网关、运行时状态文件与通知标签均随环境解析,
+    #: 但绝不代表实盘许可: live 节本身仍须显式 enabled + dry_run=false。
+    binance_usdm_environment: Literal["testnet", "live"] = "testnet"
+    #: 测试网自动执行节 (environment=testnet 时的活动配置, 语义不变)。
     binance_usdm_testnet: BinanceUSDMTestnetSettings = Field(
+        default_factory=BinanceUSDMTestnetSettings
+    )
+    #: 实盘自动执行节: 字段与 testnet 节同构, 但默认全安全
+    #: (enabled=false / dry_run=true / emergency_stop=true / 密钥为空),
+    #: environment=live 时成为活动配置; 与 testnet 节互斥启用。
+    binance_usdm_live: BinanceUSDMTestnetSettings = Field(
         default_factory=BinanceUSDMTestnetSettings
     )
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)

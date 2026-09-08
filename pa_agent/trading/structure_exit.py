@@ -79,7 +79,9 @@ def evaluate_structure_failure_exit(
     streak map kept by the caller (persisted between polls).
     """
     out: dict = {"action": "none", "reason": "", "symbol": symbol}
-    cfg = getattr(settings, "binance_usdm_testnet", None)
+    from pa_agent.trading.binance_env import active_cfg
+
+    cfg = active_cfg(settings)
     mode = str(getattr(cfg, "structure_exit_mode", "off") or "off").strip()
     if mode not in ("off", "dry_run", "on"):
         logger.warning("structure_exit_mode=%r ignored (off|dry_run|on)", mode)
