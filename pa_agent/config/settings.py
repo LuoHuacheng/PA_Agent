@@ -235,6 +235,11 @@ class BinanceUSDMTestnetSettings(BaseModel):
     pause_monitoring_on_rate_limit: bool = True
     # 限流响应无 banned-until 时间戳(如纯 429)时按此秒数估算封禁窗口.
     rate_limit_no_until_seconds: int = Field(default=60, ge=5, le=3600)
+    # 用户数据流(user-data websocket): True = 订阅订单/账户推送事件, REST 轮询
+    # 降级为低频对账(共享 IP 限流缓解, P0)。默认关闭, 人工验证连通后开启。
+    user_data_stream_enabled: bool = False
+    # 用户数据流 WS 网关; 留空 = 默认测试网网关。live 迁移时换成主网网关。
+    user_data_stream_ws_url: str = ""
     # --- 日线大趋势护栏 (逆势单保护) ---
     # 以币种日线 close 的 trend_30d_days 天涨跌幅定义大趋势; |涨跌| <=
     # trend_30d_neutral_pct 视为无趋势 (不做限制). 仅作用于白名单内的币种.

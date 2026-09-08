@@ -370,6 +370,22 @@ class BinanceUSDMTestnetClient:
                 raise BinanceAPIError(f"Binance error {code}: {result.get('msg', '')}")
         return result
 
+    def create_listen_key(self) -> str:
+        """Open a user-data stream; returns the listenKey (must be kept alive)."""
+        result = self._request("POST", "/fapi/v1/listenKey")
+        key = str(result.get("listenKey") or "")
+        if not key:
+            raise BinanceAPIError("Binance returned no listenKey")
+        return key
+
+    def keepalive_listen_key(self, listen_key: str) -> None:
+        """Extend the user-data stream lifetime (call every < 60 minutes)."""
+        self._request("PUT", "/fapi/v1/listenKey", {"listenKey": listen_key})
+
+    def close_listen_key(self, listen_key: str) -> None:
+        """Close the user-data stream (no more events after this)."""
+        self._request("DELETE", "/fapi/v1/listenKey", {"listenKey": listen_key})
+
     def exchange_info(self, symbol: str) -> dict[str, Any]:
         response = self._request("GET", "/fapi/v1/exchangeInfo")
         for item in response.get("symbols", []) if isinstance(response, dict) else []:

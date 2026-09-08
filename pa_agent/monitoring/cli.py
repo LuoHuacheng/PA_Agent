@@ -357,6 +357,57 @@ def run_monitor() -> int:
         resume_tp_runners(settings)
     except Exception:
         logger.exception("恢复 Binance 测试网挂单 watcher 失败")
+    # P0 user-data websocket: 订单/账户事件推送替代常驻轮询. REST 快照轮询保留
+    # 作为低频对账兜底(事件仅在两次对账之间把状态拉新, 不承担正确性).
+    # 事件处理器跑在 WS 线程, 只做"节流后触发快照刷新", 不碰下单路径.
+    user_stream: Any | None = None
+    try:
+        binance_cfg = settings.binance_usdm_testnet
+        if binance_cfg.enabled and binance_cfg.user_data_stream_enabled:
+            from pa_agent.trading.binance_user_data import (
+                BinanceUserDataStream,
+                UserDataEventHandlers,
+            )
+            from pa_agent.trading.binance_usdm_testnet import (
+                BinanceUSDMTestnetClient,
+                account_snapshot_poller,
+            )
+
+            stream_client = BinanceUSDMTestnetClient(
+                binance_cfg.api_key, binance_cfg.api_secret
+            )
+            ws_url = str(binance_cfg.user_data_stream_ws_url or "").strip()
+            event_refresh_gap = 10.0
+            last_event_ts = [0.0]
+
+            def _refresh_snapshot_after_event() -> None:
+                now = time.time()
+                if now - last_event_ts[0] < event_refresh_gap:
+                    return
+                last_event_ts[0] = now
+                poller = account_snapshot_poller()
+                if poller is not None:
+                    try:
+                        poller.refresh()
+                    except Exception:
+                        logger.exception("WS 事件触发的快照刷新失败")
+
+            handlers = UserDataEventHandlers(
+                on_order_update=lambda _msg: _refresh_snapshot_after_event(),
+                on_account_update=lambda _msg: _refresh_snapshot_after_event(),
+                on_connected=_refresh_snapshot_after_event,
+            )
+            user_stream = BinanceUserDataStream(
+                create_listen_key=stream_client.create_listen_key,
+                keepalive_listen_key=stream_client.keepalive_listen_key,
+                close_listen_key=stream_client.close_listen_key,
+                handlers=handlers,
+                ws_base=ws_url or None,
+            )
+            user_stream.start()
+            logger.info("User-data websocket stream started (P0 event push)")
+    except Exception:
+        logger.exception("启动 user-data websocket 流失败(降级为纯 REST 轮询)")
     monitor: MultiSymbolMonitor | None = None
     try:
         monitor = MultiSymbolMonitor(
@@ -374,6 +425,12 @@ def run_monitor() -> int:
             pass
         return 0
     finally:
+        if user_stream is not None:
+            try:
+                user_stream.stop(timeout=3.0)
+                logger.info("User-data websocket stream stopped")
+            except Exception:
+                logger.exception("停止 user-data websocket 流失败")
         if monitor is not None:
             _shutdown_monitor_process(
                 monitor,
