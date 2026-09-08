@@ -29,8 +29,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pa_agent.feedback.calibration import brier_score, bucket_table, suggest_threshold
-from pa_agent.feedback.rule_stats import build_group_stats
+from pa_agent.feedback.calibration import brier_score, bucket_table, suggest_threshold  # noqa: E402
+from pa_agent.feedback.rule_stats import build_group_stats  # noqa: E402
 
 TZ8 = timezone(timedelta(hours=8))
 DEFAULT_OUTCOMES = ROOT / "trade_records" / "outcomes.csv"
