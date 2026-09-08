@@ -41,6 +41,10 @@ _NAME_RE = re.compile(
 )
 _CSV_TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
+#: Runtime artifact that lives next to trade CSV logs and must never be
+#: treated as a symbol source by symbols_scope.
+OUTCOMES_CSV_NAME = "outcomes.csv"
+
 OUTCOME_FIELDNAMES = [
     "uid", "symbol", "timeframe", "direction", "order_type", "entry_avg", "qty",
     "stop", "target", "net_usdt", "fees_usdt", "risk_usdt", "win_r", "outcome",
@@ -145,6 +149,8 @@ def symbols_scope(
             out.append(s)
     if csv_dir.is_dir():
         for fp in sorted(csv_dir.glob("*.csv")):
+            if fp.name.lower() == OUTCOMES_CSV_NAME:
+                continue  # outcomes.csv is not a symbol source
             sym = fp.stem.split("_", 1)[0].upper()
             if sym and sym.isalnum() and sym not in out:
                 out.append(sym)
@@ -448,8 +454,14 @@ def write_audit_json(audit: dict, path: Path) -> None:
 
 
 def symbol_income_diff(income_rows: list[dict], trades: list[dict]) -> dict[str, float]:
+    trade_syms = {str(t.get("sym") or "") for t in trades}
+    trade_syms.discard("")
+    if not trade_syms:
+        return {}  # nothing to reconcile against
     inc: dict[str, float] = {}
     for r in income_rows:
+        if str(r.get("symbol") or "") not in trade_syms:
+            continue
         if r.get("incomeType") not in _AUDIT_INCOME_TYPES:
             continue
         sym = str(r.get("symbol") or "")

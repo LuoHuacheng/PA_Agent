@@ -178,6 +178,8 @@ def test_symbols_scope_unions_whitelist_and_csv(tmp_path):
     d = _csv_dir(tmp_path)
     (d / "ETHUSDT_15m.csv").write_text("a,b\n", encoding="utf-8")
     (d / "XRPUSDT_1m.csv").write_text("a,b\n", encoding="utf-8")
+    # the outcome store artifact must never become a symbol source
+    (d / "outcomes.csv").write_text("a,b\n", encoding="utf-8")
     got = symbols_scope(whitelist=["BTCUSDT"], csv_dir=d, default=["AAAUSDT"])
     assert got == ["BTCUSDT", "ETHUSDT", "XRPUSDT"]
 
@@ -352,6 +354,8 @@ def test_symbol_income_diff():
         {"symbol": SYM, "incomeType": "REALIZED_PNL", "income": 10.0},
         {"symbol": SYM, "incomeType": "COMMISSION", "income": -0.04},
         {"symbol": "ETHUSDT", "incomeType": "REALIZED_PNL", "income": 5.0},
+        # foreign symbol without any trade in this window must be ignored
+        {"symbol": "FOREIGNUSDT", "incomeType": "REALIZED_PNL", "income": 99.0},
     ]
     trades = [
         {"sym": SYM, "realized": 10.0, "fees": -0.04},
@@ -360,6 +364,8 @@ def test_symbol_income_diff():
     diff = symbol_income_diff(income, trades)
     assert diff[SYM] == pytest.approx(0.0)
     assert diff["ETHUSDT"] == pytest.approx(0.0)
+    assert "FOREIGNUSDT" not in diff
+    assert symbol_income_diff(income, []) == {}
 
 
 def test_build_audit_summary_counts_drift(tmp_path):
