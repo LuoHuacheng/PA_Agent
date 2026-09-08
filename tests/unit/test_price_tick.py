@@ -10,9 +10,6 @@ from pa_agent.util.price_tick import (
     normalize_breakout_entry_price,
     round_to_tick,
 )
-from tests.fixtures.validators import schema_test_validator
-
-import json
 
 
 def _frame(high: float = 104.0) -> KlineFrame:
