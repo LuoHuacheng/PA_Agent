@@ -113,3 +113,8 @@ tools/_pa_sim_common.py：`load_decision_index`（:75，pending JSON + CSV 双�
 - **Q5 扫描成本**：v1 文件名日期预筛即可，还是直接上增量索引？
 
 > 默认建议：Q1 同意、Q2 v1 先 best-effort 并保留 D1 为 v1.1 调查项、Q3 改 0→loss 且同步 trade_pnl_report 口径、Q4 白名单∪CSV、Q5 v1 先预筛。
+
+## 执行结论（2026-09-08 补充）
+- D1 调查完成：close 条件单走 /fapi/v1/algoOrder(clientAlgoId=pa-sl-/pa-tp-)；触发成交回传 allOrders 且带同前缀 cid(65 条真实归因 stop 27/tp 23/structure_or_manual 15，无 unknown) → 前缀归因定稿。
+- 源偏好修正：同订单双写时 CSV 晚约 6 分钟会赢下消歧并丢 strategy_files → prefer_pending_over_csv(同材料 15 分钟内剔除) + outcomes.csv uid 刷新；实测 pending 58 / csv 7。
+- 校准首报：胜率 38.5%、Brier 0.2728(偏乐观)，落 logs/calibration_report_20260908.txt。

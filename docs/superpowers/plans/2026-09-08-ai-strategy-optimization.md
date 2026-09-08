@@ -222,5 +222,17 @@ D) 信息面补强：HTF 程序化摘要、经验库自动沉淀。
 - **测试网量小无统计意义**：A 阶段先接 testnet + 历史 CSV 存量数据（复盘工具已能重建），实盘数据同一管线。
 - **prompt 瘦身破坏输出稳定性**：只删重复说明不改语义；trace 校验通过率与重试率作为回归指标写进 C 验收。
 - **范围蔓延**：Phase A 若数据链路复杂，A2 先只接 testnet 订单来源一种，账户 income 对账放 A5 之后增量做。
+
+---
+
+# 执行记录（截至 2026-09-08）
+
+- Phase A 完成
+- Phase A 全部完成并真机验证：testnet 合并 65 条(win 25/loss 40，全已平仓)；close_reason=stop 27/tp 23/structure_or_manual 15。
+- D1 结论：2025-12 起条件单走 Algo Service(/fapi/v1/algoOrder)，但触发成交回传 allOrders 且带 pa-sl-/pa-tp- 前缀，best-effort 归因有效，无需升级查询。
+- 口径修正：归属优先 pending 源(CSV 15 分钟同材料剔除)；outcomes.csv 同 uid 刷新 → 来源 pending 58 / csv 7，strategy_files 分组恢复。
+- 运行态(不入库)：feedback.enabled=true(closed>=50)；stage1_kline_rows_limit=40 A/B 中(本地估 71,000→68,432 tokens/轮)；首份校准报告：胜率 38.5%、Brier 0.2728、上涨通道 +1.63R / 区间系 -0.3R。
+- Phase B 已完成提交(c56fb3c, 9f3b24e)，待实跑冒烟；Phase C：C1/C2 完成、去重路线判死、C3 light_mode 未开发；Phase D 未开工。
+- 分支 feat/phase-a-feedback-loop 未合并 main。
 - **双源漂移与历史口径变化**：CSV/pending 匹配不到的行进 audit 不硬凑；trade_pnl_report 改 0→loss 后历史 CSV 按新口径重算一次并复核 diff（net==0 极罕见）。
 - **无成交源期**：dry_run/disabled/无 testnet key 时 outcomes.csv 为空属正常，audit 报"无成交源"不报错；存量历史无市价单成交、只有限价计划，统计显著性不足前不做结论（min_samples 门控兜底）。
