@@ -73,16 +73,63 @@ def _is_rate_limit_reason(reason: str) -> bool:
     return any(marker in low for marker in _RATE_LIMIT_MARKERS)
 
 
+# Bare-429 backoff (no banned-until in the body): the shared Testnet IP keeps
+# answering 429 while it is hot, and a fixed 60s breaker window lets every
+# watcher/guard fire again right after it lifts and re-trip the limit. Escalate
+# the local window 60s -> 120s -> 240s (capped) across repeated bare 429s; a
+# real banned-until response (HTTP 418) resets the escalation.
+_RATE_LIMIT_429_BASE_SECONDS = 60.0
+_RATE_LIMIT_429_MAX_SECONDS = 300.0
+_RATE_LIMIT_429_ESCALATION_RESET_SECONDS = 600.0
+
+_429_lock = threading.Lock()
+_429_strikes = 0
+_429_last_ts = 0.0
+
+
+def _reset_429_strikes() -> None:
+    """Clear the bare-429 escalation counter (call on real banned-until)."""
+    global _429_strikes, _429_last_ts
+    with _429_lock:
+        _429_strikes = 0
+        _429_last_ts = 0.0
+
+
+def _next_429_backoff_until_ms() -> int:
+    """Escalating breaker deadline (epoch ms) for a bare HTTP 429."""
+    global _429_strikes, _429_last_ts
+    with _429_lock:
+        now = time.time()
+        if now - _429_last_ts > _RATE_LIMIT_429_ESCALATION_RESET_SECONDS:
+            _429_strikes = 0
+        _429_strikes += 1
+        _429_last_ts = now
+        window = min(
+            _RATE_LIMIT_429_MAX_SECONDS,
+            _RATE_LIMIT_429_BASE_SECONDS * (2 ** (_429_strikes - 1)),
+        )
+    return int((now + window) * 1000)
+
+
 def _observe_rate_limit_error(message: str) -> None:
     """Record a ban window into the shared breaker when *message* is a ban.
 
     Called right before a rate-limited request raises, so the monitor's
     scheduler can pause analysis and the guard loops can sleep through the
     ban instead of hammering the API.
+
+    HTTP 418 with a banned-until timestamp wins (server-authoritative). A bare
+    HTTP 429 without a timestamp gets an escalating local window instead of the
+    fixed fallback, because repeated 429s mean the shared IP is still hot.
     """
     if not _is_rate_limit_reason(message):
         return
-    rate_limiter.record_ban(until_ms=parse_banned_until_ms(message))
+    until_ms = parse_banned_until_ms(message)
+    if until_ms is None:
+        until_ms = _next_429_backoff_until_ms()
+    else:
+        _reset_429_strikes()
+    rate_limiter.record_ban(until_ms=until_ms)
 
 
 #: Upper bound for guard-loop cooldown sleeps while a ban is live; keeps a
@@ -113,6 +160,54 @@ def _guard_rate_limit_wait(poll_seconds: float) -> None:
         _rate_limit_cooldown_seconds(poll_seconds)
         + random.uniform(0.0, float(poll_seconds))
     )
+
+
+class _RequestGate:
+    """Process-wide throttle for every outbound Binance request.
+
+    Guards/TP runners/snapshot poller run on independent daemon threads; even
+    with a fresh snapshot they can burst together at bar close / ban release,
+    and the shared Testnet egress IP turns any synchronized burst into a 429 or
+    a punishing 418 ban. The gate caps in-flight requests and spaces the start
+    of every request by a minimum gap, flattening pulses into a low trickle.
+
+    Module-level on purpose: distinct client instances (guards create their own)
+    must share the same gate.
+    """
+
+    def __init__(
+        self, *, max_concurrency: int, min_gap_seconds: float
+    ) -> None:
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be >= 1")
+        if min_gap_seconds < 0:
+            raise ValueError("min_gap_seconds must be >= 0")
+        self._sem = threading.BoundedSemaphore(max_concurrency)
+        self._min_gap = float(min_gap_seconds)
+        self._lock = threading.Lock()
+        self._last_ts = 0.0
+
+    def __enter__(self) -> "_RequestGate":
+        self._sem.acquire()
+        try:
+            with self._lock:
+                now = time.monotonic()
+                target = max(now, self._last_ts + self._min_gap)
+                self._last_ts = target
+                delay = target - now
+        except BaseException:
+            self._sem.release()
+            raise
+        if delay > 0:
+            time.sleep(delay)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._sem.release()
+
+
+#: Shared throttle for all Binance REST traffic in this process.
+_REQUEST_GATE = _RequestGate(max_concurrency=2, min_gap_seconds=0.2)
 
 
 class BinanceAPIError(RuntimeError):
@@ -224,7 +319,8 @@ class BinanceUSDMTestnetClient:
         _raise_if_banned()
         for attempt in range(_REQUEST_RETRIES + 1):
             try:
-                return self._request_once(method, path, params, signed=signed)
+                with _REQUEST_GATE:
+                    return self._request_once(method, path, params, signed=signed)
             except BinanceAPIError as exc:
                 if attempt >= _REQUEST_RETRIES or not _is_retryable(exc, method, params):
                     raise
@@ -1198,7 +1294,16 @@ def _guard_trigger_reached(
 # to direct REST when no fresh snapshot exists (cold start / poll failure).
 
 _SNAPSHOT_DEFAULT_POLL_SECONDS = 10.0
-_SNAPSHOT_STALE_AFTER_SECONDS = 30.0
+#: Snapshot freshness limit when no explicit stale_after_seconds is given:
+#: auto = max(45s, 1.2 x poll period) so readers never treat the snapshot as
+#: stale during the normal gap between cycles (a too-short stale limit made
+#: guards fall back to per-symbol direct REST exactly between polls, which
+#: amplified shared-IP rate-limit hits).
+_SNAPSHOT_STALE_MIN_SECONDS = 45.0
+_SNAPSHOT_STALE_AUTO_FACTOR = 1.2
+#: +/- jitter applied to every poll cycle so wake-ups are staggered across
+#: cycles (and against other testnet users on the shared egress IP).
+_SNAPSHOT_POLL_JITTER_FRACTION = 0.2
 
 
 class AccountSnapshotPoller:
@@ -1215,10 +1320,17 @@ class AccountSnapshotPoller:
         client: BinanceUSDMTestnetClient,
         *,
         poll_seconds: float = _SNAPSHOT_DEFAULT_POLL_SECONDS,
+        stale_after_seconds: float | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._client = client
         self._poll_seconds = float(poll_seconds)
+        if stale_after_seconds is None:
+            stale_after_seconds = max(
+                _SNAPSHOT_STALE_MIN_SECONDS,
+                float(poll_seconds) * _SNAPSHOT_STALE_AUTO_FACTOR,
+            )
+        self._stale_after = float(stale_after_seconds)
         self._clock = clock
         self._positions: dict[str, dict[str, Any]] = {}
         self._marks: dict[str, Decimal] = {}
@@ -1244,7 +1356,10 @@ class AccountSnapshotPoller:
         self._thread = None
 
     def _run(self) -> None:
-        while not self._stop.wait(self._poll_seconds):
+        while not self._stop.wait(
+            self._poll_seconds
+            * (1.0 + random.uniform(0.0, _SNAPSHOT_POLL_JITTER_FRACTION))
+        ):
             if rate_limiter.is_banned():
                 # 共享 IP 封禁期间完全不请求（熔断器到期后下一周期自然恢复），
                 # 避免给封禁续命；熔断状态由请求层在错误抛出处统一记录。
@@ -1277,7 +1392,7 @@ class AccountSnapshotPoller:
         if self._last_ok <= 0:
             return False
         now = self._clock() if now is None else now
-        return (now - self._last_ok) <= _SNAPSHOT_STALE_AFTER_SECONDS
+        return (now - self._last_ok) <= self._stale_after
 
     def position(self, symbol: str) -> dict[str, Any] | None:
         """Snapshot row for symbol (amount/entry); None == flat or unknown."""
@@ -1303,6 +1418,7 @@ def start_account_snapshot_poller(
     api_key: str,
     api_secret: str,
     poll_seconds: float = _SNAPSHOT_DEFAULT_POLL_SECONDS,
+    stale_after_seconds: float | None = None,
 ) -> bool:
     """Start the shared poller; returns True only when it newly started."""
     global _snapshot_poller, _snapshot_poller_started
@@ -1314,7 +1430,11 @@ def start_account_snapshot_poller(
         except ValueError as exc:
             logger.error("Cannot start account snapshot poller: %s", exc)
             return False
-        poller = AccountSnapshotPoller(client, poll_seconds=poll_seconds)
+        poller = AccountSnapshotPoller(
+            client,
+            poll_seconds=poll_seconds,
+            stale_after_seconds=stale_after_seconds,
+        )
         poller.start()
         _snapshot_poller = poller
         _snapshot_poller_started = True

@@ -333,6 +333,11 @@ def run_monitor() -> int:
                 api_key=settings.binance_usdm_testnet.api_key,
                 api_secret=settings.binance_usdm_testnet.api_secret,
                 poll_seconds=float(settings.binance_usdm_testnet.breakeven_poll_seconds),
+                stale_after_seconds=(
+                    float(settings.binance_usdm_testnet.snapshot_stale_seconds)
+                    if settings.binance_usdm_testnet.snapshot_stale_seconds > 0
+                    else None
+                ),
             )
     except Exception:
         logger.exception("启动账户快照轮询器失败")

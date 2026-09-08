@@ -1,7 +1,8 @@
-# ruff: noqa: RUF001, RUF002, RUF003 - Chinese config copy
+# ruff: noqa: RUF003 - Chinese config copy
 """Pydantic settings models for PA Agent."""
 
 from __future__ import annotations
+
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -253,6 +254,10 @@ class BinanceUSDMTestnetSettings(BaseModel):
     breakeven_min_confidence: int = Field(default=55, ge=0, le=100)
     # 持仓守护线程轮询 mark price 的间隔秒数.
     breakeven_poll_seconds: int = Field(default=10, ge=2, le=600)
+    # 账户快照(poller)可接受的最大新鲜度, 秒: 0 = 自动
+    # (max(45, 轮询周期 × 1.2), 保证轮询间隙内守护线程不因快照过期
+    # 集体回退直连 REST 而放大共享 IP 限流)。
+    snapshot_stale_seconds: int = Field(default=0, ge=0, le=600)
     # --- TP1 部分止盈 / runner(TP2) ---
     # 到达 TP1 时平掉此比例的仓位(0 = 关闭, 维持现状全平; 50 = 平一半),
     # 剩余仓位保本后继续持有至 TP2. 0-100 闭区间.
@@ -431,7 +436,7 @@ def _migrate_legacy_feishu_json(raw: dict, settings_path: Path) -> bool:
     return migrated
 
 
-def load_settings(path: Path | None = None) -> "Settings":
+def load_settings(path: Path | None = None) -> Settings:
     """Load settings from *path* (default: SETTINGS_JSON_PATH).
 
     Returns default Settings and writes them to disk if the file is absent.
@@ -484,7 +489,7 @@ def load_settings(path: Path | None = None) -> "Settings":
     return settings
 
 
-def save_settings(settings: "Settings", path: Path | None = None) -> None:
+def save_settings(settings: Settings, path: Path | None = None) -> None:
     """Persist settings to *path* (default: SETTINGS_JSON_PATH)."""
     from pa_agent.config.paths import SETTINGS_JSON_PATH
 
