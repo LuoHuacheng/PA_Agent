@@ -37,12 +37,22 @@ def test_tv_exchange_auto_preserved():
 
 
 def test_tv_forex_auto_probe_tries_all_forex_presets():
+    from pa_agent.data.market_defaults import (
+        TV_CRYPTO_EXCHANGES,
+        TV_EQUITY_EXCHANGES,
+        TV_GOLD_SYMBOL_BY_EXCHANGE,
+    )
+
     plan = tv_forex_auto_probe_plan("XAUUSD")
     exchanges = [ex for ex, _ in plan]
+    # 黄金/外汇探测 = UI 预设顺序中, 非股票/加密交易所且该所提供黄金行情者
     assert exchanges == [
         ex
         for ex in TV_EXCHANGE_PRESETS
-        if ex and ex not in {"SSE", "SZSE", "HKEX"}
+        if ex
+        and ex not in TV_EQUITY_EXCHANGES
+        and ex not in TV_CRYPTO_EXCHANGES
+        and ex in TV_GOLD_SYMBOL_BY_EXCHANGE
     ]
     assert ("OANDA", "XAUUSD") in plan
     assert ("TVC", "GOLD") in plan

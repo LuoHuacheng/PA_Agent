@@ -15,7 +15,46 @@ from pa_agent.ai.json_validator import (
     _strip_fences,
 )
 
-_SAMPLE = Path(__file__).resolve().parents[2] / "tools" / "stage2_raw_sample.txt"
+# Inline copy of the historical tools/stage2_raw_sample.txt fixture: a broken
+# stage-2 payload whose reasoning value nests unescaped double quotes (the
+# repair regression the file used to pin). Kept inline so the tests survive a
+# clean clone that never had the tools/ artifact.
+_SAMPLE_RAW = '''```json
+{
+  "decision": {
+    "order_type": "不下单",
+    "order_direction": null,
+    "entry_price": null,
+    "take_profit_price": null,
+    "stop_loss_price": null,
+    "reasoning": "价格仍在中轴附近整理，此处"在区间中部入场"缺乏右侧确认，故观望；等突破或回踩企稳再评估。",
+    "diagnosis_confidence": 45,
+    "diagnosis_confidence_reasoning": "测试样本",
+    "trade_confidence": 30,
+    "trade_confidence_reasoning": "测试样本",
+    "estimated_win_rate": null,
+    "estimated_win_rate_reasoning": "测试样本",
+    "key_factors": [],
+    "watch_points": [],
+    "risk_assessment": "medium",
+    "invalidation_condition": "测试样本"
+  },
+  "diagnosis_summary": {
+    "cycle_position": "normal_channel",
+    "direction": "neutral",
+    "key_signals": []
+  },
+  "decision_trace": [
+    {
+      "node_id": "10.3",
+      "question": "方向",
+      "answer": "neutral",
+      "reason": "x",
+      "bar_range": "K1"
+    }
+  ]
+}
+```'''
 from tests.fixtures.validators import schema_test_validator
 
 _validator = schema_test_validator()
@@ -23,7 +62,7 @@ _validator = schema_test_validator()
 
 def test_stage2_raw_sample_repair_then_parse():
     """Broken stage-2 sample with inner quotes must parse after repair."""
-    raw = _SAMPLE.read_text(encoding="utf-8")
+    raw = _SAMPLE_RAW
     stripped = _strip_fences(raw)
     repaired = _repair_unescaped_quotes(stripped)
     obj = json.loads(repaired)
@@ -33,7 +72,7 @@ def test_stage2_raw_sample_repair_then_parse():
 
 def test_strip_fences_includes_repair():
     """_strip_fences applies quote repair so json.loads succeeds directly."""
-    raw = _SAMPLE.read_text(encoding="utf-8")
+    raw = _SAMPLE_RAW
     obj = json.loads(_strip_fences(raw))
     assert isinstance(obj["decision_trace"], list)
 

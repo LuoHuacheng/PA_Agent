@@ -136,7 +136,10 @@ def test_lenient_validator_maps_expired_freshness_on_pending_entry() -> None:
 
 def test_lenient_validator_maps_openclaw_enum_slips() -> None:
     """OpenClaw agent often mixes stage1 English enums into stage2 fields."""
-    from pa_agent.ai.stage2_normalizer import _normalize_stage2_enum_aliases
+    from pa_agent.ai.stage2_normalizer import (
+        _normalize_stage2_bar_analysis_enums,
+        _normalize_stage2_enum_aliases,
+    )
 
     obj = _stage2_trade_obj(
         order_type="突破单",
@@ -163,7 +166,9 @@ def test_lenient_validator_maps_openclaw_enum_slips() -> None:
         "outcome": "breakout_entry",
         "label": "§11.4突破单-空头延续",
     }
+    # 复刻 normalize_stage2 内部的两步: 决策/终端枚举 + bar_analysis 枚举归一
     assert _normalize_stage2_enum_aliases(obj) is True
+    _normalize_stage2_bar_analysis_enums(obj)
     assert obj["decision"]["order_direction"] == "做空"
     assert obj["bar_analysis"]["always_in"] == "neutral"
     assert obj["terminal"]["outcome"] == "trade"
@@ -179,7 +184,10 @@ def test_lenient_validator_maps_openclaw_enum_slips() -> None:
 
 
 def test_lenient_validator_maps_action_and_limit_order_pending() -> None:
-    from pa_agent.ai.stage2_normalizer import _normalize_stage2_enum_aliases
+    from pa_agent.ai.stage2_normalizer import (
+        _normalize_stage2_bar_analysis_enums,
+        _normalize_stage2_enum_aliases,
+    )
 
     obj = _stage2_trade_obj(
         order_type="限价单",
@@ -205,6 +213,7 @@ def test_lenient_validator_maps_action_and_limit_order_pending() -> None:
         "label": "限价做空",
     }
     assert _normalize_stage2_enum_aliases(obj) is True
+    _normalize_stage2_bar_analysis_enums(obj)
     assert obj["decision"]["order_direction"] == "做空"
     assert obj["terminal"]["outcome"] == "trade"
     assert obj["bar_analysis"]["entry_bar"]["freshness"] == "pending"

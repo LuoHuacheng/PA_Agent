@@ -54,6 +54,7 @@ def test_play_order_alert_sound_uses_wav_on_windows(monkeypatch) -> None:
         SND_FILENAME = 1
         SND_ALIAS = 2
         SND_NODEFAULT = 4
+        SND_ASYNC = 8
         MB_ICONEXCLAMATION = 48
 
         @staticmethod

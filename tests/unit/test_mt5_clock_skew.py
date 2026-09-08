@@ -5,6 +5,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# MetaTrader5's python package is Windows-only; skip cleanly elsewhere.
+pytest.importorskip("MetaTrader5")
+
 from pa_agent.data.bar_close_wait import seconds_until_bar_closes
 def test_countdown_inflates_when_local_lags_server_by_3h() -> None:
     """Reproduce Hantec-style skew: bar ts from MT5, now from Windows 3h behind."""
