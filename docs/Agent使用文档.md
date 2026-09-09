@@ -50,7 +50,7 @@ pa-agent
 1. 程序启动后自动创建 `config/settings.json`（默认配置）
 2. 如提示 MT5 未连接，确保 MetaTrader 5 终端已打开并登录
 3. 首次使用需在 **菜单 → 设置** 中填写 API Key
-4. API Key 通过 Windows DPAPI 加密存储，不会明文写入磁盘
+4. 首次使用需在 **菜单 → 设置** 中填写 API Key(明文保存在本机被 git 忽略的 `config/settings.json`,请勿上传该文件)
 
 ### 环境要求
 
@@ -456,7 +456,7 @@ PA Agent 内置一套**二元决策树**（基于 `prompt_engineering/二元决�
 | ---------------- | ---------------- | ----------------------------- |
 | 模型 (model)       | AI 模型名称          | `deepseek-v4-flash`           |
 | Base URL         | API 接口地址         | `https://api.deepseek.com`    |
-| API Key          | API 密钥（加密存储）     | 空                             |
+| API Key          | API 密钥(明文,本地 gitignored) | 空                             |
 | Thinking         | 是否启用扩展思考         | 开启                            |
 | Reasoning Effort | 思考深度             | `max`                         |
 | Context Window   | 上下文窗口大小          | 2,000,000                     |
@@ -648,12 +648,11 @@ experience/
 
 ## 19. 安全与密钥管理
 
-### API Key 加密
+### API Key 存放
 
-- 使用 Windows DPAPI（Data Protection API）加密
-- 存储在 `settings.json` 中的 `api_key_encrypted` 字段（Base64 编码）
-- 明文 `api_key` **永远不会写入磁盘**
-- 加密/解密类：`pa_agent.security.secret_store.SecretStore`
+- API Key 明文保存在本机 `config/settings.json` 的 `provider.api_key`
+- 该文件已在 `.gitignore` 中排除,**禁止提交/分享/上传**
+- 程序仅以 OpenAI 兼容方式用该 Key 调用所配网关,不写入日志与落盘记录(见下方脱敏)
 
 ### 日志脱敏
 

@@ -99,7 +99,7 @@ def main() -> int:
 
     settings = load_settings(SETTINGS_JSON_PATH)
     if not provider_api_key_configured(settings):
-        log.error("No API key in %s (provider.api_key / api_key_encrypted)", SETTINGS_JSON_PATH)
+        log.error("No API key in %s (provider.api_key)", SETTINGS_JSON_PATH)
         return 2
 
     log.info(

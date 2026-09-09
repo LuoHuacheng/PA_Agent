@@ -9,7 +9,7 @@
 
 ## 报告漏洞或密钥泄露
 
-**请勿在公开 Issue 中粘贴 API Key、加密后的 `api_key_encrypted`、完整 `settings.json` 或含个人账号信息的分析记录。**
+**请勿在公开 Issue 中粘贴 API Key、完整 `settings.json`(含交易账号凭据)或含个人账号信息的分析记录。**
 
 请通过以下方式私下联系维护者：
 

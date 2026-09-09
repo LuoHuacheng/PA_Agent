@@ -2,7 +2,6 @@
   "provider": {
     "model": "deepseek-v4-flash",
     "base_url": "https://api.deepseek.com",
-    "api_key_encrypted": "",
     "thinking": true,
     "reasoning_effort": "high",
     "context_window": 128000

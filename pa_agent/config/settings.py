@@ -26,7 +26,6 @@ class AIProviderSettings(BaseModel):
     model: str = "deepseek-v4-flash"
     base_url: str = "https://api.deepseek.com"
     api_key: str = ""
-    api_key_encrypted: str = ""
     thinking: bool = True
     reasoning_effort: Literal["low", "medium", "high", "max"] = "high"
     context_window: int = 2_000_000
@@ -523,9 +522,6 @@ def load_settings(path: Path | None = None) -> Settings:
     provider = raw.get("provider", {})
     provider.pop("pricing", None)
     raw["provider"] = provider
-
-    # Migrate legacy encrypted key: drop it, api_key already in provider dict
-    raw.setdefault("provider", {}).setdefault("api_key", "")
 
     migrated_feishu = _migrate_legacy_feishu_json(raw, path)
     settings = Settings.model_validate(raw)

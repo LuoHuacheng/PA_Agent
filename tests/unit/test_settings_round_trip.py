@@ -77,7 +77,6 @@ def test_missing_api_key_leaves_api_key_blank(tmp_path):
     p = tmp_path / "settings.json"
     data = Settings().model_dump()
     data["provider"].pop("api_key", None)
-    data["provider"].pop("api_key_encrypted", None)
     p.write_text(json.dumps(data), encoding="utf-8")
     s = load_settings(p)
     assert s.provider.api_key == ""

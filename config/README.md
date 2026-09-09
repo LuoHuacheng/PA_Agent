@@ -12,9 +12,9 @@
    copy config\settings.example.json config\settings.json
    ```
 
-2. 启动程序，在 **设置** 中填写你的 **API Key**（会加密写入 `api_key_encrypted`）。
+2. 启动程序，在 **设置** 中填写你的 **API Key**（明文保存在本机 `config/settings.json`，该文件已被 git 忽略，不会入库）。
 
-   也可直接编辑 `config/settings.json` 中的 `base_url`、`model` 等字段，Key 仍建议通过 GUI 保存以便自动加密。
+   也可直接编辑 `config/settings.json` 中的 `base_url`、`model` 等字段，Key 建议通过 GUI 保存以便字段格式校验。
 
 3. `config/exception_state.json` 由程序在需要时自动创建，一般无需手动复制。结构可参考 `exception_state.example.json`。
 
@@ -35,7 +35,6 @@
 | `provider.model` | string | `"deepseek-v4-flash"` | 模型名称（须与网关支持的名称一致） |
 | `provider.base_url` | string | `"https://api.deepseek.com"` | OpenAI 兼容 API 根地址。DeepSeek：`https://api.deepseek.com`；第三方 OpenAI 兼容网关直接填网关地址 |
 | `provider.api_key` | string | `""` | API Key（明文，内存中临时使用；不持久化到文件） |
-| `provider.api_key_encrypted` | string | `""` | 加密后的 Key；留空表示未配置（通过 GUI 保存时自动加密写入） |
 | `provider.thinking` | bool | `true` | 是否启用思考/推理类扩展参数（依模型与网关而定）。关闭可 3–5 倍提速但分析质量下降 |
 | `provider.reasoning_effort` | string | `"high"` | 推理深度：`low` / `medium` / `high` / `max` |
 | `provider.context_window` | int | `2000000` | 用于上下文占用提示的窗口大小（tokens） |
