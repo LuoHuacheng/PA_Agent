@@ -20,6 +20,7 @@ venv/
 .env.*
 config/settings.json
 config/settings.local.json
+config/settings.json.bak_*
 config/exception_state.json
 config/monitoring_state.json
 config/secret.key
