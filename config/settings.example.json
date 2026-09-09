@@ -1,6 +1,6 @@
 {
   "provider": {
-    "model": "deepseek-chat",
+    "model": "deepseek-v4-flash",
     "base_url": "https://api.deepseek.com",
     "api_key_encrypted": "",
     "thinking": true,

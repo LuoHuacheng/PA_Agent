@@ -29,7 +29,7 @@
 | 操作系统 | Windows 10 / 11（主支持）、macOS 12+（TradingView 数据源） |
 | Python   | 3.11+                                                      |
 | 数据源   | MT5 / TradingView / yfinance / AkShare **至少配置一种**    |
-| 网络     | 可访问所配置的 AI API（如 DeepSeek、PackyAPI 等）          |
+| 网络     | 可访问所配置的 AI API（DeepSeek 或任意 OpenAI 兼容网关）    |
 
 ---
 

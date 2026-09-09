@@ -60,7 +60,7 @@ pa-agent
 | 操作系统   | Windows 10/11                        |
 | Python | 3.11+                                |
 | MT5 终端 | 需运行并登录（用于获取实时行情）                     |
-| 网络     | 需访问 AI API 服务（DeepSeek / PackyAPI 等） |
+| 网络     | 需访问 AI API 服务（DeepSeek 或任意 OpenAI 兼容网关） |
 
 
 ---
@@ -454,8 +454,8 @@ PA Agent 内置一套**二元决策树**（基于 `prompt_engineering/二元决�
 
 | 设置项              | 说明               | 默认值                           |
 | ---------------- | ---------------- | ----------------------------- |
-| 模型 (model)       | AI 模型名称          | `claude-sonnet-4-6`           |
-| Base URL         | API 接口地址         | `https://www.packyapi.com/v1` |
+| 模型 (model)       | AI 模型名称          | `deepseek-v4-flash`           |
+| Base URL         | API 接口地址         | `https://api.deepseek.com`    |
 | API Key          | API 密钥（加密存储）     | 空                             |
 | Thinking         | 是否启用扩展思考         | 开启                            |
 | Reasoning Effort | 思考深度             | `max`                         |
@@ -466,12 +466,10 @@ PA Agent 内置一套**二元决策树**（基于 `prompt_engineering/二元决�
 **常用 API 配置**：
 
 
-| 提供商      | Base URL                      | 模型名                 |
-| -------- | ----------------------------- | ------------------- |
-| DeepSeek | `https://api.deepseek.com`    | `deepseek-v4-pro`   |
-| PackyAPI | `https://www.packyapi.com/v1` | `claude-sonnet-4-6` |
-| KKAI     | `https://api.kkone.vip/v1`    | —                   |
-| 云雾       | `https://api.yunwu.ai/v1`     | —                   |
+| 提供商                | Base URL                      | 模型名             |
+| --------             | ----------------------------- | --------------- |
+| DeepSeek             | `https://api.deepseek.com`    | `deepseek-chat` |
+| 任意 OpenAI 兼容网关(中转/聚合等) | 按网关文档填写                     | 按网关文档填写         |
 
 
 ### 通用设置
