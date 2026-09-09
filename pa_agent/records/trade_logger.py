@@ -183,6 +183,9 @@ def _render_chart(bars_newest_first: list[Any], ema20_newest_first: list[float],
     # Try to use a CJK-capable font so Chinese labels render correctly
     import matplotlib.font_manager as _fm
     _cjk_candidates = [
+        # macOS: PingFang / Hiragino / Heiti ships with the OS
+        "PingFang SC", "Hiragino Sans GB", "Heiti SC", "STHeiti", "Arial Unicode MS",
+        # Windows / Linux
         "Microsoft YaHei", "SimHei", "WenQuanYi Micro Hei",
         "Noto Sans CJK SC", "Source Han Sans CN",
     ]

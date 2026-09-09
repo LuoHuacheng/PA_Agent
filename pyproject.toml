@@ -13,6 +13,7 @@ authors = [{ name = "PA Agent Team" }]
 dependencies = [
     "numpy>=1.26",
     "pandas>=2.2",
+    "matplotlib>=3.8",
     "openai>=1.40",
     "tiktoken>=0.7",
     "jsonschema>=4.22",
