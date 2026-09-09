@@ -180,20 +180,25 @@ def _render_chart(bars_newest_first: list[Any], ema20_newest_first: list[float],
         logger.warning("matplotlib not installed; skipping chart generation")
         return False
 
-    # Try to use a CJK-capable font so Chinese labels render correctly
+    # Render Chinese labels with a CJK-capable font.
     import matplotlib.font_manager as _fm
-    _cjk_candidates = [
+    _cjk_chain = [
         # macOS: PingFang / Hiragino / Heiti ships with the OS
         "PingFang SC", "Hiragino Sans GB", "Heiti SC", "STHeiti", "Arial Unicode MS",
         # Windows / Linux
         "Microsoft YaHei", "SimHei", "WenQuanYi Micro Hei",
         "Noto Sans CJK SC", "Source Han Sans CN",
     ]
+    # Pin the first installed CJK face as the primary family, and expose the
+    # whole chain as the sans-serif fallback.  matplotlib >= 3.6 falls back per
+    # glyph along the list, so even when a cold font-cache build races with
+    # another thread and the ttflist scan looks incomplete, drawing still
+    # resolves a CJK face instead of silently rendering tofu boxes.
     _available = {f.name for f in _fm.fontManager.ttflist}
-    for _fc in _cjk_candidates:
-        if _fc in _available:
-            matplotlib.rcParams["font.family"] = _fc
-            break
+    _primary = next((_fc for _fc in _cjk_chain if _fc in _available), None)
+    matplotlib.rcParams["font.sans-serif"] = [*_cjk_chain, "DejaVu Sans"]
+    matplotlib.rcParams["font.family"] = _primary or "sans-serif"
+    matplotlib.rcParams["axes.unicode_minus"] = False
 
     # Limit to _CHART_MAX_BARS
     bars = list(reversed(bars_newest_first[:_CHART_MAX_BARS]))  # oldest → newest

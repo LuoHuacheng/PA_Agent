@@ -85,6 +85,9 @@ _QUIET_LOGGER_NAMES = (
     "tvDatafeed",
     "tvDatafeed.main",
     "websocket",
+    # matplotlib prints font-cache build/extraction INFO on first import
+    "matplotlib",
+    "matplotlib.font_manager",
 )
 
 
