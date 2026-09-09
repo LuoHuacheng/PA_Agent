@@ -4,8 +4,6 @@ from __future__ import annotations
 import logging
 import sys
 
-from PyQt6.QtWidgets import QApplication
-
 logger = logging.getLogger(__name__)
 
 
@@ -19,6 +17,10 @@ def main(argv: list[str] | None = None) -> int:
     log_startup_diagnostics()
 
     argv = list(sys.argv if argv is None else argv)
+    # Imported here (not at module top) so importing pa_agent.main never pulls
+    # PyQt6 in: GUI launches need the optional "gui" extra, headless ones do not.
+    from PyQt6.QtWidgets import QApplication
+
     app = QApplication(argv)
     app.setApplicationName("PA Agent")
 

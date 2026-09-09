@@ -1,10 +1,9 @@
 """Event bus for inter-component communication via Qt signals."""
 from __future__ import annotations
 
-from PyQt6.QtCore import QObject, pyqtSignal
-
 from pa_agent.data.base import KlineFrame
 from pa_agent.records.schema import AlarmPayload
+from pa_agent.util.qt_compat import QObject, pyqtSignal
 
 
 class EventBus(QObject):

@@ -4,10 +4,9 @@ from __future__ import annotations
 import logging
 
 from pa_agent.ai.deepseek_client import AIUsage
+from pa_agent.util.qt_compat import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
-
-from PyQt6.QtCore import QObject, pyqtSignal
 
 
 class SessionTokenLedger(QObject):
@@ -28,7 +27,7 @@ class SessionTokenLedger(QObject):
         self,
         context_window: int = 1_000_000,
         warn_pct: float = 80.0,
-        parent: "QObject | None" = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._context_window = context_window

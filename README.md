@@ -38,7 +38,8 @@
 直接在系统中安装（推荐部署在本机）：
 
 ```cmd
-pip install -e .
+# 图形界面：需安装可选 GUI 依赖（PyQt6 + pyqtgraph）
+pip install -e ".[gui]"
 # 启动图形界面（两种方式等价，任选其一）
 pa-agent
 python -m pa_agent.main
@@ -46,11 +47,13 @@ python -m pa_agent.main
 
 首次启动后在**设置**中填写 **Base URL**、**模型名** 与 **API Key**。
 
-> 如需隔离环境也可创建虚拟环境：`python -m venv .venv` 后激活再 `pip install -e .`。
+> 如需隔离环境也可创建虚拟环境：`python -m venv .venv` 后激活再 `pip install -e ".[gui]"`。
+>
+> **无头（headless）部署不需要 Qt**：只需 `pip install -e .`（跳过 PyQt6/pyqtgraph），配合下方 `pa-monitor` 使用。
 
-**安装内容**：PyQt6（GUI 框架）+ pyqtgraph（K 线图表绘图）+ numpy/pandas（数据处理）+ openai（AI API 客户端）+ **akshare/baostock（A 股数据源）** + json 校验、模型定义等全套依赖。
+**安装内容**：numpy/pandas（数据处理）+ openai（AI API 客户端）+ **akshare/baostock（A 股数据源）** + json 校验、模型定义等全套依赖；PyQt6（GUI 框架）+ pyqtgraph（K 线图表绘图）属可选 `gui` extra，仅图形界面需要。
 
-> 若需运行测试（pytest）或代码格式化（ruff/black），额外安装：`pip install -e ".[dev]"`。
+> 若需运行测试（pytest）或代码格式化（ruff/black），额外安装：`pip install -e ".[dev,gui]"`（测试会启动真实 GUI 组件）。
 
 ### uv 隔离环境（可选）
 
@@ -91,7 +94,7 @@ make uv-run
 
 ### 无头监控（headless monitor，`pa-monitor`）
 
-不打开图形界面、按 K 线收盘自动运行的监控模式，直接执行 `pa-monitor start`：
+不打开图形界面、按 K 线收盘自动运行的监控模式，直接执行 `pa-monitor start`。此模式不依赖 Qt，安装时用基础 `pip install -e .`（不带 `gui` extra）即可：
 
 ```cmd
 pa-monitor start      # 启动监控

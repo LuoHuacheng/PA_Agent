@@ -16,9 +16,11 @@ lint:
 
 # ===== 对应 uv 隔离环境版本 =====
 
-# 自动创建隔离环境并安装依赖（含 dev 工具）
+# 自动创建隔离环境并安装依赖（dev 工具 + GUI 可选依赖）
+# 注意：Qt(PyQt6/pyqtgraph) 已移到可选 gui extra —— 纯无头部署直接
+# “uv sync”（不带 extra）即可跳过 Qt；本开发环境仍需 gui 以跑 GUI/测试。
 .venv: pyproject.toml
-	$(UV) sync --extra dev
+	$(UV) sync --extra dev --extra gui
 
 # 使用 uv 启动 GUI
 uv-run: .venv
