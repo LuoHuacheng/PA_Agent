@@ -73,6 +73,16 @@ def assembler():
 @pytest.fixture
 def exp_reader():
     mock = MagicMock()
+
+
+def _prediction_enabled_settings():
+    """Settings with the next_bar_prediction feature enabled (R-feature gate)."""
+    from pa_agent.config.settings import Settings as _SettingsCls
+
+    s = _SettingsCls()
+    s.general.enable_next_bar_prediction = True
+    return s
+
     mock.read_top5.return_value = []
     return mock
 
@@ -99,6 +109,7 @@ def test_orchestrator_passes_through_prediction(
         validator=validator,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
+        settings=_prediction_enabled_settings(),
     )
 
     record = orchestrator.submit(
@@ -131,6 +142,7 @@ def test_orchestrator_calls_client_twice_max(
         validator=validator,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
+        settings=_prediction_enabled_settings(),
     )
 
     orchestrator.submit(frame=frame, cancel_token=CancelToken(), on_event=lambda e: None)
@@ -167,6 +179,7 @@ def test_short_circuit_emits_unpredictable(
         validator=validator,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
+        settings=_prediction_enabled_settings(),
     )
 
     record = orchestrator.submit(frame=frame, cancel_token=CancelToken(), on_event=lambda e: None)
@@ -193,6 +206,7 @@ def test_log_emits_prediction_line(
         validator=validator,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
+        settings=_prediction_enabled_settings(),
     )
 
     with caplog.at_level(logging.INFO, logger="pa_agent.orchestrator.two_stage"):
@@ -221,6 +235,7 @@ def test_save_full_round_trip(
         validator=validator,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
+        settings=_prediction_enabled_settings(),
     )
 
     record = orchestrator.submit(frame=frame, cancel_token=CancelToken(), on_event=lambda e: None)
@@ -269,6 +284,7 @@ def test_cancel_no_prediction_required(
         validator=validator,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
+        settings=_prediction_enabled_settings(),
     )
 
     # Should not raise, and client should not be called
@@ -297,6 +313,7 @@ def test_network_error_no_prediction_required(
         validator=validator,
         pending_writer=pending_writer,
         exp_reader=exp_reader,
+        settings=_prediction_enabled_settings(),
     )
 
     record = orchestrator.submit(frame=frame, cancel_token=CancelToken(), on_event=lambda e: None)
