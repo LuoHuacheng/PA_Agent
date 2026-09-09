@@ -380,7 +380,7 @@ def _normalize_terminal_outcome_value(
 
 
 def _normalize_stage2_enum_aliases(out: dict[str, Any]) -> bool:
-    """Map common OpenClaw/Agent enum slips before schema validation."""
+    """Map common model enum slips before schema validation."""
     changed = False
     diag = out.get("diagnosis_summary")
     diag_direction = (

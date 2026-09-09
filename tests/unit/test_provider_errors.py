@@ -16,7 +16,7 @@ class _Settings:
     retry_stage2 = True
 
 
-def test_is_provider_quota_exhausted_openclaw_message():
+def test_is_provider_quota_exhausted_gateway_message():
     text = "402 您的积分已用完，可通过购买或参与活动获取更多积分(错误码: 402)"
     assert is_provider_quota_exhausted(text)
 

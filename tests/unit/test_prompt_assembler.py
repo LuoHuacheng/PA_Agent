@@ -323,7 +323,7 @@ def test_stage2_message_roles(assembler: PromptAssembler):
 
 
 def test_stage2_continuation_is_standalone_not_stage1_chat(assembler: PromptAssembler):
-    """Stage 2 standalone mode must not prepend Stage 1 (OpenClaw Agent chat-mode retries)."""
+    """Stage 2 standalone mode must not prepend Stage 1 (non-DeepSeek gateway)."""
     frame = _make_frame()
     stage1_messages = assembler.build_stage1(frame)
     stage1_json = {"cycle_position": "spike", "direction": "bearish", "gate_result": "proceed"}

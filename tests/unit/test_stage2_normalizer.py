@@ -1026,7 +1026,7 @@ def test_normalize_stage2_skip_next_bar_ui_path_omits_injection() -> None:
 
 
 def test_normalize_stage2_no_order_english_alias_passes_schema() -> None:
-    """Regression: OpenClaw emits order_type=no_order + terminal=wait."""
+    """Regression: models emit order_type=no_order + terminal=wait."""
     payload = {
         "decision": {
             "order_type": "no_order",

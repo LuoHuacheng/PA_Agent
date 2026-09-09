@@ -3480,7 +3480,7 @@ class MainWindow(QMainWindow):
         if exc_type == "provider_error" or category == "e":
             parts.append(
                 "【说明】API 提供商返回积分/额度不足（402），程序不会自动重试。"
-                "请充值 OpenClaw 积分或更换 API 后重新「提交分析」。\n"
+                "请充值 API 积分或更换 API 后重新「提交分析」。\n"
             )
         elif stage == "stage2":
             parts.append(
@@ -3744,7 +3744,7 @@ class MainWindow(QMainWindow):
                 msg = exc_info.get("message", "")
                 if err_type == "provider_error" or category == "e":
                     headline = "API 积分不足"
-                    detail = msg or "OpenClaw 积分不足，请充值或更换 API"
+                    detail = msg or "API 积分不足，请充值或更换 API"
                     self._status_bar.showMessage(detail)
                 else:
                     detail = f"{category}: {msg}" if category else (msg or err_type)
@@ -4303,36 +4303,9 @@ class MainWindow(QMainWindow):
             self._ai_mode_label.setText("")
             return
         p = settings.provider
-        base = (p.base_url or "").lower()
-        if "deepseek.com" in base:
-            thinking = "开" if p.thinking else "关"
-            self._ai_mode_label.setText(
-                f"思考: {thinking} · effort={p.reasoning_effort} · {p.model}"
-            )
-        elif "kkone.vip" in base:
-            thinking = "开" if p.thinking else "关"
-            effort = p.reasoning_effort if p.thinking else "—"
-            self._ai_mode_label.setText(
-                f"KKAI 思考: {thinking} · budget≈{effort} · {p.model}"
-            )
-        elif "yunwu.ai" in base:
-            thinking = "开" if p.thinking else "关"
-            effort = p.reasoning_effort if p.thinking else "—"
-            mode = "adaptive" if "opus-4-7" in p.model or "opus-4-6" in p.model else "effort"
-            self._ai_mode_label.setText(
-                f"云雾 思考: {thinking} · {mode}={effort} · {p.model}"
-            )
-        elif "packyapi.com" in base:
-            thinking = "开" if p.thinking else "关"
-            effort = p.reasoning_effort if p.thinking else "—"
-            mode = "adaptive" if "opus-4-7" in p.model or "opus-4-6" in p.model else "effort"
-            self._ai_mode_label.setText(
-                f"PackyAPI 思考: {thinking} · {mode}={effort} · {p.model}"
-            )
-        else:
-            self._ai_mode_label.setText(
-                f"模型: {p.model} · 思考={('开' if p.thinking else '关')}"
-            )
+        thinking = "开" if p.thinking else "关"
+        effort = p.reasoning_effort if p.thinking else "—"
+        self._ai_mode_label.setText(f"思考: {thinking} · effort={effort} · {p.model}")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

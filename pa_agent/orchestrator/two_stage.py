@@ -126,7 +126,7 @@ def _enrich_stage2_validation_message(err: ValidationError, reply: Any) -> str:
             f"{err.message}：扩展思考已输出约 {len(reasoning)} 字，但正文 content 为空，"
             f"且思考中未见 JSON（completion_tokens≈{completion}）。"
             " 常见原因是思考在输出阶段二 JSON 前被截断或网关提前结束流。"
-            " 请缩短 prompt、检查 Packy 分组限额，或调整模型/Reasoning Effort 后重新分析。"
+            " 请缩短 prompt、检查网关分组限额，或调整模型/Reasoning Effort 后重新分析。"
         )
     if reasoning:
         return (
@@ -1056,216 +1056,20 @@ class TwoStageOrchestrator:
         reasoning_effort: str,
         stage_label: str,
     ) -> Any:
-        """Call stream_chat; on connection error, switch to QClaw and retry once."""
-        original_model = (
-            self._settings.provider.model if self._settings is not None else ""
+        """Stream one stage through the configured provider (single attempt).
+
+        Provider switching on network errors was removed together with the
+        hardcoded connector routes; errors surface to the caller unchanged.
+        """
+        del stage_label
+        return self._client.stream_chat(
+            messages,
+            on_reasoning_token=on_reasoning_token,
+            on_content_token=on_content_token,
+            cancel_token=cancel_token,
+            thinking=thinking,
+            reasoning_effort=reasoning_effort,
         )
-        tried_qclaw = False
-        tried_cursor = False
-        tried_workbuddy = False
-        tried_trae_cn = False
-        while True:
-            try:
-                return self._client.stream_chat(
-                    messages,
-                    on_reasoning_token=on_reasoning_token,
-                    on_content_token=on_content_token,
-                    cancel_token=cancel_token,
-                    thinking=thinking,
-                    reasoning_effort=reasoning_effort,
-                )
-            except Exception as exc:
-                if not self._is_network_error(exc):
-                    raise
-                # Try WorkBuddy fallback first (if model is openclaw_wb),
-                # then TRAE Work CN (if model is openclaw_twc),
-                # then Cursor (if model is openclaw_cs),
-                # then QClaw fallback (if model is openclaw)
-                if not tried_workbuddy and self._try_workbuddy_fallback(
-                    original_model=original_model
-                ):
-                    tried_workbuddy = True
-                    logger.info(
-                        "%s network error (%s); applied WorkBuddy provider — retrying",
-                        stage_label,
-                        exc,
-                    )
-                elif not tried_trae_cn and self._try_trae_cn_fallback(
-                    original_model=original_model
-                ):
-                    tried_trae_cn = True
-                    logger.info(
-                        "%s network error (%s); applied TRAE Work CN provider — retrying",
-                        stage_label,
-                        exc,
-                    )
-                elif not tried_cursor and self._try_cursor_fallback(
-                    original_model=original_model
-                ):
-                    tried_cursor = True
-                    logger.info(
-                        "%s network error (%s); applied Cursor provider — retrying",
-                        stage_label,
-                        exc,
-                    )
-                elif not tried_qclaw and self._try_qclaw_fallback(
-                    original_model=original_model
-                ):
-                    tried_qclaw = True
-                    logger.info(
-                        "%s network error (%s); applied QClaw provider — retrying",
-                        stage_label,
-                        exc,
-                    )
-                else:
-                    raise
-
-    def _try_qclaw_fallback(self, *, original_model: str = "") -> bool:
-        """Apply local QClaw provider (like settings Save with model=openclaw)."""
-        from pa_agent.ai.qclaw_connector import (
-            apply_qclaw_provider_to_settings,
-            is_openclaw_model,
-        )
-        from pa_agent.config.paths import SETTINGS_JSON_PATH
-
-        if not is_openclaw_model(original_model):
-            return False
-        if self._settings is None:
-            return False
-
-        from pa_agent.config.settings import save_settings
-        from pa_agent.util.logging import update_api_key
-
-        err = apply_qclaw_provider_to_settings(self._settings)
-        if err:
-            logger.warning("QClaw auto-fallback unavailable: %s", err)
-            return False
-
-        self._client.update_provider(self._settings.provider)
-        try:
-            save_settings(self._settings, SETTINGS_JSON_PATH)
-            update_api_key(self._settings.provider.api_key)
-        except Exception as save_exc:  # noqa: BLE001
-            logger.warning("QClaw fallback applied but settings save failed: %s", save_exc)
-
-        logger.info(
-            "QClaw auto-fallback: model=%s base_url=%s",
-            self._settings.provider.model,
-            self._settings.provider.base_url,
-        )
-        return True
-
-    def _try_cursor_fallback(self, *, original_model: str = "") -> bool:
-        """Apply Cursor route via QClaw (like settings Save with model=openclaw_cs)."""
-        from pa_agent.ai.cursor_connector import (
-            apply_cursor_provider_to_settings,
-            is_openclaw_cs_model,
-        )
-        from pa_agent.config.paths import SETTINGS_JSON_PATH
-
-        if not is_openclaw_cs_model(original_model):
-            return False
-        if self._settings is None:
-            return False
-
-        from pa_agent.config.settings import save_settings
-        from pa_agent.util.logging import update_api_key
-
-        err = apply_cursor_provider_to_settings(
-            self._settings,
-            preferred_model=original_model,
-        )
-        if err:
-            logger.warning("Cursor auto-fallback unavailable: %s", err)
-            return False
-
-        self._client.update_provider(self._settings.provider)
-        try:
-            save_settings(self._settings, SETTINGS_JSON_PATH)
-            update_api_key(self._settings.provider.api_key)
-        except Exception as save_exc:  # noqa: BLE001
-            logger.warning("Cursor fallback applied but settings save failed: %s", save_exc)
-
-        logger.info(
-            "Cursor auto-fallback: model=%s base_url=%s",
-            self._settings.provider.model,
-            self._settings.provider.base_url,
-        )
-        return True
-
-    def _try_workbuddy_fallback(self, *, original_model: str = "") -> bool:
-        """Apply WorkBuddy provider (like settings Save with model=openclaw_wb)."""
-        from pa_agent.ai.workbuddy_connector import (
-            apply_workbuddy_provider_to_settings,
-            is_openclaw_wb_model,
-        )
-        from pa_agent.config.paths import SETTINGS_JSON_PATH
-
-        if not is_openclaw_wb_model(original_model):
-            return False
-        if self._settings is None:
-            return False
-
-        from pa_agent.config.settings import save_settings
-        from pa_agent.util.logging import update_api_key
-
-        err = apply_workbuddy_provider_to_settings(self._settings)
-        if err:
-            logger.warning("WorkBuddy auto-fallback unavailable: %s", err)
-            return False
-
-        self._client.update_provider(self._settings.provider)
-        try:
-            save_settings(self._settings, SETTINGS_JSON_PATH)
-            update_api_key(self._settings.provider.api_key)
-        except Exception as save_exc:  # noqa: BLE001
-            logger.warning("WorkBuddy fallback applied but settings save failed: %s", save_exc)
-
-        logger.info(
-            "WorkBuddy auto-fallback: model=%s base_url=%s",
-            self._settings.provider.model,
-            self._settings.provider.base_url,
-        )
-        return True
-
-    def _try_trae_cn_fallback(self, *, original_model: str = "") -> bool:
-        """Apply TRAE Work CN provider (like settings Save with model=openclaw_twc)."""
-        from pa_agent.ai.trae_connector import (
-            apply_trae_cn_provider_to_settings,
-            is_openclaw_twc_model,
-        )
-        from pa_agent.config.paths import SETTINGS_JSON_PATH
-
-        if not is_openclaw_twc_model(original_model):
-            return False
-        if self._settings is None:
-            return False
-
-        from pa_agent.config.settings import save_settings
-        from pa_agent.util.logging import update_api_key
-
-        err = apply_trae_cn_provider_to_settings(
-            self._settings, preferred_model=original_model
-        )
-        if err:
-            logger.warning("TRAE Work CN auto-fallback unavailable: %s", err)
-            return False
-
-        self._client.update_provider(self._settings.provider)
-        try:
-            save_settings(self._settings, SETTINGS_JSON_PATH)
-            update_api_key(self._settings.provider.api_key)
-        except Exception as save_exc:  # noqa: BLE001
-            logger.warning(
-                "TRAE Work CN fallback applied but settings save failed: %s", save_exc
-            )
-
-        logger.info(
-            "TRAE Work CN auto-fallback: model=%s base_url=%s",
-            self._settings.provider.model,
-            self._settings.provider.base_url,
-        )
-        return True
 
     @staticmethod
     def _is_network_error(exc: Exception) -> bool:

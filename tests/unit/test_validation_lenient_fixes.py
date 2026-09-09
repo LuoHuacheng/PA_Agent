@@ -134,8 +134,8 @@ def test_lenient_validator_maps_expired_freshness_on_pending_entry() -> None:
     assert result.obj["bar_analysis"]["entry_bar"]["freshness"] == "pending"
 
 
-def test_lenient_validator_maps_openclaw_enum_slips() -> None:
-    """OpenClaw agent often mixes stage1 English enums into stage2 fields."""
+def test_lenient_validator_maps_english_enum_slips() -> None:
+    """Models often mix stage1 English enums into stage2 fields."""
     from pa_agent.ai.stage2_normalizer import (
         _normalize_stage2_bar_analysis_enums,
         _normalize_stage2_enum_aliases,

@@ -287,22 +287,12 @@ class FreeChatSession:
         history_for_api: list[dict] = list(self._cached_prefix)  # copy stable prefix
 
         # Previous free-chat turns from history_full
-        preserve_mimo = False
-        if self._settings is not None:
-            from pa_agent.ai.mimo_compat import is_mimo_provider
-
-            provider = getattr(self._settings, "provider", None)
-            if provider is not None:
-                preserve_mimo = is_mimo_provider(
-                    getattr(provider, "base_url", ""),
-                    getattr(provider, "model", ""),
-                )
         for msg in self._history_full:
             if msg["role"] == "user":
                 history_for_api.append({"role": "user", "content": msg["content"]})
             elif msg["role"] == "assistant":
                 assistant_msg: dict = {"role": "assistant", "content": msg["content"]}
-                if (self.keep_reasoning_in_resend or preserve_mimo) and msg.get(
+                if self.keep_reasoning_in_resend and msg.get(
                     "reasoning_content"
                 ):
                     assistant_msg["reasoning_content"] = msg["reasoning_content"]

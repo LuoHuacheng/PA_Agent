@@ -233,40 +233,11 @@ class AIStreamPanel(QWidget):
             self._mode_label.setText("")
             return
         p = self._settings.provider
-        base = (p.base_url or "").lower()
-        if "deepseek.com" in base:
-            thinking = "enabled" if p.thinking else "disabled"
-            self._mode_label.setText(
-                f"API: thinking={thinking} · reasoning_effort={p.reasoning_effort} · {p.model}"
-            )
-        elif "minimax.io" in base or "minimax.com" in base:
-            thinking = "adaptive" if p.thinking else "disabled"
-            self._mode_label.setText(
-                f"MiniMax: thinking={thinking} · {p.model}"
-            )
-        elif "kkone.vip" in base:
-            thinking = "开" if p.thinking else "关"
-            self._mode_label.setText(
-                f"KKAI: 思考={thinking} · budget≈"
-                f"{p.reasoning_effort if p.thinking else '—'} · {p.model} "
-                f"(部分线路不回传 reasoning_content)"
-            )
-        elif "yunwu.ai" in base:
-            thinking = "开" if p.thinking else "关"
-            self._mode_label.setText(
-                f"云雾: 思考={thinking} · effort="
-                f"{p.reasoning_effort if p.thinking else '—'} · {p.model}"
-            )
-        elif "packyapi.com" in base:
-            thinking = "开" if p.thinking else "关"
-            self._mode_label.setText(
-                f"PackyAPI: 思考={thinking} · effort="
-                f"{p.reasoning_effort if p.thinking else '—'} · {p.model}"
-            )
-        else:
-            self._mode_label.setText(
-                f"API: {p.model} · 思考={('开' if p.thinking else '关')}"
-            )
+        thinking = "开" if p.thinking else "关"
+        effort = p.reasoning_effort if p.thinking else "—"
+        self._mode_label.setText(
+            f"API: 思考={thinking} · effort={effort} · {p.model}"
+        )
 
     def _update_stats(self) -> None:
         labels = {"stage1": "阶段一", "stage2": "阶段二", "chat": "追问"}

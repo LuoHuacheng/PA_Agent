@@ -81,12 +81,12 @@ _STAGE2_API_TASK_RULE = """
 **必须**：在 assistant 正文 `content` 输出**完整阶段二裸 JSON**（仅此一种交付物）。
 """.strip()
 
-_OPENCLAW_AGENT_NO_TOOLS_RULE = """
-## PA Agent × QClaw 任务模式（硬约束）
+_AGENT_NO_TOOLS_RULE = """
+## PA Agent 分析任务模式（硬约束）
 
 你正在接收 **PA Agent 程序化 K 线分析**请求，不是通用编程/运维助手会话。
 
-**禁止调用任何工具**，包括但不限于：`exec`、运行 Python/shell、读/写/编辑文件、浏览器、联网搜索、在 `~/.qclaw/workspace` 写中间 `.md`/`.json` 等。
+**禁止调用任何工具**，包括但不限于：`exec`、运行 Python/shell、读/写/编辑文件、浏览器、联网搜索、写中间 `.md`/`.json` 文件等。
 
 - K 线表、EMA/ATR、几何特征、阶段一诊断（若有）**已全部在用户消息中给出**；禁止再拉数据或读盘。
 - 风险点数、盈亏比、交易者方程、胜率估算等**一律在思考过程或 JSON 字段内心算**；禁止为 `risk=stop-entry` 之类简单算术启动解释器。
@@ -933,7 +933,7 @@ class PromptAssembler:
         system_parts = [
             _LANGUAGE_ZH_RULE,
             _PA_TERMINOLOGY_ZH,
-            _OPENCLAW_AGENT_NO_TOOLS_RULE,
+            _AGENT_NO_TOOLS_RULE,
             _THINKING_CONTENT_OUTPUT_RULE,
         ]
         system_parts.extend(self._load(name) for name in txt_files)
@@ -1195,27 +1195,8 @@ class PromptAssembler:
 
         prev_user_content = self._inject_market_features_block(prev_user_content, frame)
 
-        prev_reasoning = ""
-        if isinstance(prev_s1_response, dict):
-            prev_reasoning = str(prev_s1_response.get("reasoning_content") or "")
-        preserve_mimo = False
-        if provider_settings is not None:
-            from pa_agent.ai.mimo_compat import (
-                build_assistant_api_message,
-                is_mimo_provider,
-            )
-
-            preserve_mimo = is_mimo_provider(
-                getattr(provider_settings, "base_url", ""),
-                getattr(provider_settings, "model", ""),
-            )
-        if preserve_mimo:
-            assistant_turn = build_assistant_api_message(
-                prev_assistant_content,
-                reasoning_content=prev_reasoning,
-            )
-        else:
-            assistant_turn = {"role": "assistant", "content": prev_assistant_content}
+        del provider_settings
+        assistant_turn = {"role": "assistant", "content": prev_assistant_content}
 
         system_content = self._build_stage1_system_prompt()
         incremental_user_content = self._build_incremental_stage1_continuation_user_prompt(
@@ -1636,7 +1617,7 @@ class PromptAssembler:
         Prefix-chain mode (DeepSeek native, default when safe):
           [system, user(S1…), assistant(S1 JSON), user(S2 task only)]
 
-        Standalone mode (OpenClaw Agent and similar):
+        Standalone mode (non-DeepSeek gateways):
           [system, user(S2 task + full K-line tables)]
         """
         from pa_agent.ai.deepseek_client import supports_kv_prefix_chain

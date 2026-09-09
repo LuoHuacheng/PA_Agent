@@ -1,7 +1,7 @@
 """Detect non-retryable API provider quota / billing failures in model output."""
 from __future__ import annotations
 
-PROVIDER_QUOTA_USER_MESSAGE = "OpenClaw 积分不足，请充值或更换 API"
+PROVIDER_QUOTA_USER_MESSAGE = "API 积分不足，请充值或更换 API"
 
 _QUOTA_MARKERS: tuple[str, ...] = (
     "402",
@@ -17,7 +17,7 @@ _QUOTA_MARKERS: tuple[str, ...] = (
 
 
 def is_provider_quota_exhausted(text: str | None) -> bool:
-    """True when *text* looks like an OpenClaw / gateway 402 quota response."""
+    """True when *text* looks like a gateway 402 quota response."""
     raw = (text or "").strip()
     if not raw:
         return False
