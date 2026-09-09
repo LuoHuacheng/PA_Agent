@@ -983,6 +983,48 @@ class MultiSymbolMonitor:
             if isinstance(provider, dict):
                 model_name = str(provider.get("model") or "")
         flip_cooldown = int(getattr(self._settings.general, "structure_flip_cooldown_bars", 3) or 3)
+        exec_decision = dict(inner)
+        atr_pct = _frame_atr_pct(frame)
+        if atr_pct is not None:
+            exec_decision["atr_pct"] = atr_pct
+        # Plan B (止损距离下限前移): 结构止损低于执行层 ATR 动态下限时, 在落盘前
+        # 抬升止损到 tick 对齐下限, 消除"计划已记录、执行被 Stop loss too close
+        # to entry 拒绝"的断层(P0-2)。仅真实执行(非 dry-run/停用)时介入。
+        binance_cfg = self._binance_cfg
+        if (
+            atr_pct is not None
+            and str(inner.get("order_type") or "") in ("限价单", "市价单")
+            and getattr(binance_cfg, "enabled", False)
+            and not getattr(binance_cfg, "dry_run", False)
+            and not getattr(binance_cfg, "emergency_stop", False)
+        ):
+            try:
+                from pa_agent.trading.binance_usdm_testnet import (
+                    lift_stop_to_min_distance_floor,
+                )
+                from pa_agent.util.price_tick import infer_price_tick_from_frame
+
+                old_stop = inner.get("stop_loss_price")
+                if lift_stop_to_min_distance_floor(
+                    exec_decision,
+                    binance_cfg,
+                    tick=infer_price_tick_from_frame(frame),
+                ):
+                    inner["stop_loss_price"] = exec_decision["stop_loss_price"]
+                    logger.info(
+                        "计划止损抬升至 ATR 动态下限 %s %s: %s -> %s",
+                        frame.symbol,
+                        getattr(frame, "timeframe", ""),
+                        old_stop,
+                        inner["stop_loss_price"],
+                    )
+            except Exception as exc:  # 抬升失败不阻断记录/执行
+                logger.warning(
+                    "Stop-floor lift failed for %s %s: %s",
+                    frame.symbol,
+                    getattr(frame, "timeframe", ""),
+                    exc,
+                )
         save_trade_record(
             decision_inner=inner,
             stage2_full=decision,
@@ -994,11 +1036,6 @@ class MultiSymbolMonitor:
             model_name=model_name,
             structure_flip_cooldown_bars=flip_cooldown,
         )
-
-        exec_decision = dict(inner)
-        atr_pct = _frame_atr_pct(frame)
-        if atr_pct is not None:
-            exec_decision["atr_pct"] = atr_pct
         result = execute_market_signal(exec_decision, self._settings, analysis_symbol=frame.symbol)
         logger.info(
             f"Binance U本位 {self._binance_env.label_zh} 自动执行: status=%s symbol=%s reason=%s",

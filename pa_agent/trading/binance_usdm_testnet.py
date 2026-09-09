@@ -33,7 +33,11 @@ from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
 from pa_agent.trading import binance_env
 from pa_agent.trading.binance_env import BinanceTradeEnv
 from pa_agent.trading.rate_limit import parse_banned_until_ms, rate_limiter
-from pa_agent.util.trade_metrics import compute_risk_reward, passes_trader_equation
+from pa_agent.util.trade_metrics import (
+    compute_risk_reward,
+    min_risk_reward_ratio,
+    passes_trader_equation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +386,87 @@ def _stop_distance_floor_pct(
         return floor
     multiple = Decimal(str(getattr(config, "min_stop_atr_multiple", 0.8) or 0.8))
     return max(floor, multiple * Decimal(str(atr_pct)))
+
+
+def _align_stop_tick(price: float, tick: float, *, down: bool) -> float:
+    """Tick-align an outward stop move so the floor is strictly met."""
+    scaled = price / tick
+    aligned = (math.floor(scaled + 1e-12) if down else math.ceil(scaled - 1e-12)) * tick
+    return round(aligned, 10)
+
+
+def lift_stop_to_min_distance_floor(
+    decision: dict[str, Any],
+    config: BinanceUSDMTestnetSettings,
+    *,
+    tick: float | None = None,
+) -> bool:
+    """Plan-stage stop widening up to the executor's min entry-stop distance.
+
+    The executor refuses ("Stop loss too close to entry", P0-2) any decision
+    whose structural stop sits closer than the configured floor (fixed pct or
+    min_stop_atr_multiple x ATR%): the plan gets recorded, then silently
+    rejected with no order placed. Applying the same floor here, before the
+    record is persisted, widens the stop outward (entry/TP untouched) by the
+    smallest tick-aligned amount that satisfies the floor, so the recorded
+    plan is actually executable.
+
+    Conservative by design: never moves the stop when lifting would push TP1
+    reward:risk below the minimum or break the §10.3 trader's equation - the
+    decision is then left untouched and the executor keeps rejecting rather
+    than silently changing a plan into an uneconomic trade.
+
+    Returns True when the stop_loss_price was widened in place.
+    """
+    if str(decision.get("order_type") or "") not in ("限价单", "市价单"):
+        return False
+    side = _side_from_decision(decision.get("order_direction"))
+    if side not in ("BUY", "SELL"):
+        return False
+    try:
+        entry = float(decision["entry_price"])
+        stop = float(decision["stop_loss_price"])
+        tp = float(decision["take_profit_price"])
+    except (TypeError, ValueError, KeyError):
+        return False
+    if not entry or entry <= 0:
+        return False
+    floor_pct = _stop_distance_floor_pct(config, decision)
+    if floor_pct <= 0:
+        return False
+    gap_pct = (abs(entry - stop) / entry) * 100.0
+    if gap_pct + 1e-9 >= float(floor_pct):
+        return False
+    distance = entry * float(floor_pct) / 100.0
+    if side == "BUY":
+        if stop >= entry:
+            return False
+        ideal = entry - distance
+        new_stop = _align_stop_tick(ideal, tick, down=True) if tick and tick > 0 else round(ideal, 10)
+        if new_stop >= entry:
+            return False
+    else:
+        if stop <= entry:
+            return False
+        ideal = entry + distance
+        new_stop = _align_stop_tick(ideal, tick, down=False) if tick and tick > 0 else round(ideal, 10)
+        if new_stop <= entry:
+            return False
+    if abs(new_stop - stop) < 1e-12:
+        return False
+    rr = compute_risk_reward(entry, tp, new_stop, decision.get("order_direction"))
+    if rr is None:
+        return False
+    risk = float(rr["risk"])
+    reward = float(rr["reward"])
+    min_ratio = min_risk_reward_ratio()
+    if risk <= 0 or reward <= 0 or float(rr["ratio"]) + 1e-9 < min_ratio:
+        return False
+    win_rate = _parse_win_rate(decision.get("estimated_win_rate"))
+    if win_rate is None or not passes_trader_equation(win_rate, risk, reward):
+        return False
+    decision["stop_loss_price"] = float(new_stop)
+    return True
 
 
 def _entry_client_id(signal_id: str) -> str:

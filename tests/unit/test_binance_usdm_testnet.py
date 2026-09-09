@@ -1072,6 +1072,72 @@ def test_stop_floor_helper_atr_mode_uses_max_of_floor_and_multiple() -> None:
     assert binance_usdm_testnet._stop_distance_floor_pct(config, {"atr_pct": None}) == Decimal("0.2")
 
 
+# ── 计划侧止损抬升到 ATR 动态下限 (P0-2 / Plan B) ─────────────────────
+
+def test_lift_stop_to_min_distance_floor_short_xrp_scenario() -> None:
+    """XRPUSDT 30m 复现: entry 1.4213 / SL 1.4267 (gap 0.380%) 低于
+    0.7×ATR%(0.6086)=0.426% 下限 → 抬升止损到 tick 对齐 1.4274, RR/方程仍成立。"""
+    config = _atr_settings(multiple=0.7).binance_usdm_testnet
+    decision = {
+        "order_type": "限价单",
+        "order_direction": "做空",
+        "entry_price": 1.4213,
+        "stop_loss_price": 1.4267,
+        "take_profit_price": 1.4105,
+        "take_profit_price_2": 1.3903,
+        "estimated_win_rate": 53,
+        "atr_pct": 0.6086,
+    }
+    changed = binance_usdm_testnet.lift_stop_to_min_distance_floor(
+        decision, config, tick=0.0001
+    )
+    assert changed is True
+    assert decision["stop_loss_price"] == 1.4274
+    gap = (decision["stop_loss_price"] - 1.4213) / 1.4213 * 100.0
+    assert gap >= 0.426
+
+
+def test_lift_stop_to_min_distance_floor_noop_when_already_above_floor() -> None:
+    """止损距离已 ≥ 下限 → 不动止损, 返回 False。"""
+    config = _atr_settings(multiple=0.7).binance_usdm_testnet
+    decision = {
+        "order_type": "限价单",
+        "order_direction": "做空",
+        "entry_price": 1.4213,
+        "stop_loss_price": 1.4280,  # gap ≈ 0.47% ≥ 0.426%
+        "take_profit_price": 1.4105,
+        "estimated_win_rate": 53,
+        "atr_pct": 0.6086,
+    }
+    changed = binance_usdm_testnet.lift_stop_to_min_distance_floor(
+        decision, config, tick=0.0001
+    )
+    assert changed is False
+    assert decision["stop_loss_price"] == 1.4280
+
+
+def test_lift_stop_to_min_distance_floor_refuses_when_min_rr_breaks() -> None:
+    """下限过高会把风险推到超过回报(盈亏比<1) → 拒绝抬升, 保持原样
+    （执行层会照旧以 rejected 收尾, 不静默改单）。"""
+    settings = _settings()
+    settings.binance_usdm_testnet.min_stop_mode = "fixed"
+    settings.binance_usdm_testnet.min_stop_distance_pct = 6.0
+    config = settings.binance_usdm_testnet
+    decision = {
+        "order_type": "市价单",
+        "order_direction": "做空",
+        "entry_price": 100.0,
+        "stop_loss_price": 100.2,
+        "take_profit_price": 95.0,
+        "estimated_win_rate": 60,
+    }
+    changed = binance_usdm_testnet.lift_stop_to_min_distance_floor(
+        decision, config, tick=0.1
+    )
+    assert changed is False
+    assert decision["stop_loss_price"] == 100.2
+
+
 def test_market_order_uses_dynamic_floor_above_fixed_minimum() -> None:
     """gap 0.3% > floor 0.2% 但 < 0.8×ATR(0.5%)=0.4% → 动态下限拒绝。"""
     settings = _atr_settings()

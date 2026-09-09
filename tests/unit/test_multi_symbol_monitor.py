@@ -698,6 +698,78 @@ def test_monitor_auto_execution_disabled_by_default_returns_skipped(
     )
 
 
+def test_save_order_opportunity_lifts_stop_to_atr_floor_before_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Plan B: 限价单止损低于 ATR 动态下限时, 落盘/执行前自动抬升止损,
+    消除"记录可出、执行被 Stop loss too close to entry 拒"断层。"""
+    settings = _settings(MonitorTarget(symbol="XRPUSDT", timeframe="30m"))
+    cfg = settings.binance_usdm_testnet
+    cfg.enabled = True
+    cfg.dry_run = False
+    cfg.emergency_stop = False
+    cfg.symbol = "XRPUSDT"
+    cfg.symbol_whitelist = ["XRPUSDT"]
+    cfg.limit_order_enabled = True
+    cfg.min_stop_mode = "atr"
+    cfg.min_stop_distance_pct = 0.2
+    cfg.min_stop_atr_multiple = 0.7
+
+    class _Bar:
+        def __init__(self, close: float) -> None:
+            self.open = close
+            self.high = close
+            self.low = close
+            self.close = close
+
+    frame = type("Frame", (), {
+        "symbol": "XRPUSDT",
+        "timeframe": "30m",
+        "bars": (_Bar(1.4229), _Bar(1.4213), _Bar(1.4188)),
+        "indicators": type("Ind", (), {"atr14": (0.00866, 0.009)})(),
+    })()
+    decision = {
+        "decision": {
+            "order_type": "限价单",
+            "order_direction": "做空",
+            "trade_confidence": 56,
+            "entry_price": 1.4213,
+            "stop_loss_price": 1.4267,
+            "take_profit_price": 1.4105,
+            "take_profit_price_2": 1.3903,
+            "estimated_win_rate": 53,
+        }
+    }
+    calls: list[dict] = []
+    recorded: list[dict] = []
+
+    def fake_execute(inner, cfg, *, analysis_symbol=""):
+        calls.append(inner)
+        return type("Result", (), {"status": "submitted", "symbol": "XRPUSDT", "reason": "ok"})()
+
+    monkeypatch.setattr("pa_agent.trading.binance_usdm_testnet.execute_market_signal", fake_execute)
+    monkeypatch.setattr(
+        "pa_agent.records.trade_logger.save_trade_record",
+        lambda **kw: recorded.append(kw),
+    )
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        clock=lambda: 1_805,
+        analyze=lambda _frame, **_kw: decision,
+    )
+
+    ret = monitor._save_order_opportunity(
+        frame, decision, decision["decision"], _record_double()
+    )
+
+    assert ret is not None and ret.status == "submitted"
+    assert recorded and recorded[0]["decision_inner"]["stop_loss_price"] == 1.4274
+    assert calls and calls[0]["stop_loss_price"] == 1.4274
+
+
 def test_frame_atr_pct_converts_latest_atr_to_percent() -> None:
     frame = type("Frame", (), {
         "indicators": type("Ind", (), {"atr14": (1.5, 2.0)})(),
