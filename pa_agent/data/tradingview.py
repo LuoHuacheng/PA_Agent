@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from typing import Any
 
 from pa_agent.data.base import (
     DataSource,
@@ -75,6 +76,113 @@ TV_EXCHANGE_PRESETS: tuple[str, ...] = (
 )
 
 
+# ── Account-login state ───────────────────────────────────────────────────────
+# TradingView rate-limits the legacy username+password signin endpoint
+# (observed: {"code": "rate_limit"}), which makes tvDatafeed print
+# "error while signin" and silently drop to an anonymous token on EVERY
+# reconnect — probing it that often makes the ban worse.  Instead we probe the
+# endpoint ourselves, cache the outcome with a cooldown, and run an anonymous
+# TvDatafeed while blocked.  Login retries automatically once the cooldown
+# lapses, so a temporary TradingView block heals without a restart.
+_TV_SIGNIN_URL = "https://www.tradingview.com/accounts/signin/"
+_TV_SIGNIN_TIMEOUT_S = 10.0
+# After a blocked / rate-limited probe, wait before probing again.
+_TV_SIGNIN_COOLDOWN_S = 1800.0
+# A freshly obtained auth_token is reused for this long before refreshing.
+_TV_SIGNIN_TOKEN_TTL_S = 3600.0
+
+# Process-wide signin health: state in {"unknown", "ok", "blocked"}.
+_tv_login_health: dict[str, Any] = {
+    "state": "unknown",
+    "token": "",
+    "until": 0.0,  # monotonic time when the state may be re-probed
+    "reason": "",
+}
+_tv_login_health_lock = threading.Lock()
+
+
+class _TvNoLoginFilter(logging.Filter):
+    """Drop tvDatafeed's "you are using nologin method" warning.
+
+    The app logs its own connection state (see connect()); the package line
+    would repeat on every reconnect while running anonymous/degraded.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "nologin" not in record.getMessage()
+
+
+def _silence_tvdatafeed_nologin() -> None:
+    """Attach _TvNoLoginFilter to the tvDatafeed logger once."""
+    tv_logger = logging.getLogger("tvDatafeed.main")
+    if not any(isinstance(f, _TvNoLoginFilter) for f in tv_logger.filters):
+        tv_logger.addFilter(_TvNoLoginFilter())
+
+
+def _tv_probe_signin(username: str, password: str) -> str:
+    """One POST to TradingView's signin endpoint; returns auth_token or "" (never raises)."""
+    try:
+        import requests  # type: ignore[import]
+
+        resp = requests.post(
+            _TV_SIGNIN_URL,
+            data={"username": username, "password": password, "remember": "on"},
+            headers={"Referer": "https://www.tradingview.com"},
+            timeout=_TV_SIGNIN_TIMEOUT_S,
+        )
+        payload = resp.json()
+    except Exception:
+        return ""
+    try:
+        return str((payload.get("user") or {}).get("auth_token") or "")
+    except Exception:
+        return ""
+
+
+def _tv_auth_token(username: str, password: str) -> str:
+    """Return a TradingView auth_token for *username*/*password*, or "".
+
+    Probes the signin endpoint at most once per cooldown window: a blocked
+    account returns "" (caller runs anonymous) without further network calls;
+    a healthy account reuses the cached token for _TV_SIGNIN_TOKEN_TTL_S before
+    refreshing it.
+    """
+    if not (username and password):
+        return ""
+
+    with _tv_login_health_lock:
+        state, token, until = (
+            _tv_login_health["state"],
+            _tv_login_health["token"],
+            _tv_login_health["until"],
+        )
+    if time.monotonic() < until:
+        return token if state == "ok" else ""
+
+    token = _tv_probe_signin(username, password)
+    cooldown = _TV_SIGNIN_TOKEN_TTL_S if token else _TV_SIGNIN_COOLDOWN_S
+    with _tv_login_health_lock:
+        _tv_login_health.update(
+            state="ok" if token else "blocked",
+            token=token,
+            until=time.monotonic() + cooldown,
+            reason="" if token else "signin rejected (rate_limit / risk control)",
+        )
+    if token:
+        logger.info("TradingView 账号登录成功，已取得 auth_token")
+    else:
+        logger.warning(
+            "TradingView 账号登录被限流/风控，%.0f 分钟内自动降级匿名(nologin)取数",
+            cooldown / 60.0,
+        )
+    return token
+
+
+# Install once at import: anonymous probes, connectivity checks and degraded
+# connects all construct an anonymous TvDatafeed that would warn on every call.
+_silence_tvdatafeed_nologin()
+
+
 class TradingViewSource(DataSource):
     """Live K-line data from TradingView via tvdatafeed."""
 
@@ -83,6 +191,7 @@ class TradingViewSource(DataSource):
         self._password = password
         self._tv = None          # tvDatafeed instance
         self._connected: bool = False
+        self._tv_mode: str = ""   # "login" | "anonymous" after connect()
         self._symbol: str = ""
         self._timeframe: str = ""
         self._exchange: str = ""
@@ -106,10 +215,23 @@ class TradingViewSource(DataSource):
     def connect(self) -> None:
         try:
             from tvDatafeed import TvDatafeed  # type: ignore[import]
+
+            _silence_tvdatafeed_nologin()
             if self._username and self._password:
-                self._tv = TvDatafeed(self._username, self._password)
+                token = _tv_auth_token(self._username, self._password)
+                if token:
+                    # Build anonymously (avoids a second signin POST), then
+                    # upgrade the session token so we keep logged-in access.
+                    self._tv = TvDatafeed()
+                    self._tv.token = token
+                    self._tv_mode = "login"
+                else:
+                    # Signin blocked (rate_limit) or no creds — degraded mode.
+                    self._tv = TvDatafeed()
+                    self._tv_mode = "anonymous"
             else:
-                self._tv = TvDatafeed()  # anonymous
+                self._tv = TvDatafeed()  # anonymous, no login configured
+                self._tv_mode = "anonymous"
             # Bound tvDatafeed's hardcoded 15s WebSocket timeout so a stalled
             # connection fails faster instead of freezing the UI.
             try:
@@ -117,7 +239,7 @@ class TradingViewSource(DataSource):
             except Exception:  # noqa: BLE001
                 logger.debug("Could not override tvDatafeed ws timeout", exc_info=True)
             self._connected = True
-            logger.info("TradingViewSource connected (anonymous=%s)", not self._username)
+            logger.info("TradingViewSource connected (mode=%s)", self._tv_mode)
         except Exception as exc:
             self._connected = False
             raise DataSourceTransientError(
