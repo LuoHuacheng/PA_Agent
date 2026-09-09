@@ -239,6 +239,11 @@ class ActionClient:
     def place_close_algo_order(self, **kwargs: object) -> None:
         self.places.append(kwargs)
 
+    def algo_order_status(self, *, client_algo_id: str) -> dict:
+        # 快照路径测试默认旧止损 resting(NEW), 与真实交易所一致。
+        return {"clientAlgoId": client_algo_id, "algoStatus": "NEW"}
+
+
 
 class SnapshotWithTrigger(ReadyPoller):
     """Fresh snapshot: open long at 100, mark 111 (1.1R fires the move)."""
@@ -251,7 +256,7 @@ class SnapshotWithTrigger(ReadyPoller):
 
 
 def test_guard_triggers_breakeven_move_from_snapshot(tmp_path, monkeypatch) -> None:
-    """守护通过快照拿到持仓/mark 并完成移损, 全程零逐品种 REST。"""
+    """守护通过快照拿到持仓/mark 并完成移损(reduceOnly 桥接换单), 全程零逐品种 REST。"""
     monkeypatch.setattr(bn, "_RUNTIME_STATE_PATH", str(tmp_path / "state.json"))
     bn._register_guard(
         "BTCUSDT",
@@ -263,11 +268,20 @@ def test_guard_triggers_breakeven_move_from_snapshot(tmp_path, monkeypatch) -> N
 
     bn._breakeven_guard_loop(client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0)
 
-    assert client.cancels == ["pa-sl-old0001"]
-    assert client.places and client.places[0]["order_type"] == "STOP_MARKET"
-    assert client.places[0]["stop_price"] == Decimal("100.0")
+    # 桥接换单: 先挂 reduceOnly 保底单 -> 撤旧 -> 挂正式保本 -> 撤桥接
+    assert len(client.places) == 2, client.places
+    bridge, canonical = client.places
+    assert bridge["order_type"] == "STOP_MARKET"
+    assert bridge["stop_price"] == Decimal("100.0")
+    assert bridge.get("quantity") == Decimal("0.5")
+    assert bridge.get("close_position") is False
+    assert canonical["order_type"] == "STOP_MARKET"
+    assert canonical["stop_price"] == Decimal("100.0")
+    assert "quantity" not in canonical
+    assert client.cancels == ["pa-sl-old0001", bridge["client_algo_id"]]
     record = bn._read_guard("BTCUSDT")
     assert record and record["moved"] is True
+    assert record["stop_algo_id"] == canonical["client_algo_id"]
 
 
 def test_poller_skips_refresh_while_banned(monkeypatch) -> None:

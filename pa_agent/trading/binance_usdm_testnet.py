@@ -2001,6 +2001,129 @@ def _ensure_protective_stop(
     return "rehung", new_stop, note
 
 
+def _swap_stop_to_price(
+    client: "BinanceUSDMTestnetClient",
+    *,
+    symbol: str,
+    side: str,
+    entry: Decimal,
+    live_stop_id: str,
+    bridge_qty: Decimal,
+) -> tuple[str, str, str]:
+    """Replace a resting closePosition STOP with one at entry (breakeven).
+
+    Binance allows only ONE open closePosition order per direction and order
+    class (-4130: "An open stop or take profit order with GTE and closePosition
+    in the direction is existing"), so a naive place-new-then-cancel-old swap
+    is rejected while the old STOP still rests, while a cancel-then-place swap
+    leaves the position unprotected between the two calls. This helper bridges
+    the move with a reduceOnly+quantity STOP that coexists with a closePosition
+    order (same shape the TP1 partial order uses next to the entry STOP):
+
+      1. hang bridge reduceOnly+qty STOP at entry (no -4130, no naked gap)
+      2. cancel the old closePosition STOP
+      3. hang the canonical closePosition STOP at entry (old gone -> legal)
+      4. cancel the bridge
+
+    From step 1 on the position is always protected at entry; any step may
+    leave the bridge resting (also at entry), which is strictly better than
+    the old stop and never leaves the position naked. A step-1 failure raises
+    with nothing changed (old closePosition STOP still protects) so callers can
+    keep the original stop and retry later.
+
+    Returns (status, stop_algo_id, note):
+      "ok"   - canonical closePosition STOP at entry resting; bridge removed
+      "kept" - bridge reduceOnly STOP at entry resting (old closePosition stop
+               may also still rest); safe overlap, caller logs and moves on
+    Raises BinanceAPIError when nothing changed and the old stop still protects.
+
+    Must be called with the per-symbol manager lock held (callers do).
+    """
+    if side not in ("BUY", "SELL") or not live_stop_id:
+        raise BinanceAPIError("invalid stop swap request")
+    if bridge_qty is None or bridge_qty <= 0:
+        raise BinanceAPIError(
+            "cannot swap stop to entry without a live position amount"
+        )
+    exit_side = "SELL" if side == "BUY" else "BUY"
+
+    def _hang_cp_stop() -> str:
+        stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
+        client.place_close_algo_order(
+            symbol=symbol,
+            side=exit_side,
+            order_type="STOP_MARKET",
+            stop_price=entry,
+            client_algo_id=stop_id,
+        )
+        return stop_id
+
+    # 1) bridge: reduceOnly+qty STOP coexists with the old closePosition STOP.
+    bridge_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
+    try:
+        client.place_close_algo_order(
+            symbol=symbol,
+            side=exit_side,
+            order_type="STOP_MARKET",
+            stop_price=entry,
+            client_algo_id=bridge_id,
+            quantity=bridge_qty,
+            close_position=False,
+        )
+    except BinanceAPIError:
+        # Nothing changed: the old closePosition STOP still protects.
+        raise
+    # 2) old closePosition STOP is now redundant.
+    try:
+        client.cancel_algo_order(client_algo_id=live_stop_id)
+    except BinanceAPIError as exc:
+        if not _is_missing_algo_order_error(exc):
+            # Cancel failed: the old stop may still rest. Try the canonical
+            # closePosition STOP anyway - it only succeeds when the old one is
+            # really gone (-4130 otherwise), so no state is lost either way.
+            try:
+                canonical_id = _hang_cp_stop()
+            except BinanceAPIError as cp_exc:
+                return (
+                    "kept",
+                    bridge_id,
+                    f"old stop {live_stop_id} cancel failed ({exc}); bridge STOP "
+                    f"at entry kept, canonical placement also failed: {cp_exc}",
+                )
+            # Old stop really gone: drop the bridge.
+            try:
+                client.cancel_algo_order(client_algo_id=bridge_id)
+            except BinanceAPIError as b_exc:
+                if not _is_missing_algo_order_error(b_exc):
+                    logger.warning(
+                        "Stop swap: bridge %s cancel failed for %s (%s); "
+                        "canonical stop %s is in place, bridge may still rest",
+                        bridge_id, symbol, b_exc, canonical_id,
+                    )
+            return "ok", canonical_id, ""
+    # 3) old stop gone (cancelled or already missing): hang the canonical stop.
+    try:
+        canonical_id = _hang_cp_stop()
+    except BinanceAPIError as exc:
+        return (
+            "kept",
+            bridge_id,
+            f"canonical closePosition STOP placement failed ({exc}); bridge "
+            f"STOP at entry kept",
+        )
+    # 4) bridge no longer needed.
+    try:
+        client.cancel_algo_order(client_algo_id=bridge_id)
+    except BinanceAPIError as exc:
+        if not _is_missing_algo_order_error(exc):
+            logger.warning(
+                "Stop swap: bridge %s cancel failed for %s (%s); canonical stop "
+                "%s is in place, bridge may still rest",
+                bridge_id, symbol, exc, canonical_id,
+            )
+    return "ok", canonical_id, ""
+
+
 def _breakeven_guard_loop(
     client: BinanceUSDMTestnetClient,
     symbol: str,
@@ -2088,17 +2211,17 @@ def _breakeven_guard_loop(
                 consecutive_errors = 0
                 time.sleep(poll_seconds)
                 continue
-            # 安全顺序(与 TP runner 一致): 先挂新保本单, 成功后再撤旧止损.
-            # 任一步失败旧止损仍 resting, 持仓绝不裸奔; 新旧短暂并存时由
-            # closePosition 的仓位清理语义兜底。
-            new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
+            # 交易所只许一个同方向 closePosition STOP resting(-4130), 先挂新后撤旧
+            # 会被拒绝; _swap_stop_to_price 用 reduceOnly+qty 桥接单保底换单, 全程
+            # 持仓有保护, 无裸奔窗口。桥接挂不上(旧单仍在场)走下方校验/重试。
             try:
-                client.place_close_algo_order(
+                swap_status, new_stop_id, swap_note = _swap_stop_to_price(
+                    client,
                     symbol=symbol,
-                    side=exit_side,
-                    order_type="STOP_MARKET",
-                    stop_price=entry,
-                    client_algo_id=new_stop_id,
+                    side=side,
+                    entry=entry,
+                    live_stop_id=live_stop,
+                    bridge_qty=amount,
                 )
             except BinanceAPIError as exc:
                 # 挂保本失败并不代表安全: 若记录指向的旧止损其实已死(历史 bug/
@@ -2156,27 +2279,10 @@ def _breakeven_guard_loop(
                     return
                 time.sleep(poll_seconds)
                 continue
-            try:
-                client.cancel_algo_order(client_algo_id=live_stop)
-            except BinanceAPIError as exc:
-                if _is_missing_algo_order_error(exc):
-                    logger.warning(
-                        "Breakeven guard: original stop %s for %s already gone (%s)",
-                        live_stop,
-                        symbol,
-                        exc,
-                    )
-                else:
-                    # 撤旧失败: 新旧并存, closePosition 对空仓的清理语义兜底,
-                    # 不再回滚(回滚反而可能裸奔); 下次入场会替换残留单。
-                    logger.warning(
-                        "Breakeven guard: old stop %s cancel failed for %s (%s); "
-                        "new breakeven stop %s is in place",
-                        live_stop,
-                        symbol,
-                        exc,
-                        new_stop_id,
-                    )
+            if swap_status == "kept":
+                # 桥接单仍在场(撤旧未遂或正式单被拒): 保本保护已由桥接单落地,
+                # 记录指向桥接单即可; 旧 closePosition 单若仍在场由交易所清理。
+                logger.warning("Breakeven guard: %s", swap_note)
             _patch_guard(symbol, moved=True, stop_algo_id=new_stop_id)
             logger.info(
                 "Breakeven stop moved to entry for %s %s (trigger=%s mark=%s)",
@@ -2389,8 +2495,10 @@ def _tp_runner_loop(
                     )
                 new_stop_id = runner_stop
             else:
-                # C1: 先挂新保本 STOP 再撤旧 SL。挂新前先校验旧单真的 resting:
-                # 旧单已死时"任一步失败旧止损仍 resting"的假设不成立, 必须先补挂。
+                # C1: 同方向只许一个 closePosition STOP resting(-4130), 保本移动
+                # 不能先挂新后撤旧。挂新前先校验旧单真实 resting: 旧单已死时直接
+                # 补挂(entry 优先); 活着则经 reduceOnly+qty 桥接单换至 entry, 全程
+                # 持仓有保护, 无裸奔窗口。
                 runner_status, runner_stop, runner_note = _ensure_protective_stop(
                     client,
                     symbol=symbol,
@@ -2425,22 +2533,22 @@ def _tp_runner_loop(
                         runner_note,
                     )
                     new_stop_id = runner_stop
-                    moved = True  # 替代单已挂: 跳过 C1, 也无需撤旧(旧单已死)
-                    _patch_guard(symbol, moved=True, stop_algo_id=new_stop_id)
+                    moved = True  # 替代单已挂(entry 优先), 无需再撤旧
                 else:
-                    new_stop_id = f"pa-sl-{uuid.uuid4().hex[:24]}"
                     try:
-                        client.place_close_algo_order(
+                        swap_status, new_stop_id, swap_note = _swap_stop_to_price(
+                            client,
                             symbol=symbol,
-                            side=exit_side,
-                            order_type="STOP_MARKET",
-                            stop_price=entry,
-                            client_algo_id=new_stop_id,
+                            side=side,
+                            entry=entry,
+                            live_stop_id=current_stop,
+                            bridge_qty=abs(amount),
                         )
                     except BinanceAPIError as exc:
                         consecutive_errors += 1
                         logger.error(
-                            "TP runner breakeven stop placement failed for %s (kept original stop): %s",
+                            "TP runner breakeven stop placement failed for %s "
+                            "(kept original stop): %s",
                             symbol,
                             exc,
                         )
@@ -2453,30 +2561,10 @@ def _tp_runner_loop(
                             return
                         time.sleep(poll_seconds)
                         continue
-            if not moved:
-                # 撤旧 SL: -2011/-2013 视为已撤; 其他错误限次重试, 放弃时新旧并存,
-                # 由交易所对空仓 closePosition 的清理语义兜底(与旧版一致)。
-                try:
-                    client.cancel_algo_order(client_algo_id=current_stop)
-                except BinanceAPIError as exc:
-                    if not _is_missing_algo_order_error(exc):
-                        consecutive_errors += 1
-                        logger.error(
-                            "TP runner old stop cancel failed for %s (%s): %s",
-                            symbol,
-                            current_stop,
-                            exc,
-                        )
-                        if consecutive_errors >= 5:
-                            logger.error(
-                                "TP runner gave up cancelling old stop %s for %s; "
-                                "breakeven stop is live, old may still be resting",
-                                current_stop,
-                                symbol,
-                            )
-                            return
-                        time.sleep(poll_seconds)
-                        continue
+                    if swap_status == "kept":
+                        # 桥接单仍在场(撤旧未遂或正式单被拒): 保本保护已由桥接单落地。
+                        logger.warning("TP runner: %s", swap_note)
+                    moved = True  # 撤旧已由桥接流程处理
             # 保本单已落地(或 guard 已完成): 立即回写注册表, 记录始终指向真实存在的单。
             _patch_guard(symbol, moved=True, stop_algo_id=new_stop_id)
             new_tp_id = f"pa-tp-{uuid.uuid4().hex[:24]}"

@@ -1399,7 +1399,8 @@ def _register_test_guard() -> None:
 
 
 def test_guard_trigger_1r_moves_stop_to_entry(monkeypatch) -> None:
-    """浮盈达 1R 后: 撤销旧 STOP 并在入场价重挂, 注册表标记 moved。"""
+    """浮盈达 1R 后: 以 reduceOnly 桥接单换仓至入场价(先挂桥接保底, 撤旧, 再挂
+    正式 closePosition 保本单), 注册表标记 moved。-4130 下不可先挂新 closePosition。"""
     sleeps: list[float] = []
     monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
     client = MarkSeqClient([95, 105, 111])  # 95/105 未达 1R, 111 达 1.1R
@@ -1407,15 +1408,27 @@ def test_guard_trigger_1r_moves_stop_to_entry(monkeypatch) -> None:
     binance_usdm_testnet._breakeven_guard_loop(
         client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0
     )
-    cancels = [c[1] for c in client.calls if c[0] == "cancel_protection"]
-    assert cancels, "must cancel the original stop"
-    assert cancels[0]["client_algo_id"] == "pa-sl-old0001"
     places = [c[1] for c in client.calls if c[0] == "protection"]
-    assert places, "must place a replacement stop"
-    assert places[-1]["stop_price"] == Decimal("100")
-    assert places[-1]["order_type"] == "STOP_MARKET"
+    assert len(places) == 2, places
+    bridge, canonical = places
+    # bridge: reduceOnly+qty STOP at entry (coexists with the old closePosition stop)
+    assert bridge["order_type"] == "STOP_MARKET"
+    assert bridge["stop_price"] == Decimal("100")
+    assert bridge.get("quantity") == Decimal("100")
+    assert bridge.get("close_position") is False
+    # canonical: closePosition STOP at entry
+    assert canonical["order_type"] == "STOP_MARKET"
+    assert canonical["stop_price"] == Decimal("100")
+    assert "quantity" not in canonical
+    seq = [c for c in client.calls if c[0] in ("protection", "cancel_protection")]
+    kinds = [c[0] for c in seq]
+    # 先挂桥接(保底) -> 撤旧 closePosition -> 挂正式保本 closePosition -> 撤桥接
+    assert kinds == ["protection", "cancel_protection", "protection", "cancel_protection"]
+    assert seq[1][1]["client_algo_id"] == "pa-sl-old0001"
+    assert seq[3][1]["client_algo_id"] == seq[0][1]["client_algo_id"], "撤桥接"
     record = binance_usdm_testnet._read_guard("BTCUSDT")
     assert record and record["moved"] is True
+    assert record["stop_algo_id"] == seq[2][1]["client_algo_id"], "记录指向正式保本单"
     assert record["stop_algo_id"] != "pa-sl-old0001"
 
 
@@ -1591,6 +1604,59 @@ class BrokenCancelClient(MarkSeqClient):
         raise BinanceAPIError("Binance network error: test outage")
 
 
+class ConflictStopClient(MarkSeqClient):
+    """Emulate the Binance closePosition single-order rule per order class.
+
+    A second closePosition STOP/TAKE_PROFIT of the same class cannot rest next
+    to an open one (-4130: "An open stop or take profit order with GTE and
+    closePosition in the direction is existing."); reduceOnly+quantity orders
+    never conflict (same shape as the TP1 partial next to the entry STOP).
+    """
+
+    def __init__(self, marks: list[float], *, cp_stop_id: str | None = None) -> None:
+        super().__init__(marks)
+        self._cp_resting: dict[str, str] = {}  # order_type -> client_algo_id
+        if cp_stop_id:
+            self._cp_resting["STOP_MARKET"] = cp_stop_id
+
+    def place_close_algo_order(self, **kwargs: object) -> None:
+        order_type = str(kwargs.get("order_type") or "")
+        if "quantity" not in kwargs and order_type in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
+            resting = self._cp_resting.get(order_type)
+            if resting:
+                raise BinanceAPIError(
+                    'Binance HTTP 400: {"code":-4130,"msg":"An open stop or take '
+                    'profit order with GTE and closePosition in the direction is '
+                    'existing."}',
+                )
+            super().place_close_algo_order(**kwargs)
+            self._cp_resting[order_type] = str(kwargs["client_algo_id"])
+            return
+        super().place_close_algo_order(**kwargs)  # reduceOnly+qty bridge: no conflict
+
+    def cancel_algo_order(self, **kwargs: object) -> None:
+        super().cancel_algo_order(**kwargs)
+        client_algo_id = str(kwargs["client_algo_id"])
+        for order_type, resting_id in list(self._cp_resting.items()):
+            if resting_id == client_algo_id:
+                del self._cp_resting[order_type]
+                return
+
+
+class StuckOldStopClient(ConflictStopClient):
+    """Old closePosition STOP cannot be cancelled (network) and still rests:
+    a second closePosition STOP is then rejected with -4130."""
+
+    def cancel_algo_order(self, **kwargs: object) -> None:
+        self.calls.append(("cancel_protection", kwargs))
+        if str(kwargs["client_algo_id"]) == "pa-sl-old0001":
+            raise BinanceAPIError("Binance network error: test outage")
+        for order_type, resting_id in list(self._cp_resting.items()):
+            if resting_id == str(kwargs["client_algo_id"]):
+                del self._cp_resting[order_type]
+                return
+
+
 def test_guard_move_still_places_breakeven_when_original_stop_unknown(
     monkeypatch,
 ) -> None:
@@ -1609,23 +1675,88 @@ def test_guard_move_still_places_breakeven_when_original_stop_unknown(
     assert record and record["moved"] is True
 
 
-def test_guard_keeps_new_stop_when_old_cancel_fails(monkeypatch) -> None:
-    """先挂后撤: 撤旧失败(非-2011)不重试不裸奔——新保本单已在场, 标记 moved。"""
+def test_guard_keeps_bridge_when_old_stop_cancel_fails(monkeypatch) -> None:
+    """撤旧失败(非 -2011, 如网络)且交易所仍拒绝第二张 closePosition 单(-4130):
+    不得硬挂也不得裸奔——桥接单(已在场)即为保本保护, 标记 moved。"""
     sleeps: list[float] = []
     monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
-    client = BrokenCancelClient([111])  # mark 111 >= 1R(110)
+    client = StuckOldStopClient([111], cp_stop_id="pa-sl-old0001")  # mark >= 1R
     _register_test_guard()
     binance_usdm_testnet._breakeven_guard_loop(
         client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0
     )
     places = [c[1] for c in client.calls if c[0] == "protection"]
-    assert len(places) == 1, "breakeven replacement must be placed first"
+    assert len(places) == 1, "只有桥接单落地, 正式单被 -4130 拒(未记入)"
     assert places[0]["stop_price"] == Decimal("100")
-    cancels = [c for c in client.calls if c[0] == "cancel_protection"]
-    assert len(cancels) == 1, "old-stop cancel attempted once (no retry storm)"
+    assert places[0].get("quantity") == Decimal("100"), "桥接单形态"
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["moved"] is True, "桥接单即保本保护, 不得反复重试"
+    assert record["stop_algo_id"] == places[0]["client_algo_id"]
+
+
+def test_guard_keeps_bridge_when_canonical_place_rejected(monkeypatch) -> None:
+    """撤旧成功但挂正式保本被拒(如 -1111): 桥接单早已在场, 保本不落空也不裸奔,
+    无需再退 stop0 重挂(旧单已撤, 桥接单在 entry 等价完成移损)。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+
+    class CanonicalRejectedClient(ConflictStopClient):
+        def place_close_algo_order(self, **kwargs: object) -> None:
+            if (kwargs.get("order_type") == "STOP_MARKET"
+                    and "quantity" not in kwargs
+                    and kwargs.get("stop_price") == Decimal("100")):
+                raise BinanceAPIError(
+                    'Binance HTTP 400: {"code":-1111,"msg":"Precision is over the maximum defined for this asset."}',
+                )
+            super().place_close_algo_order(**kwargs)
+
+    _register_test_guard()  # stop0=90, target=120, moved=False
+    client = CanonicalRejectedClient([111], cp_stop_id="pa-sl-old0001")  # 1R 之上
+    binance_usdm_testnet._breakeven_guard_loop(
+        client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0,
+        floor_pct=0.45,
+    )
+    cancels = [c[1] for c in client.calls if c[0] == "cancel_protection"]
+    assert len(cancels) == 1, "旧止损只撤一次(已成功)"
+    assert cancels[0]["client_algo_id"] == "pa-sl-old0001"
+    stops = [c[1] for c in client.calls
+             if c[0] == "protection" and c[1]["order_type"] == "STOP_MARKET"]
+    assert len(stops) == 1, "仅桥接单落地(正式单被拒)"
+    assert stops[0]["stop_price"] == Decimal("100"), "桥接单仍在 entry"
+    assert stops[0].get("quantity") == Decimal("100")
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["moved"] is True
+    assert record["stop_algo_id"] == stops[0]["client_algo_id"]
+    assert record["stop_algo_id"] != "pa-sl-old0001"
+
+
+def test_guard_breakeven_move_bridges_closeposition_conflict(monkeypatch) -> None:
+    """Regression(XRPUSDT 2026-09-09): 旧 closePosition STOP 仍 resting 时直接挂新
+    保本 closePosition 单被 -4130 拒绝, guard 死循环刷错; 桥接换单必须完成移损。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    _register_test_guard()
+    client = ConflictStopClient([111], cp_stop_id="pa-sl-old0001")
+    # 模拟交易所约束: 旧单在场时第二张 closePosition STOP 必拒(-4130)。
+    with pytest.raises(BinanceAPIError) as ei:
+        client.place_close_algo_order(
+            symbol="BTCUSDT", side="SELL", order_type="STOP_MARKET",
+            stop_price=Decimal("101"), client_algo_id="pa-probe-cp2",
+        )
+    assert "-4130" in str(ei.value)
+    binance_usdm_testnet._breakeven_guard_loop(
+        client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0
+    )
+    places = [c[1] for c in client.calls if c[0] == "protection"]
+    assert len(places) == 2, "桥接 + 正式保本均落地"
+    assert all(p["stop_price"] == Decimal("100") for p in places)
+    cancels = [c[1] for c in client.calls if c[0] == "cancel_protection"]
+    assert cancels[0]["client_algo_id"] == "pa-sl-old0001"
     record = binance_usdm_testnet._read_guard("BTCUSDT")
     assert record and record["moved"] is True
     assert record["stop_algo_id"] != "pa-sl-old0001"
+
+
 
 # ---- 30d 日线大趋势护栏 ------------------------------------------------
 
@@ -1936,28 +2067,46 @@ def _tp_cancels(client: FakeClient) -> list[dict]:
 
 
 def test_tp_runner_swaps_to_breakeven_and_tp2_after_half_close(monkeypatch) -> None:
-    """TP1 半仓触发后: 撤原 SL, 挂入场价 STOP + TP2 TAKE_PROFIT, 标记完成。"""
+    """TP1 半仓触发后: 先挂桥接保底再撤旧 SL, 挂正式保本 closePosition STOP + TP2,
+    全程不触发 -4130 且无裸奔窗口, 注册表标记完成。"""
     _register_tp_record()
     client = PartialRunnerClient([2, 2, 1])
     sleeps = _run_tp_runner(client, monkeypatch)
     assert len(sleeps) == 2  # 前两次量未变, 第三轮才触发半仓
     cancels = _tp_cancels(client)
-    assert [c["client_algo_id"] for c in cancels] == [
-        "pa-tp-part0001",  # 先清 TP1 残单(已成交则视为已清)
-        "pa-sl-old0001",  # 再撤原止损
-    ]
+    assert len(cancels) == 3, cancels
+    assert cancels[0]["client_algo_id"] == "pa-tp-part0001"  # 先清 TP1 残单
+    assert cancels[1]["client_algo_id"] == "pa-sl-old0001"  # 再撤旧 closePosition SL
+    bridge_cancel = cancels[2]["client_algo_id"]
     places = _tp_places(client)
-    assert len(places) == 2
-    assert places[0]["order_type"] == "STOP_MARKET"
-    assert places[0]["stop_price"] == Decimal("100")
-    assert places[1]["order_type"] == "TAKE_PROFIT_MARKET"
-    assert places[1]["stop_price"] == Decimal("150")
+    assert len(places) == 3, places
+    bridge, canonical, tp2 = places
+    assert bridge["order_type"] == "STOP_MARKET"
+    assert bridge["stop_price"] == Decimal("100")
+    assert bridge.get("quantity") == Decimal("1"), "桥接单按剩余仓位数"
+    assert bridge.get("close_position") is False
+    assert canonical["order_type"] == "STOP_MARKET"
+    assert canonical["stop_price"] == Decimal("100")
+    assert "quantity" not in canonical, "正式保本单为 closePosition 形态"
+    assert tp2["order_type"] == "TAKE_PROFIT_MARKET"
+    assert tp2["stop_price"] == Decimal("150")
+    kinds = [c[0] for c in client.calls if c[0] in ("protection", "cancel_protection")]
+    # 清 TP1 残单 -> 桥接(保底) -> 撤旧 -> 正式保本 -> 撤桥接 -> TP2
+    assert kinds == [
+        "cancel_protection", "protection", "cancel_protection",
+        "protection", "cancel_protection", "protection",
+    ], kinds
+    seq = [c for c in client.calls if c[0] in ("protection", "cancel_protection")]
+    assert seq[1][1]["client_algo_id"] == bridge["client_algo_id"], "先挂桥接保底"
+    assert seq[2][1]["client_algo_id"] == "pa-sl-old0001"
+    assert seq[3][1]["client_algo_id"] == canonical["client_algo_id"], "正式单在撤旧后"
+    assert seq[4][1]["client_algo_id"] == bridge_cancel == bridge["client_algo_id"]
     record = binance_usdm_testnet._read_guard("BTCUSDT")
     assert record is not None
     assert record["moved"] is True
     assert record["partial_done"] is True
-    assert record["stop_algo_id"] != "pa-sl-old0001"
-    assert record["tp_algo_id"] != "pa-tp-part0001"
+    assert record["stop_algo_id"] == canonical["client_algo_id"]
+    assert record["tp_algo_id"] == tp2["client_algo_id"]
 
 
 def test_tp_runner_cleans_residual_tp1_when_position_closed(monkeypatch) -> None:
@@ -1993,27 +2142,117 @@ def test_tp_runner_with_breakeven_already_moved_places_tp2_only(monkeypatch) -> 
 
 
 def test_tp_runner_tolerates_missing_stop_on_swap(monkeypatch) -> None:
-    """撤原 SL 遇 -2011(已被撤): 视为已撤, 照常补挂保本+TP2。"""
+    """撤原 SL 遇 -2011(已被撤): 视为已撤, 桥接+正式保本+TP2 照常落地。"""
     _register_tp_record()
     client = StaleStopRunnerClient([2, 1])
     _run_tp_runner(client, monkeypatch)
     places = _tp_places(client)
-    assert len(places) == 2
+    assert len(places) == 3, places  # 桥接 + 正式保本 + TP2
+    assert places[0]["order_type"] == "STOP_MARKET"
     assert places[0]["stop_price"] == Decimal("100")
-    assert places[1]["stop_price"] == Decimal("150")
+    assert places[0].get("quantity") == Decimal("1")
+    assert places[1]["order_type"] == "STOP_MARKET"
+    assert places[1]["stop_price"] == Decimal("100")
+    assert "quantity" not in places[1]
+    assert places[2]["stop_price"] == Decimal("150")
     record = binance_usdm_testnet._read_guard("BTCUSDT")
     assert record and record["partial_done"] is True and record["moved"] is True
+    assert record["stop_algo_id"] == places[1]["client_algo_id"]
 
 
-def test_tp_runner_gives_up_after_repeated_cancel_failures(monkeypatch) -> None:
-    """撤单持续失败(非 -2011)时有限重试后放弃, 不无限空转。"""
+def test_tp_runner_bridges_when_old_stop_cancel_fails(monkeypatch) -> None:
+    """撤旧 SL 持续网络失败: 桥接单保底在场, 正式保本(旧单其实已撤或 -4130 判定后)
+    照常推进, 不无限空转也不裸奔。"""
+    sleeps: list[float] = []
+
+    class OldCancelFailRunnerClient(PartialRunnerClient):
+        """Only the OLD closePosition stop cancel keeps failing (non-missing)."""
+
+        def cancel_algo_order(self, **kwargs: object) -> None:
+            self.calls.append(("cancel_protection", kwargs))
+            if str(kwargs["client_algo_id"]).startswith("pa-sl-old"):
+                raise BinanceAPIError("Binance network error: test outage")
+            if str(kwargs["client_algo_id"]).startswith("pa-tp-part"):
+                raise BinanceAPIError(
+                    'Binance HTTP 400: {"code":-2011,"msg":"Unknown order sent."}'
+                )
+
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
     _register_tp_record()
-    client = BrokenCancelRunnerClient([1] * 10)
-    sleeps = _run_tp_runner(client, monkeypatch)
-    assert _tp_places(client) == []
+    client = OldCancelFailRunnerClient([1])
+    sleeps_used = _run_tp_runner(client, monkeypatch)
+    assert sleeps_used == [], "一次轮询内完成, 无需退避重试"
+    places = _tp_places(client)
+    assert len(places) == 3, places  # 桥接 + 正式保本 + TP2
+    assert places[1]["order_type"] == "STOP_MARKET"
+    assert places[1]["stop_price"] == Decimal("100")
+    assert places[2]["order_type"] == "TAKE_PROFIT_MARKET"
     record = binance_usdm_testnet._read_guard("BTCUSDT")
-    assert record and record["partial_done"] is False and record["moved"] is False
-    assert len(sleeps) <= 5
+    assert record and record["partial_done"] is True and record["moved"] is True
+    assert record["stop_algo_id"] == places[1]["client_algo_id"]
+
+
+class ConflictStopRunnerClient(PartialRunnerClient):
+    """Runner account emulating the Binance closePosition single-order rule.
+
+    A second closePosition STOP/TAKE_PROFIT of the same class is rejected with
+    -4130 while one of that class rests; reduceOnly+quantity never conflicts.
+    """
+
+    def __init__(self, amounts: list[float]) -> None:
+        super().__init__(amounts)
+        self._cp_resting: dict[str, str] = {"STOP_MARKET": "pa-sl-old0001"}
+
+    def place_close_algo_order(self, **kwargs: object) -> None:
+        order_type = str(kwargs.get("order_type") or "")
+        if "quantity" not in kwargs and order_type in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
+            resting = self._cp_resting.get(order_type)
+            if resting:
+                raise BinanceAPIError(
+                    'Binance HTTP 400: {"code":-4130,"msg":"An open stop or take '
+                    'profit order with GTE and closePosition in the direction is '
+                    'existing."}',
+                )
+            self.calls.append(("protection", kwargs))
+            self._cp_resting[order_type] = str(kwargs["client_algo_id"])
+            return
+        self.calls.append(("protection", kwargs))
+
+    def cancel_algo_order(self, **kwargs: object) -> None:
+        self.calls.append(("cancel_protection", kwargs))
+        client_algo_id = str(kwargs["client_algo_id"])
+        for order_type, resting_id in list(self._cp_resting.items()):
+            if resting_id == client_algo_id:
+                del self._cp_resting[order_type]
+                return
+
+
+def test_tp_runner_swap_bridges_closeposition_conflict(monkeypatch) -> None:
+    """Regression(XRPUSDT 2026-09-09 14:21-14:25): 旧 closePosition SL 仍 resting 时
+    直接挂新保本 closePosition STOP 必被 -4130 拒绝; 桥接换单须完成移损 + TP2。"""
+    _register_tp_record()
+    client = ConflictStopRunnerClient([2, 1])
+    # 模拟交易所: 旧 closePosition STOP 在场时第二张 closePosition STOP 必拒。
+    with pytest.raises(BinanceAPIError) as ei:
+        client.place_close_algo_order(
+            symbol="BTCUSDT", side="SELL", order_type="STOP_MARKET",
+            stop_price=Decimal("101"), client_algo_id="pa-probe-cp2",
+        )
+    assert "-4130" in str(ei.value)
+    sleeps = _run_tp_runner(client, monkeypatch)
+    assert len(sleeps) == 1  # 第一轮量未变, 第二轮才触发半仓
+    places = _tp_places(client)
+    assert len(places) == 3, places  # 桥接 + 正式保本 + TP2, -4130 不再出现
+    assert places[0]["order_type"] == "STOP_MARKET"
+    assert places[0].get("quantity") == Decimal("1"), "桥接 reduceOnly 形态"
+    assert places[1]["order_type"] == "STOP_MARKET"
+    assert "quantity" not in places[1]
+    assert places[1]["stop_price"] == Decimal("100")
+    assert places[2]["order_type"] == "TAKE_PROFIT_MARKET"
+    assert places[2]["stop_price"] == Decimal("150")
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["moved"] is True and record["partial_done"] is True
+    assert record["stop_algo_id"] == places[1]["client_algo_id"]
 
 
 def test_tp_runner_ignores_legacy_guard_record(monkeypatch) -> None:
@@ -2523,17 +2762,20 @@ def test_tp_runner_tp2_failure_keeps_live_breakeven_record(monkeypatch) -> None:
     tp_cancels = [c for c in cancels if c["client_algo_id"].startswith("pa-tp-")]
     assert len(tp_cancels) >= 1
     sl_cancels = [c for c in cancels if c["client_algo_id"].startswith("pa-sl-")]
-    assert [c["client_algo_id"] for c in sl_cancels] == ["pa-sl-old0001"]
+    assert sl_cancels[0]["client_algo_id"] == "pa-sl-old0001"
+    assert len(sl_cancels) == 2, "撤旧后撤桥接"
+    assert sl_cancels[1]["client_algo_id"].startswith("pa-sl-")
     places = _tp_places(client)
     stops = [p for p in places if p["order_type"] == "STOP_MARKET"]
-    assert len(stops) == 1
-    assert stops[0]["stop_price"] == Decimal("100")
+    assert len(stops) == 2, "桥接 + 正式保本"
+    assert all(p["stop_price"] == Decimal("100") for p in stops)
     record = binance_usdm_testnet._read_guard("BTCUSDT")
     assert record is not None
     assert record["moved"] is True          # 保本已就位
     assert record["partial_done"] is False  # TP2 未完成, 可被再次拉起
     assert record["stop_algo_id"] != "pa-sl-old0001"
     assert record["stop_algo_id"].startswith("pa-sl-")
+    assert record["stop_algo_id"] == stops[-1]["client_algo_id"], "记录指向正式保本单"
     # 重新拉起(模拟重启 resume): moved=True 分支只补 TP2, 不再动 SL
     client2 = PartialRunnerClient([1])
     sleeps2 = _run_tp_runner(client2, monkeypatch)
