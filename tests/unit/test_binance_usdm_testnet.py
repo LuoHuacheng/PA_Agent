@@ -1757,6 +1757,36 @@ def test_guard_breakeven_move_bridges_closeposition_conflict(monkeypatch) -> Non
     assert record["stop_algo_id"] != "pa-sl-old0001"
 
 
+def test_guard_short_bridge_uses_abs_quantity(monkeypatch) -> None:
+    """空单(SELL)保本移动: 桥接 reduceOnly 单数量必须取 abs(amount), 否则负数量
+    被交易所拒(-1111), 空单永远移不了保本。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+
+    class ShortSeqClient(ConflictStopClient):
+        def __init__(self, marks: list[float], *, cp_stop_id: str | None = None) -> None:
+            super().__init__(marks, cp_stop_id=cp_stop_id)
+            self.pos = {"amount": Decimal("-100"), "entry": Decimal("100")}
+
+    binance_usdm_testnet._register_guard(
+        "BTCUSDT",
+        {"stop_algo_id": "pa-sl-old0001", "stop0": "110", "target": "80",
+         "side": "SELL", "conf": 60, "ts": time.time(), "moved": False},
+    )
+    client = ShortSeqClient([88], cp_stop_id="pa-sl-old0001")  # 88: 距 entry 12 >= 1R(10)
+    binance_usdm_testnet._breakeven_guard_loop(
+        client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0,
+        floor_pct=0.45,
+    )
+    places = [c[1] for c in client.calls if c[0] == "protection"]
+    assert len(places) == 2, "桥接 + 正式保本均落地"
+    assert places[0].get("quantity") == Decimal("100"), "桥接数量必须为正(abs)"
+    assert places[0]["side"] == "BUY", "空单离场侧为 BUY"
+    assert all(p["stop_price"] == Decimal("100") for p in places)
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record and record["moved"] is True
+    assert record["stop_algo_id"] != "pa-sl-old0001"
+
 
 # ---- 30d 日线大趋势护栏 ------------------------------------------------
 

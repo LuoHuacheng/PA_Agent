@@ -2221,7 +2221,7 @@ def _breakeven_guard_loop(
                     side=side,
                     entry=entry,
                     live_stop_id=live_stop,
-                    bridge_qty=amount,
+                    bridge_qty=abs(amount),  # 空单 amount 为负: reduceOnly 数量必须取正
                 )
             except BinanceAPIError as exc:
                 # 挂保本失败并不代表安全: 若记录指向的旧止损其实已死(历史 bug/
