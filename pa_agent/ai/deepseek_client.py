@@ -258,6 +258,14 @@ _PRACTICAL_UNLIMITED_THINKING_BUDGET = _GLOBAL_MAX_OUTPUT_TOKENS - 1
 # project UA instead; no known gateway validates this header.
 _DEFAULT_HEADERS = {"User-Agent": "PA_Agent/1.0"}
 
+# Short-reasoning warning heuristic: Stage 1/2 prompts explicitly tell the model
+# to keep thinking concise ("思考请用简体中文并尽量简洁；可缩短思考") so a tiny
+# reasoning_content alongside a full JSON content is expected, NOT a symptom of
+# thinking being silently dropped. Only warn when BOTH reasoning and content come
+# back short.
+_SHORT_REASONING_CHARS = 80
+_MEANINGFUL_CONTENT_CHARS = 200
+
 
 def _effort_budget_tokens(effort: str | None, *, max_output: int) -> int:
     """Thinking budget; must stay below max_output (Anthropic/Packy rule)."""
@@ -851,14 +859,29 @@ class DeepSeekClient:
                 self._settings.model,
                 self._settings.base_url,
             )
-        if _thinking_on and len(reasoning_content) < 80:
-            self._log.warning(
-                "Thinking enabled but reasoning_content is very short (%d chars). "
-                "For KKAI/Claude use reasoning_effort (not DeepSeek extra_body); "
-                "check model ID, token group, and reasoning_effort=%s.",
-                len(reasoning_content),
-                _effort,
-            )
+        elif _thinking_on and len(reasoning_content) < _SHORT_REASONING_CHARS:
+            if len(content.strip()) < _MEANINGFUL_CONTENT_CHARS:
+                # Both reasoning AND content came back short although thinking was
+                # requested — a genuine drop symptom (e.g. wrong param style, model
+                # ID / token group mismatch), not prompt-driven brevity.
+                self._log.warning(
+                    "Thinking enabled but reasoning_content is very short (%d chars) "
+                    "and content is also short (%d chars). "
+                    "For KKAI/Claude use reasoning_effort (not DeepSeek extra_body); "
+                    "check model ID, token group, and reasoning_effort=%s.",
+                    len(reasoning_content),
+                    len(content.strip()),
+                    _effort,
+                )
+            else:
+                # Short reasoning alongside a full content body is expected when the
+                # prompt instructs concise thinking; log at debug to keep the noise down.
+                self._log.debug(
+                    "Thinking on but reasoning_content short (%d chars) with full content (%d chars); "
+                    "model likely followed the concise-thinking instruction.",
+                    len(reasoning_content),
+                    len(content.strip()),
+                )
 
         if _is_mimo(self._settings):
             store_reasoning_from_response(

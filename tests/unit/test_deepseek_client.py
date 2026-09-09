@@ -462,3 +462,107 @@ def test_mimo_chat_patches_tool_call_messages_before_send() -> None:
 
     sent_messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
     assert sent_messages[1]["reasoning_content"] == ""
+
+
+def _make_stream(reasoning_chunks: list[str], content_chunks: list[str]) -> list[object]:
+    """Build OpenAI-style stream chunks: reasoning, then content, then usage."""
+    chunks = []
+    for ridx, text in enumerate(reasoning_chunks):
+        ch = MagicMock()
+        ch.id = f"req-{ridx}"
+        ch.model = "deepseek-v4-flash"
+        ch.usage = None
+        ch.choices = [MagicMock()]
+        delta = MagicMock()
+        delta.reasoning_content = text
+        delta.content = None
+        ch.choices[0].delta = delta
+        chunks.append(ch)
+    for cidx, text in enumerate(content_chunks):
+        ch = MagicMock()
+        ch.id = f"req-r{cidx}"
+        ch.model = "deepseek-v4-flash"
+        ch.usage = None
+        ch.choices = [MagicMock()]
+        delta = MagicMock()
+        delta.reasoning_content = None
+        delta.content = text
+        ch.choices[0].delta = delta
+        chunks.append(ch)
+    done = MagicMock()
+    done.choices = []
+    done.usage = MagicMock(
+        prompt_tokens=10,
+        completion_tokens=5,
+        total_tokens=15,
+        prompt_tokens_details=MagicMock(cached_tokens=0),
+    )
+    chunks.append(done)
+    return chunks
+
+
+def _thinking_settings() -> AIProviderSettings:
+    settings = _make_settings()
+    settings.base_url = "https://api.deepseek.com"
+    settings.model = "deepseek-v4-flash"
+    settings.thinking = True
+    settings.reasoning_effort = "high"
+    return settings
+
+
+def _stream_reply_and_records(settings, chunks) -> tuple[AIReply, list]:
+    import logging
+
+    client = DeepSeekClient(settings)
+    mock_openai = MagicMock()
+    mock_openai.return_value.chat.completions.create.return_value = iter(chunks)
+    records: list = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Capture()
+    logger = logging.getLogger("pa_agent.ai.deepseek_client")
+    old_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        with patch("pa_agent.ai.deepseek_client._OpenAI", mock_openai):
+            reply = client.stream_chat([{"role": "user", "content": "hi"}])
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+    return reply, records
+
+
+def test_stream_short_reasoning_with_full_content_does_not_warn() -> None:
+    """短 reasoning + 长 content：prompt 明示思考尽量简洁，不应触发告警。"""
+    settings = _thinking_settings()
+    content_body = "{\"decision\":\"不下单\",\"reasoning\":\"分析内容\"}" * 40  # ~2000 chars
+    reply, records = _stream_reply_and_records(
+        settings, _make_stream(reasoning_chunks=["已权衡，输出 JSON。"], content_chunks=[content_body])
+    )
+    assert len(reply.content) > 200
+    messages = [r.getMessage() for r in records]
+    assert not any("reasoning_content is very short" in m for m in messages), messages
+
+
+def test_stream_short_reasoning_and_short_content_warns() -> None:
+    """reasoning 与 content 都短：疑似 thinking 失效，需告警。"""
+    import logging
+
+    settings = _thinking_settings()
+    reply, records = _stream_reply_and_records(
+        settings,
+        _make_stream(reasoning_chunks=["x"], content_chunks=["{}"]),
+    )
+    assert len(reply.content) < 200
+    messages = [r.getMessage() for r in records]
+    warning_msgs = [
+        m
+        for r in records
+        if r.levelno == logging.WARNING
+        for m in [r.getMessage()]
+    ]
+    assert any("reasoning_content is very short" in m for m in warning_msgs), messages
