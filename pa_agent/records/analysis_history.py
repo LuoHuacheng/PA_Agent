@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +47,42 @@ def load_record(path: Path) -> AnalysisRecord | None:
         return None
 
 
+def _record_name_matches(path: Path, symbol: str, timeframe: str) -> bool:
+    """True when the filename already encodes the target symbol/timeframe.
+
+    Saved records are named <ts>_<SYMBOL>_<TF>.json, so this cheap suffix
+    check skips loading unrelated records (records/ can hold thousands of
+    ~1 MB files and full pydantic validation dominates lookup time).
+    """
+    return path.name.endswith(f"_{symbol}_{timeframe}.json")
+
+
+_META_HEAD_BYTES = 2048
+_SYMBOL_IN_HEAD = re.compile(rb'"symbol":\s*"([^"]*)"')
+_TIMEFRAME_IN_HEAD = re.compile(rb'"timeframe":\s*"([^"]*)"')
+
+
+def _record_meta_matches_head(path: Path, symbol: str, timeframe: str) -> bool:
+    """Cheap meta-only prefilter (first 2 KB carry the meta block).
+
+    Used as a fallback for legacy filenames that do not follow the standard
+    naming convention; avoids full loads for every unrelated record.
+    """
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(_META_HEAD_BYTES)
+    except OSError:
+        return True  # let the full loader decide (unreadable files are skipped)
+    sym_m = _SYMBOL_IN_HEAD.search(head)
+    tf_m = _TIMEFRAME_IN_HEAD.search(head)
+    if sym_m is None or tf_m is None:
+        return True  # unusual layout — full loader keeps behaviour unchanged
+    return (
+        sym_m.group(1).decode("utf-8", "replace") == symbol
+        and tf_m.group(1).decode("utf-8", "replace") == timeframe
+    )
+
+
 def find_latest_successful_record(
     *,
     symbol: str,
@@ -64,7 +101,13 @@ def find_latest_successful_record(
         return cached[1]
 
     result: AnalysisRecord | None = None
-    for path in list_record_paths(directory):
+    paths = list_record_paths(directory)
+    candidates = [p for p in paths if _record_name_matches(p, symbol, timeframe)]
+    if not candidates:
+        # Legacy / renamed files: prefilter by the meta block instead of
+        # fully loading thousands of unrelated ~1 MB records.
+        candidates = [p for p in paths if _record_meta_matches_head(p, symbol, timeframe)]
+    for path in candidates:
         record = load_record(path)
         if record is None:
             continue
