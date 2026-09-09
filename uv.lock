@@ -529,22 +529,6 @@ wheels = [
 ]
 
 [[package]]
-name = "cursor-sdk"
-version = "0.1.9"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/85/2d/ee287452a15a1800582e0672626abc758e139fcaa49600c1993f43648b64/cursor_sdk-0.1.9.tar.gz", hash = "sha256:078cc81faa286ed8827f917378ea21548119e12f03acc9fe78bf88ce56d7086b", size = 1175, upload-time = "2026-07-03T22:24:26.4Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/dd/6d/41851a2ee1c56e541d720fab9837b4c74222af5a0d5d1f8a35a40111a014/cursor_sdk-0.1.9-py3-none-macosx_11_0_arm64.whl", hash = "sha256:278cae1728a6db89ead0336cd372419d24ef186aedbffe9b72df2dda27a4b43b", size = 47880255, upload-time = "2026-07-03T22:24:12.195Z" },
-    { url = "https://files.pythonhosted.org/packages/1b/cc/233da13e0d6b58728db8c288aa78c15f82a1e771379b5933adf7e0f585cf/cursor_sdk-0.1.9-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:17ea5f7f74b5b2037c6df50b989836544e8f88db8a450536baa37aad635697cd", size = 49377651, upload-time = "2026-07-03T22:24:14.975Z" },
-    { url = "https://files.pythonhosted.org/packages/43/05/15da63d82878f4329888fc3ffbf5f3cd05a49656b56beeb8200b112432d4/cursor_sdk-0.1.9-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:664c8913a866ecc35458f2abdd28bad1ab252c33a6f5655090d0a803381206dc", size = 56447110, upload-time = "2026-07-03T22:24:17.835Z" },
-    { url = "https://files.pythonhosted.org/packages/e8/a0/3e5962967ce1b2c52013314799dbe9946b4699dfe90a4424d8c89a38c022/cursor_sdk-0.1.9-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:a0a93ed45be76421a4b9723da402ead622490dd0edba171b5c0c69319fd7f6c7", size = 57096437, upload-time = "2026-07-03T22:24:20.922Z" },
-    { url = "https://files.pythonhosted.org/packages/5e/24/2d5fdfb07ff4ebfafae9c59dad3d9f70364455a5ccbd8a14a5e94f1429ae/cursor_sdk-0.1.9-py3-none-win_amd64.whl", hash = "sha256:e0db9ad4a8ed39bdd1889efa16ab5d6ce6ed86cf4bd63fb779d955cf0b5e2d3b", size = 43868696, upload-time = "2026-07-03T22:24:23.687Z" },
-]
-
-[[package]]
 name = "cycler"
 version = "0.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1435,7 +1419,6 @@ dependencies = [
     { name = "baostock" },
     { name = "cryptography" },
     { name = "curl-cffi" },
-    { name = "cursor-sdk" },
     { name = "httpx", extra = ["socks"] },
     { name = "jsonschema" },
     { name = "matplotlib" },
@@ -1471,7 +1454,6 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=24.4" },
     { name = "cryptography", specifier = ">=42" },
     { name = "curl-cffi", specifier = ">=0.13" },
-    { name = "cursor-sdk", specifier = ">=0.1.0" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.27" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6" },
     { name = "jsonschema", specifier = ">=4.22" },
