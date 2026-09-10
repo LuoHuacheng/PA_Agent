@@ -315,6 +315,9 @@ class BinanceMarkPriceStream:
         self._thread: threading.Thread | None = None
         self._app: Any = None
         self._lock = threading.Lock()
+        #: backoff rung; reset by a successful open so one network blip cannot
+        #: pin reconnects at the longest delay forever.
+        self._reconnect_index = 0
 
     def start(self) -> bool:
         with self._lock:
@@ -340,11 +343,16 @@ class BinanceMarkPriceStream:
     def _stream_url(self) -> str:
         streams = "/".join(f"{s.lower()}@markPrice" for s in self._symbols)
         return f"{self._ws_base}/stream?streams={streams}"
+
+    def _next_reconnect_delay(self) -> float:
+        """Next backoff rung for a dropped socket (reset by _on_open)."""
+        index = min(self._reconnect_index, len(_RECONNECT_DELAYS_SECONDS) - 1)
+        self._reconnect_index += 1
+        return _RECONNECT_DELAYS_SECONDS[index]
+
     def _run(self) -> None:
         import websocket  # lazy, same as user-data stream
 
-        delays = _RECONNECT_DELAYS_SECONDS
-        index = 0
         while not self._stop.is_set():
             app = websocket.WebSocketApp(
                 self._stream_url(),
@@ -363,12 +371,12 @@ class BinanceMarkPriceStream:
                 self._app = None
             if self._stop.is_set():
                 break
-            delay = delays[min(index, len(delays) - 1)]
-            index += 1
+            delay = self._next_reconnect_delay()
             if self._sleep(delay) is False:
                 break
 
     def _on_open(self, _app: Any) -> None:
+        self._reconnect_index = 0  # a live socket earns a fresh backoff ladder
         logger.info("Mark-price stream connected (%d symbols)", len(self._symbols))
 
     def _on_message(self, _app: Any, message: str) -> None:

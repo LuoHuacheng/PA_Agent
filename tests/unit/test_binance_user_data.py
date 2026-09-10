@@ -291,4 +291,41 @@ def test_mark_price_stream_start_stop(monkeypatch) -> None:
     s.stop()
 
 
+def test_mark_price_backoff_saturates_then_resets_on_open() -> None:
+    """退避爬到最长档后, 一次成功连接必须让它回到第一档.
+
+    回归: index 曾是 _run 的局部变量, _on_open 不归零, 于是网络抖动一次就把
+    重连间隔永久钉在 60s (实测日志 2026-09-10 断连后每次都要等 ~64s).
+    """
+    s = BinanceMarkPriceStream(["BTCUSDT"], on_update=lambda sym, price: None)
+    assert [s._next_reconnect_delay() for _ in range(5)] == list(
+        bud._RECONNECT_DELAYS_SECONDS
+    )
+    assert [s._next_reconnect_delay() for _ in range(3)] == [
+        bud._RECONNECT_DELAYS_SECONDS[-1]
+    ] * 3  # 已饱和
+    s._on_open(None)
+    assert s._next_reconnect_delay() == bud._RECONNECT_DELAYS_SECONDS[0]
+
+
+def test_mark_price_reconnect_keeps_first_rung_after_each_open() -> None:
+    """每次连接成功都重置: 连上即断的抖动也只等 1s, 不是最长档."""
+    slept: list[float] = []
+    _FakeApp.auto_drop_first_n = 3  # first 3 sockets drop right after on_open
+    s = BinanceMarkPriceStream(
+        ["BTCUSDT"],
+        on_update=lambda sym, price: None,
+        sleep=lambda d: slept.append(d),
+    )
+    s.start()
+    try:
+        deadline = time.time() + 3
+        while len(slept) < 3 and time.time() < deadline:
+            time.sleep(0.01)
+    finally:
+        s.stop()
+    assert len(_FakeApp.instances) >= 4, "must keep reconnecting"
+    assert slept[:3] == [1.0, 1.0, 1.0]
+
+
 
