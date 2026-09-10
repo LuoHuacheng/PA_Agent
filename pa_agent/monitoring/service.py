@@ -891,7 +891,7 @@ class MultiSymbolMonitor:
     ) -> str:
         """One-line daily-trend summary, in the same window as the executor.
 
-        The window comes from binance_usdm_testnet.trend_30d_days so the model
+        The window comes from binance_usdm_testnet.trend_lookback_days so the model
         and the counter-trend gate judge alignment against the same number; a
         30-day reference is appended for context. Cached per local day: daily
         bars change slowly and re-subscribing the source every bar is wasteful.
@@ -903,8 +903,8 @@ class MultiSymbolMonitor:
         cfg = getattr(self._settings, "binance_usdm_testnet", None)
         if cfg is None or not getattr(cfg, "enabled", False):
             return ""
-        days = int(getattr(cfg, "trend_30d_days", 7) or 7)
-        neutral = float(getattr(cfg, "trend_30d_neutral_pct", 3.0) or 3.0)
+        days = int(getattr(cfg, "trend_lookback_days", 7) or 7)
+        neutral = float(getattr(cfg, "trend_neutral_band_pct", 3.0) or 3.0)
         today = time.strftime("%Y%m%d")
         cached = self._daily_trend_cache.get(symbol)
         if cached is not None and cached[0] == today:

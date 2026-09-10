@@ -871,7 +871,7 @@ def _trend_monitor(tmp_path: Path, bars: list[KlineBar]):
     """返回 (monitor, source); source 直接注入 state, 因为轮询前它是懒创建的."""
     settings = _settings(MonitorTarget(symbol="BTCUSDT", timeframe="30m", enabled=True))
     settings.binance_usdm_testnet.enabled = True
-    settings.binance_usdm_testnet.trend_30d_days = 7
+    settings.binance_usdm_testnet.trend_lookback_days = 7
     source = FakeSource(bars)
     monitor = MultiSymbolMonitor(
         ctx=object(),
@@ -884,7 +884,7 @@ def _trend_monitor(tmp_path: Path, bars: list[KlineBar]):
 
 
 def test_daily_trend_line_uses_executor_window_and_caches(tmp_path: Path) -> None:
-    """日线趋势行: 窗口取 trend_30d_days(与执行层逆势闸门同源), 同日只取一次."""
+    """日线趋势行: 窗口取 trend_lookback_days(与执行层逆势闸门同源), 同日只取一次."""
     closes = [100.0] + [90.0] * 7 + [60.0] * 23  # 7 天 +11.1%, 30 天 +66.7%
     monitor, source = _trend_monitor(tmp_path, _daily_bars(closes))
     state = monitor._states[("BTCUSDT", "30m")]

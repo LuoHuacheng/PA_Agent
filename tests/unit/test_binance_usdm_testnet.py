@@ -1808,7 +1808,7 @@ def test_counter_trend_below_confidence_rejected() -> None:
     decision = _long_decision() | {"trade_confidence": 50}
     result = execute_market_signal(
         decision, settings, analysis_symbol="BTCUSDT", client=client,
-        trend_30d_pct=-20.0,
+        prefetched_trend_pct=-20.0,
     )
     assert result.status == "rejected"
     assert "Counter-trend vs 30d trend" in result.reason
@@ -1823,7 +1823,7 @@ def test_counter_trend_high_confidence_scales_leverage() -> None:
     decision = _long_decision() | {"trade_confidence": 65}
     result = execute_market_signal(
         decision, settings, analysis_symbol="BTCUSDT", client=client,
-        trend_30d_pct=-20.0,
+        prefetched_trend_pct=-20.0,
     )
     assert result.status == "submitted", result.reason
     assert "scaled leverage to 10x" in result.reason
@@ -1845,7 +1845,7 @@ def test_counter_trend_short_against_bull_scaled() -> None:
     }
     result = execute_market_signal(
         decision, settings, analysis_symbol="BTCUSDT", client=client,
-        trend_30d_pct=12.0,
+        prefetched_trend_pct=12.0,
     )
     assert result.status == "submitted", result.reason
     assert ("set_leverage", "BTCUSDT", 10) in client.calls
@@ -1858,7 +1858,7 @@ def test_neutral_30d_trend_not_restricted() -> None:
     decision = _long_decision() | {"trade_confidence": 30}
     result = execute_market_signal(
         decision, settings, analysis_symbol="BTCUSDT", client=client,
-        trend_30d_pct=2.0,
+        prefetched_trend_pct=2.0,
     )
     assert result.status == "submitted", result.reason
     assert "counter-trend" not in result.reason.lower()
@@ -1874,7 +1874,7 @@ def test_counter_trend_guard_disabled_when_scale_one_and_no_min() -> None:
     decision = _long_decision() | {"trade_confidence": 40}
     result = execute_market_signal(
         decision, settings, analysis_symbol="BTCUSDT", client=client,
-        trend_30d_pct=-20.0,
+        prefetched_trend_pct=-20.0,
     )
     assert result.status == "submitted", result.reason
     assert ("set_leverage", "BTCUSDT", 20) in client.calls
@@ -1896,7 +1896,7 @@ def test_counter_trend_scales_risk_size_in_risk_sizing_mode() -> None:
     client = FakeClient()
     result = execute_market_signal(
         decision, settings, analysis_symbol="BTCUSDT", client=client,
-        trend_30d_pct=20.0,
+        prefetched_trend_pct=20.0,
     )
     assert result.status == "submitted", result.reason
     with_trend = next(call[1] for call in client.calls if call[0] == "entry")
@@ -1906,7 +1906,7 @@ def test_counter_trend_scales_risk_size_in_risk_sizing_mode() -> None:
     client = FakeClient()
     result = execute_market_signal(
         decision | {"trade_confidence": 65, "take_profit_price": 130}, settings,
-        analysis_symbol="BTCUSDT", client=client, trend_30d_pct=-20.0,
+        analysis_symbol="BTCUSDT", client=client, prefetched_trend_pct=-20.0,
     )
     assert result.status == "submitted", result.reason
     assert "and size to 0.50x" in result.reason
@@ -1928,7 +1928,7 @@ def test_counter_trend_block_rejects_high_confidence_counter_order() -> None:
     decision = _long_decision() | {"trade_confidence": 99}
     result = execute_market_signal(
         decision, settings, analysis_symbol="BTCUSDT", client=client,
-        trend_30d_pct=-20.0,
+        prefetched_trend_pct=-20.0,
     )
     assert result.status == "rejected", result.reason
     assert "counter_trend_block" in result.reason
@@ -1943,14 +1943,14 @@ def test_counter_trend_block_does_not_touch_with_trend_orders() -> None:
     client = FakeClient()
     result = execute_market_signal(
         _long_decision(), settings, analysis_symbol="BTCUSDT", client=client,
-        trend_30d_pct=20.0,
+        prefetched_trend_pct=20.0,
     )
     assert result.status == "submitted", result.reason
 
     client = FakeClient()
     result = execute_market_signal(
         _long_decision() | {"take_profit_price": 130}, settings,
-        analysis_symbol="BTCUSDT", client=client, trend_30d_pct=1.0,
+        analysis_symbol="BTCUSDT", client=client, prefetched_trend_pct=1.0,
     )
     assert result.status == "submitted", result.reason
 

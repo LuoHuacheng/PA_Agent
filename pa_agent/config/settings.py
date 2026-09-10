@@ -254,10 +254,12 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # WS 事件触发快照刷新/唤醒的最小间隔(秒): 事件风暴防抖.
     user_data_event_refresh_gap_seconds: int = Field(default=10, ge=1, le=300)
     # --- 日线大趋势护栏 (逆势单保护) ---
-    # 以币种日线 close 的 trend_30d_days 天涨跌幅定义大趋势; |涨跌| <=
-    # trend_30d_neutral_pct 视为无趋势 (不做限制). 仅作用于白名单内的币种.
-    trend_30d_days: int = Field(default=7, ge=5, le=120)
-    trend_30d_neutral_pct: float = Field(default=3.0, ge=0.0, le=100.0)
+    # 以币种日线 close 的 trend_lookback_days 天涨跌幅定义大趋势; |涨跌| <=
+    # trend_neutral_band_pct 视为无趋势 (不做限制). 仅作用于白名单内的币种.
+    # 命名不写死天数: 窗口本身是配置值, 早期 trend_30d_* 的写法在窗口调成 7 天
+    # 之后已经名不副实 (2026-09-10 改名).
+    trend_lookback_days: int = Field(default=7, ge=5, le=120)
+    trend_neutral_band_pct: float = Field(default=3.0, ge=0.0, le=100.0)
     # 逆大趋势的单直接拒绝。2026-09-10 实证: 逆势单的方向命中比同期市场基线低
     # 24 个百分点(顺势 45.9% / 逆势 37.9% / 基线 62.1%), 是样本里最大的亏损来源。
     # 开启后 counter_trend_min_confidence 与 counter_trend_size_scale 不再参与

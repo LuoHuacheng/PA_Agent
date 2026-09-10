@@ -901,7 +901,7 @@ def execute_market_signal(
     *,
     analysis_symbol: str = "",
     client: BinanceUSDMTestnetClient | None = None,
-    trend_30d_pct: float | None = None,
+    prefetched_trend_pct: float | None = None,
 ) -> ExecutionResult:
     """Execute one validated market signal (one-shot; no rate-limit retries).
 
@@ -918,7 +918,7 @@ def execute_market_signal(
         settings,
         analysis_symbol=analysis_symbol,
         client=client,
-        trend_30d_pct=trend_30d_pct,
+        prefetched_trend_pct=prefetched_trend_pct,
     )
 
 
@@ -928,7 +928,7 @@ def _execute_market_signal_once(
     *,
     analysis_symbol: str = "",
     client: BinanceUSDMTestnetClient | None = None,
-    trend_30d_pct: float | None = None,
+    prefetched_trend_pct: float | None = None,
 ) -> ExecutionResult:
     """Execute one validated market signal, with mandatory TP/SL protection."""
     configure_binance_environment(settings)
@@ -1035,9 +1035,9 @@ def _execute_market_signal_once(
         price = active_client.mark_price(symbol)
         stop = _price_for_tick(stop, info)
         target = _price_for_tick(target, info)
-        # 30d daily-trend guard (whitelisted symbols only): a signal against the
-        # daily-close trend of the symbol over the last trend_30d_days needs higher
-        # confidence and, when allowed, runs at reduced leverage/size.
+        # Daily-trend guard (whitelisted symbols only): a signal against the
+        # daily-close trend of the symbol over the last trend_lookback_days needs
+        # higher confidence and, when allowed, runs at reduced leverage/size.
         leverage = config.leverage
         size_scale = 1.0
         trend_note = ""
@@ -1047,16 +1047,16 @@ def _execute_market_signal_once(
             or config.counter_trend_size_scale < 1.0
         )
         if guard_active:
-            trend_pct = trend_30d_pct
+            trend_pct = prefetched_trend_pct
             if trend_pct is None:
-                trend_pct = _daily_trend_pct(active_client, symbol, config.trend_30d_days)
-            bucket = _trend_bucket(trend_pct, config.trend_30d_neutral_pct)
+                trend_pct = _daily_trend_pct(active_client, symbol, config.trend_lookback_days)
+            bucket = _trend_bucket(trend_pct, config.trend_neutral_band_pct)
             counter = (side == "BUY" and bucket == "bear") or (side == "SELL" and bucket == "bull")
             if counter:
                 if bool(getattr(config, "counter_trend_block", False)):
                     return ExecutionResult(
                         "rejected",
-                        f"Counter-trend vs {config.trend_30d_days}d trend "
+                        f"Counter-trend vs {config.trend_lookback_days}d trend "
                         f"({trend_pct:+.1f}%) blocked by counter_trend_block",
                         symbol,
                     )
