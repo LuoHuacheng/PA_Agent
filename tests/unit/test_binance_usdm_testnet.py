@@ -710,9 +710,12 @@ def test_limit_entry_fill_watcher_attaches_protection() -> None:
         "client_id"
     ]
     client.statuses[client_id] = ["FILLED"]
+    # watcher 异步执行: 先挂 protection, 之后才写 seen / 清 pending。只等
+    # "protection" 出现会在 _remember_signal 之前跳出, 下面两条断言就会读到
+    # 半成品状态(不定时 flaky)。等它真正收尾(seen 已写 + pending 已清)再断言。
     deadline = time.monotonic() + 12.0
     while time.monotonic() < deadline:
-        if "protection" in [call[0] for call in client.calls]:
+        if _state().get("seen") and not _pending_state():
             break
         time.sleep(0.05)
     protections = [call[1] for call in client.calls if call[0] == "protection"]
