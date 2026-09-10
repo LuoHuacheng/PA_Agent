@@ -256,7 +256,7 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # --- 日线大趋势护栏 (逆势单保护) ---
     # 以币种日线 close 的 trend_30d_days 天涨跌幅定义大趋势; |涨跌| <=
     # trend_30d_neutral_pct 视为无趋势 (不做限制). 仅作用于白名单内的币种.
-    trend_30d_days: int = Field(default=30, ge=5, le=120)
+    trend_30d_days: int = Field(default=7, ge=5, le=120)
     trend_30d_neutral_pct: float = Field(default=3.0, ge=0.0, le=100.0)
     # 逆大趋势的单所需最低 trade_confidence; 不足直接拒绝 (0 = 关闭该门槛).
     counter_trend_min_confidence: int = Field(default=55, ge=0, le=100)

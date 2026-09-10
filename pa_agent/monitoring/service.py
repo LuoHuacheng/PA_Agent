@@ -227,6 +227,8 @@ class MultiSymbolMonitor:
         self._next_refresh_at: float | None = None
         #: Per-symbol structure-failure negation streak (dir + consecutive bars).
         self._structure_exit_streak: dict[str, dict[str, object]] = {}
+        #: Per-symbol daily-trend line, cached by local day: (yyyymmdd, text).
+        self._daily_trend_cache: dict[str, tuple[str, str]] = {}
         #: C3 light-mode: quiet-bar counter per symbol::timeframe key.
         self._light_quiet: dict[str, int] = {}
         #: Direction-gate rejection counters keyed by gate name (G1/G2...).
@@ -531,6 +533,15 @@ class MultiSymbolMonitor:
             htf_block = self._fetch_htf_context(
                 state, target.symbol, target.timeframe
             )
+            # 实测最大的亏损来源是逆势单(逆 5-30 天趋势做单, 超额 -22 到 -34
+            # 个百分点)。模型的"大背景"窗口只有 20 根分析周期 K 线(30m 下约
+            # 10 小时), 与执行层 counter_trend 闸门用的日线尺度差两个数量级,
+            # 所以把同源的趋势数字直接喂给它。
+            trend_line = self._daily_trend_line(
+                state, target.symbol, target.timeframe
+            )
+            if trend_line:
+                htf_block = f"{trend_line}\n{htf_block}" if htf_block else trend_line
             call_kwargs = self._incremental_kwargs(state, now)
             call_kwargs["record_sink"] = state
             if htf_block:
@@ -874,6 +885,82 @@ class MultiSymbolMonitor:
                     "HTF fetch: re-subscribe failed for %s %s", symbol, timeframe
                 )
         return build_htf_context_text(parts)
+
+    def _daily_trend_line(
+        self, state: _TargetState, symbol: str, timeframe: str
+    ) -> str:
+        """One-line daily-trend summary, in the same window as the executor.
+
+        The window comes from binance_usdm_testnet.trend_30d_days so the model
+        and the counter-trend gate judge alignment against the same number; a
+        30-day reference is appended for context. Cached per local day: daily
+        bars change slowly and re-subscribing the source every bar is wasteful.
+        Every failure degrades to no injection, never to a poll error.
+        """
+        source = getattr(state, "source", None)
+        if source is None:
+            return ""
+        cfg = getattr(self._settings, "binance_usdm_testnet", None)
+        if cfg is None or not getattr(cfg, "enabled", False):
+            return ""
+        days = int(getattr(cfg, "trend_30d_days", 7) or 7)
+        neutral = float(getattr(cfg, "trend_30d_neutral_pct", 3.0) or 3.0)
+        today = time.strftime("%Y%m%d")
+        cached = self._daily_trend_cache.get(symbol)
+        if cached is not None and cached[0] == today:
+            return cached[1]
+        want = max(days, 30) + 2
+        try:
+            source.subscribe(symbol, "1d")
+            bars = source.latest_snapshot(want + 5)
+        except Exception as exc:  # best-effort trend fetch
+            logger.warning("Daily trend fetch failed for %s: %s", symbol, exc)
+            return ""
+        finally:
+            try:
+                source.subscribe(symbol, timeframe)
+            except Exception:  # restore original subscription
+                logger.warning(
+                    "Daily trend: re-subscribe failed for %s %s", symbol, timeframe
+                )
+        closes: list[float] = []
+        for bar in bars:
+            try:
+                value = float(bar.close)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if value > 0:
+                closes.append(value)
+        if len(closes) < days + 1:
+            return ""
+
+        def _pct(back: int) -> float | None:
+            if len(closes) <= back or closes[back] <= 0:
+                return None
+            return (closes[0] - closes[back]) / closes[back] * 100
+
+        def _fmt(value: float | None) -> str:
+            return "-" if value is None else f"{value:+.1f}%"
+
+        def _label(value: float | None) -> str:
+            if value is None:
+                return "-"
+            if abs(value) <= neutral:
+                return "中性"
+            return "偏多" if value > 0 else "偏空"
+
+        main = _pct(days)
+        cells = [f"{days}天 {_fmt(main)} {_label(main)}"]
+        ref = _pct(30)
+        if ref is not None and days != 30:
+            cells.append(f"30天 {_fmt(ref)} {_label(ref)}")
+        line = (
+            "## 日线趋势(程序摘要)\n"
+            + " | ".join(cells)
+            + "\n该口径与执行层逆势闸门同源; 逆势方向的单需额外谨慎。"
+        )
+        self._daily_trend_cache[symbol] = (today, line)
+        return line
 
     def _light_mode_judge(self, key: str, previous_record: Any):
         """Return a stage1->reason judge when light mode is enabled (C3).

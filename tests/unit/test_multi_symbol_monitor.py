@@ -848,3 +848,64 @@ def test_successful_execution_still_pushes_order_signal(tmp_path: Path, monkeypa
         _order_frame(), _order_decision(), _order_decision()["decision"], _Res("submitted")
     )
     assert sorted(calls) == ["feishu_notifier", "pushplus_notifier", "telegram_notifier"]
+
+
+def _daily_bars(closes: list[float]) -> list[KlineBar]:
+    """日线 bars, closes[0] 是最新一根 (与 latest_snapshot 的顺序一致)."""
+    return [
+        KlineBar(
+            seq=index + 1,
+            ts_open=(1_800_000_000 - index * 86_400) * 1000,
+            open=value,
+            high=value,
+            low=value,
+            close=value,
+            volume=1,
+            closed=True,
+        )
+        for index, value in enumerate(closes)
+    ]
+
+
+def _trend_monitor(tmp_path: Path, bars: list[KlineBar]):
+    """返回 (monitor, source); source 直接注入 state, 因为轮询前它是懒创建的."""
+    settings = _settings(MonitorTarget(symbol="BTCUSDT", timeframe="30m", enabled=True))
+    settings.binance_usdm_testnet.enabled = True
+    settings.binance_usdm_testnet.trend_30d_days = 7
+    source = FakeSource(bars)
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: source,
+    )
+    monitor._states[("BTCUSDT", "30m")].source = source
+    return monitor, source
+
+
+def test_daily_trend_line_uses_executor_window_and_caches(tmp_path: Path) -> None:
+    """日线趋势行: 窗口取 trend_30d_days(与执行层逆势闸门同源), 同日只取一次."""
+    closes = [100.0] + [90.0] * 7 + [60.0] * 23  # 7 天 +11.1%, 30 天 +66.7%
+    monitor, source = _trend_monitor(tmp_path, _daily_bars(closes))
+    state = monitor._states[("BTCUSDT", "30m")]
+
+    line = monitor._daily_trend_line(state, "BTCUSDT", "30m")
+    assert "7天" in line and "偏多" in line, line
+    assert "30天" in line, line
+    assert ("subscribe", "BTCUSDT", "1d") in source.calls
+    assert source.calls[-1] == ("subscribe", "BTCUSDT", "30m"), "取完日线须恢复原订阅"
+
+    before = len(source.calls)
+    assert monitor._daily_trend_line(state, "BTCUSDT", "30m") == line
+    assert len(source.calls) == before, "同一天应命中缓存"
+
+
+def test_daily_trend_line_degrades_without_enable_or_bars(tmp_path: Path) -> None:
+    """未开自动执行 / 日线不足时返回空串, 不抛错也不阻塞 poll."""
+    monitor, _source = _trend_monitor(tmp_path, _daily_bars([100.0, 90.0]))
+    state = monitor._states[("BTCUSDT", "30m")]
+    monitor._settings.binance_usdm_testnet.enabled = False
+    assert monitor._daily_trend_line(state, "BTCUSDT", "30m") == ""
+
+    monitor._settings.binance_usdm_testnet.enabled = True
+    assert monitor._daily_trend_line(state, "BTCUSDT", "30m") == ""
