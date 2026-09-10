@@ -139,6 +139,19 @@ def _trend_day_list(raw):
     return out or [30]
 
 
+def _float_list(raw):
+    """'3' 或 '1,1.5,2,3,5' -> [3.0] / [1.0,1.5,2.0,3.0,5.0]."""
+    out = []
+    for part in str(raw).split(","):
+        part = part.strip()
+        if part:
+            try:
+                out.append(float(part))
+            except ValueError:
+                pass
+    return out or [3.0]
+
+
 def _print_align(tagged, h):
     groups = collections.defaultdict(list)
     for row, _pct, align in tagged:
@@ -205,30 +218,31 @@ def audit(args):
                 print("  日线拉取失败 %s: %s" % (sym, exc))
         h = horizons[-1]
         for td in _trend_day_list(args.trend_days):
-            tagged = []
-            for row in rows:
-                closes = daily.get(row[4])
-                if not closes:
+            for neutral in _float_list(args.trend_neutral):
+                tagged = []
+                for row in rows:
+                    closes = daily.get(row[4])
+                    if not closes:
+                        continue
+                    pct = trend_pct_at(closes, row[5], td)
+                    if pct is None:
+                        continue
+                    trend = "bull" if pct > neutral else (
+                        "bear" if pct < -neutral else "neutral")
+                    if trend == "neutral":
+                        align = "neutral"
+                    else:
+                        align = "with" if (row[1] == "bullish") == (trend == "bull") else "against"
+                    tagged.append((row, pct, align))
+                if not tagged:
                     continue
-                pct = trend_pct_at(closes, row[5], td)
-                if pct is None:
-                    continue
-                trend = "bull" if pct > args.trend_neutral else (
-                    "bear" if pct < -args.trend_neutral else "neutral")
-                if trend == "neutral":
-                    align = "neutral"
-                else:
-                    align = "with" if (row[1] == "bullish") == (trend == "bull") else "against"
-                tagged.append((row, pct, align))
-            if not tagged:
-                continue
-            print()
-            print("=== %d 天趋势对齐 (horizon=%d, 中性带 %.1f%%) ===" % (
-                td, h, args.trend_neutral))
-            _print_align(tagged, h)
-            pcts = sorted(p for _r, p, _a in tagged)
-            print("  决策时刻 %d 天趋势分布: p25 %+.1f%%  中位 %+.1f%%  p75 %+.1f%%" % (
-                td, pcts[len(pcts) // 4], pcts[len(pcts) // 2], pcts[len(pcts) * 3 // 4]))
+                print()
+                print("=== %d 天趋势对齐 (horizon=%d, 中性带 %.1f%%) ===" % (td, h, neutral))
+                _print_align(tagged, h)
+                pcts = sorted(p for _r, p, _a in tagged)
+                print("  决策时刻 %d 天趋势分布: p25 %+.1f%%  中位 %+.1f%%  p75 %+.1f%%" % (
+                    td, pcts[len(pcts) // 4], pcts[len(pcts) // 2],
+                    pcts[len(pcts) * 3 // 4]))
 
     for h in horizons:
         usable = [r for r in rows if h in r[3]]
@@ -295,8 +309,8 @@ def main():
     ap.add_argument("--no-trend", action="store_true", help="跳过 30 天趋势对齐分析")
     ap.add_argument("--trend-days", default="30",
                     help="单个天数或逗号列表, 如 2,3,5,7,14,30")
-    ap.add_argument("--trend-neutral", type=float, default=3.0,
-                    help="|涨跌幅| 不超过该值视为无趋势(%%)")
+    ap.add_argument("--trend-neutral", default="3.0",
+                    help="中性带(%%): 单值或逗号列表, 如 1,1.5,2,3,5")
     args = ap.parse_args()
     return audit(args)
 
