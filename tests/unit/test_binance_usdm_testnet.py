@@ -2139,6 +2139,21 @@ def test_tp_runner_swaps_to_breakeven_and_tp2_after_half_close(monkeypatch) -> N
     assert record["tp_algo_id"] == tp2["client_algo_id"]
 
 
+def test_tp_runner_waits_while_short_position_still_full(monkeypatch) -> None:
+    """空单仓位为负数: 量未变时必须等待, 不得误判 TP1 已半平。
+
+    回归 2026-09-10 BNBUSDT 秒开秒平: runner 用带符号 amount 与正数 qty 比,
+    空单永远不等, 开仓首轮就撤 TP1 + 把止损移到 entry(≈市价), 随即被打掉。
+    """
+    _register_tp_record(extra={"side": "SELL"})
+    client = PartialRunnerClient([-2, -2, -1])
+    sleeps = _run_tp_runner(client, monkeypatch)
+    assert len(sleeps) == 2, "前两次仓位未减必须等待, 而不是立刻撤 TP1/移损"
+    cancels = _tp_cancels(client)
+    assert cancels[0]["client_algo_id"] == "pa-tp-part0001", "半仓确认后才清 TP1"
+    assert _tp_places(client), "半仓确认后才挂保本止损/TP2"
+
+
 def test_tp_runner_cleans_residual_tp1_when_position_closed(monkeypatch) -> None:
     """仓位归零(止损/手动): 清理残留 TP1 部分单并移除注册记录。"""
     _register_tp_record()
@@ -3229,6 +3244,22 @@ def test_watchdog_heals_dead_stop_and_drops_on_flat(monkeypatch) -> None:
     assert cancels and cancels[-1]["client_algo_id"] == "pa-tp-part0001"
     assert binance_usdm_testnet._read_guard("BTCUSDT") is None
     assert len(sleeps) >= 1
+
+
+def test_watchdog_waits_while_short_position_still_full(monkeypatch) -> None:
+    """空单仓位完整(量未减)时看护线程不得进入止损补挂校验分支。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    _register_tp_record(extra={"side": "SELL"})
+    client = PartialRunnerClient([-2, -2, 0])
+    binance_usdm_testnet._stop_watchdog_loop(
+        client=client, symbol="BTCUSDT", poll_seconds=1.0, floor_pct=0.45
+    )
+    assert len(sleeps) == 2, "仓位完整的两轮必须等待"
+    assert not [c for c in client.calls if c[0] == "algo_order_status"], (
+        "未到终态不得校验/补挂止损"
+    )
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
 
 
 def test_resume_stop_watchdogs_arms_terminal_records(monkeypatch) -> None:

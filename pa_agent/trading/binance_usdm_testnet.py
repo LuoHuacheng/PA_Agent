@@ -2394,11 +2394,13 @@ def _tp_runner_loop(
             return
         if entry is None:
             return  # 无法取得入场价, 保本价格无从谈起
-        if amount == qty:
+        # positionRisk 返回带符号 positionAmt(空单为负), qty 记的是正数量:
+        # 必须比绝对值, 否则空单永远不等, 首轮就误判 TP1 已半平(2026-09-10 事故)。
+        if abs(amount) == qty:
             consecutive_errors = 0
             time.sleep(poll_seconds)
             continue
-        # TP1 半仓已触发(amount < qty): 进入 TP2 阶段。
+        # TP1 半仓已触发(|amount| < qty): 进入 TP2 阶段。
         # 临界区: 与保本 guard 的移损互斥(per-symbol 锁), 锁内重读注册表, 防双撤双挂。
         with _manager_lock(symbol):
             fresh = _read_guard(symbol)
@@ -3079,7 +3081,7 @@ def _stop_watchdog_loop(
         terminal = (
             bool(record.get("moved"))
             or bool(record.get("partial_done"))
-            or (not legacy and amount < qty)
+            or (not legacy and abs(amount) < qty)
         )
         if not terminal:
             time.sleep(poll_seconds)  # guard/runner 仍在看守, 不重复校验
