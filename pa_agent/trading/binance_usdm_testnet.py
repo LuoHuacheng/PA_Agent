@@ -1039,6 +1039,7 @@ def _execute_market_signal_once(
         # daily-close trend of the symbol over the last trend_30d_days needs higher
         # confidence and, when allowed, runs at reduced leverage/size.
         leverage = config.leverage
+        size_scale = 1.0
         trend_note = ""
         guard_active = (
             config.counter_trend_min_confidence > 0 or config.counter_trend_size_scale < 1.0
@@ -1061,14 +1062,20 @@ def _execute_market_signal_once(
                         symbol,
                     )
                 if config.counter_trend_size_scale < 1.0:
-                    leverage = max(1, round(config.leverage * config.counter_trend_size_scale))
+                    size_scale = float(config.counter_trend_size_scale)
+                    leverage = max(1, round(config.leverage * size_scale))
                     trend_note = (
-                        f"; counter-trend 30d ({trend_pct:+.1f}%) scaled leverage to {leverage}x"
+                        f"; counter-trend 30d ({trend_pct:+.1f}%) scaled leverage to {leverage}x "
+                        f"and size to {size_scale:.2f}x"
                     )
         # 保证金恒定：名义价值 = 保证金(margin_usdt) × 杠杆，杠杆变化不影响保证金。
         margin_usdt = float(config.max_notional_usdt)
         risk_usdt = float(config.risk_per_trade_usdt or 0.0)
         if risk_usdt > 0:
+            # 逆势减仓必须落在风险金上。风险定仓模式下数量只由 risk 与止损距离
+            # 决定, 缩放 leverage 只动名义上限(cap): 在 min_stop_distance_pct
+            # 下限之下 cap 永远够用, 所以旧写法等于没有减仓(2026-09-10 复核).
+            risk_usdt *= size_scale
             # P2-1 风险等额: 锚=市价(mark)或 resting 限价(entry); 越过市价的
             # 限价按市价成交, 锚回退为 mark. 名义超 margin*leverage 则拒单.
             anchor = price

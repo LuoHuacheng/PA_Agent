@@ -1879,6 +1879,40 @@ def test_counter_trend_guard_disabled_when_scale_one_and_no_min() -> None:
     assert result.status == "submitted", result.reason
     assert ("set_leverage", "BTCUSDT", 20) in client.calls
 
+
+def test_counter_trend_scales_risk_size_in_risk_sizing_mode() -> None:
+    """风险定仓模式: 逆势减仓必须落在 risk_usdt 上, 数量真的减半.
+
+    旧实现只缩放 leverage, 而数量由 risk/|anchor-stop| 决定, leverage 仅进
+    名义上限 cap; 在 min_stop_distance_pct 下限之下 cap 永不触发, 等于没减仓。
+    """
+    settings = _trend_settings()
+    settings.binance_usdm_testnet.max_notional_usdt = 1000
+    settings.binance_usdm_testnet.risk_per_trade_usdt = 2.0
+    settings.binance_usdm_testnet.counter_trend_size_scale = 0.5
+    decision = _long_decision() | {"stop_loss_price": 99}
+
+    # 顺势 (7 天 +20%, 做多): 全量风险 2U, mark 100 / stop 99 -> qty 2
+    client = FakeClient()
+    result = execute_market_signal(
+        decision, settings, analysis_symbol="BTCUSDT", client=client,
+        trend_30d_pct=20.0,
+    )
+    assert result.status == "submitted", result.reason
+    with_trend = next(call[1] for call in client.calls if call[0] == "entry")
+    assert Decimal(str(with_trend["quantity"])) == Decimal("2")
+
+    # 逆势 (7 天 -20%, 做多, conf 65 过闸门): 风险金减半 -> qty 1
+    client = FakeClient()
+    result = execute_market_signal(
+        decision | {"trade_confidence": 65, "take_profit_price": 130}, settings,
+        analysis_symbol="BTCUSDT", client=client, trend_30d_pct=-20.0,
+    )
+    assert result.status == "submitted", result.reason
+    assert "and size to 0.50x" in result.reason
+    against = next(call[1] for call in client.calls if call[0] == "entry")
+    assert Decimal(str(against["quantity"])) == Decimal("1")
+
 # ---- P0-1: TP1 部分止盈 + runner(TP2) --------------------------------
 
 def _partial_settings(pct: float = 50.0) -> Settings:
