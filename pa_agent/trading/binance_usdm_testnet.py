@@ -2856,20 +2856,21 @@ def _maybe_guard(
             str(config.tp_partial_close_pct).rstrip("0").rstrip("."),
             _decimal_text(target2),
         )
-        # 部分止盈记录在 runner 结束后(partial_done / TP1 已触发而 runner 退出)
-        # 没有任何线程再校验止损单 → 附加一个看护线程兜底补挂。
-        watchdog = threading.Thread(
-            target=_stop_watchdog_loop,
-            kwargs={
-                "client": client,
-                "symbol": symbol,
-                "poll_seconds": float(config.breakeven_poll_seconds),
-                "floor_pct": float(config.min_stop_distance_pct),
-            },
-            daemon=True,
-        )
-        watchdog.start()
-        logger.info("Stop watchdog started for %s", symbol)
+    # 每个已注册记录都配一个看护线程: breakeven guard 与 TP runner 只在自己的
+    # 触发点核验止损, 触发前 resting STOP 若在交易所端消失, 持仓就没有兜底
+    # (09-07 事故)。看护线程同时负责 runner 结束后的终态补挂。
+    watchdog = threading.Thread(
+        target=_stop_watchdog_loop,
+        kwargs={
+            "client": client,
+            "symbol": symbol,
+            "poll_seconds": float(config.breakeven_poll_seconds),
+            "floor_pct": float(config.min_stop_distance_pct),
+        },
+        daemon=True,
+    )
+    watchdog.start()
+    logger.info("Stop watchdog started for %s", symbol)
     time_stop_minutes = int(config.time_stop_minutes or 0)
     if time_stop_minutes > 0:
         ts_thread = threading.Thread(
@@ -3059,6 +3060,13 @@ def resume_time_stops(
     return resumed
 
 
+#: 未进入保本/TP2 阶段的持仓: breakeven guard 与 TP runner 只在各自触发点才
+#: 核验止损, 触发前 resting STOP 若已在交易所端消失, 持仓整段无保护(2026-09-07
+#: ZEC 事故)。本看护按此轮数间隔复核存活(轮询 10s 时约 60s 一次), 兼顾 Testnet
+#: 共享 IP 限流。
+_UNMOVED_STOP_VERIFY_TICKS = 6
+
+
 def _stop_watchdog_loop(
     *,
     client: BinanceUSDMTestnetClient,
@@ -3066,14 +3074,18 @@ def _stop_watchdog_loop(
     poll_seconds: float,
     floor_pct: float = 0.0,
 ) -> None:
-    """Watch records whose managers already finished (moved / partial_done /
-    TP1-fired remainder): verify the recorded algo stop really rests on the
-    exchange and re-hang it when missing, so a dead stop never leaves the
-    position naked until the next restart (2026-09-08 incident). Exits when
-    the record is gone or the position closes (residual TP cleaned, record
-    dropped). Plain unmoved legacy records are left to the breakeven guard.
+    """Keep the recorded algo stop really resting on the exchange.
+
+    Covers every stage of the position's life: records whose managers already
+    finished (moved / partial_done / TP1-fired remainder) are verified every
+    poll, while an unmoved record (breakeven and TP1 not reached yet) is
+    verified every _UNMOVED_STOP_VERIFY_TICKS polls - before 2026-09-07
+    nothing checked that leg at all, so a stop that died server-side left the
+    position naked until the next restart. A missing stop is re-hung; when the
+    position is flat the residual TP order is cancelled and the record dropped.
     """
     consecutive_errors = 0
+    unmoved_ticks = 0
     while True:
         record = _read_guard(symbol)
         if record is None:
@@ -3084,8 +3096,6 @@ def _stop_watchdog_loop(
         if side not in ("BUY", "SELL"):
             return  # 残缺记录: 不归看护管
         legacy = qty is None or partial_qty is None
-        if legacy and not record.get("moved"):
-            return  # unmoved 旧 guard 记录: 由 guard resume 看守
         try:
             info = current_position(client, symbol)
             amount = info["amount"]
@@ -3113,14 +3123,6 @@ def _stop_watchdog_loop(
             continue
         if (side == "BUY" and amount < 0) or (side == "SELL" and amount > 0):
             return  # not our position anymore
-        terminal = (
-            bool(record.get("moved"))
-            or bool(record.get("partial_done"))
-            or (not legacy and abs(amount) < qty)
-        )
-        if not terminal:
-            time.sleep(poll_seconds)  # guard/runner 仍在看守, 不重复校验
-            continue
         if amount == 0:
             # 仓位已平: 撤残留部分单/TP2 单后移除记录(撤单幂等, -2011 视为已清).
             tp_algo_id = str(record.get("tp_algo_id") or "")
@@ -3143,6 +3145,60 @@ def _stop_watchdog_loop(
             _drop_guard(symbol)
             logger.info("Stop watchdog: %s position closed; record dropped", symbol)
             return
+        terminal = (
+            bool(record.get("moved"))
+            or bool(record.get("partial_done"))
+            or (not legacy and abs(amount) < qty)
+        )
+        if not terminal:
+            # 未到保本/TP1 触发点: guard 与 runner 只在自己的触发点核验止损, 触发
+            # 前若 resting STOP 已在交易所端消失, 持仓整段无保护(09-07 事故)。
+            # 慢频复核, 消失即按原止损价补挂。
+            unmoved_ticks += 1
+            if unmoved_ticks >= _UNMOVED_STOP_VERIFY_TICKS:
+                unmoved_ticks = 0
+                if entry is not None and _positive_decimal(record.get("stop0")) is not None:
+                    with _manager_lock(symbol):
+                        fresh = _read_guard(symbol)
+                        if fresh is None:
+                            return
+                        current_stop = str(fresh.get("stop_algo_id") or "")
+                        if not current_stop:
+                            return
+                        status, _rehung_id, note = _ensure_protective_stop(
+                            client,
+                            symbol=symbol,
+                            record=fresh,
+                            entry=entry,
+                            stage_tp2=False,
+                            floor_pct=floor_pct,
+                        )
+                    if status == "error":
+                        consecutive_errors += 1
+                        logger.error(
+                            "Stop watchdog pre-move verify/re-hang failed for %s (%s): %s",
+                            symbol,
+                            current_stop,
+                            note,
+                        )
+                        if consecutive_errors >= 5:
+                            logger.error(
+                                "Stop watchdog gave up polling %s after repeated API "
+                                "errors before the stop move; record kept for restart resume",
+                                symbol,
+                            )
+                            return
+                    else:
+                        consecutive_errors = 0
+                        if status == "rehung":
+                            logger.warning(
+                                "Stop watchdog: %s pre-move recorded stop %s was gone; %s",
+                                symbol,
+                                current_stop,
+                                note,
+                            )
+            time.sleep(poll_seconds)
+            continue
         if entry is None:
             return  # 拿不到入场价, 保本价无从谈起
         with _manager_lock(symbol):
@@ -3199,7 +3255,8 @@ def resume_stop_watchdogs(
     already finished (partial_done / moved) or that sit mid-TP2 previously had
     NO watcher at all: a stop that died server-side (cancel race / precision
     bug / manual removal) left the position naked until the next restart.
-    Plain unmoved legacy guard records stay with the breakeven-guard resume.
+    Unmoved records (breakeven / TP1 not reached) are armed too, because their
+    managers only look at the stop once their own trigger fires.
     Returns the number of watchdogs resumed.
     """
     configure_binance_environment(settings)
@@ -3225,10 +3282,6 @@ def resume_stop_watchdogs(
         side = str(record.get("side") or "")
         if side not in ("BUY", "SELL"):
             continue
-        qty = _positive_decimal(record.get("qty"))
-        partial_qty = _positive_decimal(record.get("partial_qty"))
-        if (qty is None or partial_qty is None) and not record.get("moved"):
-            continue  # 纯 unmoved 旧 guard 记录: 留给 guard resume
         thread = threading.Thread(
             target=_stop_watchdog_loop,
             kwargs={

@@ -3262,14 +3262,44 @@ def test_watchdog_waits_while_short_position_still_full(monkeypatch) -> None:
     )
     assert len(sleeps) == 2, "仓位完整的两轮必须等待"
     assert not [c for c in client.calls if c[0] == "algo_order_status"], (
-        "未到终态不得校验/补挂止损"
+        "未到复核间隔不得校验/补挂止损"
     )
     assert binance_usdm_testnet._read_guard("BTCUSDT") is None
 
 
+def test_watchdog_verifies_unmoved_record_after_idle_ticks(monkeypatch) -> None:
+    """未移动记录(保本/TP1 未触发)此前没人核验止损: 看护须按
+    _UNMOVED_STOP_VERIFY_TICKS 间隔复核, 止损已死则补挂, 仓位平后清记录。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    ticks = binance_usdm_testnet._UNMOVED_STOP_VERIFY_TICKS
+
+    class UnmovedClient(PartialRunnerClient, _DeadStopClient):
+        def __init__(self) -> None:
+            super().__init__([2] * ticks + [0])
+            self._dead = {"pa-sl-old0001"}
+
+        def mark_price(self, symbol: str) -> Decimal:
+            self.calls.append(("mark_price", symbol))
+            return Decimal("99")  # entry 100 之下: 补挂只能落 stop0 90
+
+    _register_tp_record()  # moved=False / partial_done=False / qty=2
+    client = UnmovedClient()
+    binance_usdm_testnet._stop_watchdog_loop(
+        client=client, symbol="BTCUSDT", poll_seconds=1.0, floor_pct=0.45
+    )
+    verified = [c for c in client.calls if c[0] == "algo_order_status"]
+    assert len(verified) == 1, "空闲期内只复核一次"
+    stops = [c[1] for c in client.calls
+             if c[0] == "protection" and c[1]["order_type"] == "STOP_MARKET"]
+    assert [s["stop_price"] for s in stops] == [Decimal("90")], stops
+    assert len(sleeps) == ticks, "阈值前的每轮都要等待"
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+
+
 def test_resume_stop_watchdogs_arms_terminal_records(monkeypatch) -> None:
-    """重启恢复: 拉起所有"已无 runner 看守"的记录(含 partial_done / moved),
-    让补挂校验在重启后立刻生效; 纯 unmoved 旧 guard 记录留给 guard resume。"""
+    """重启恢复: 拉起全部记录(含 partial_done / moved / 未移动), 让补挂校验在
+    重启后立刻生效; 未移动记录此前无人核验止损, 是 09-07 裸奔事故的成因。"""
     captured = _capture_threads(monkeypatch)
     settings = _partial_settings()
     _register_tp_record("BTCUSDT")  # partial 未完成 -> TP runner resume 会管
@@ -3282,13 +3312,12 @@ def test_resume_stop_watchdogs_arms_terminal_records(monkeypatch) -> None:
     )
     count = binance_usdm_testnet.resume_stop_watchdogs(settings, client=FakeClient())
     entries = sorted((target, kwargs["symbol"]) for target, kwargs in captured)
-    assert count == 3, count
+    assert count == 4, count
     assert [(binance_usdm_testnet._stop_watchdog_loop, s) for s in
-            ("BTCUSDT", "ETHUSDT", "SOLUSDT")] == entries
+            ("ADAUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT")] == entries
     kwargs = next(k for _t, k in captured if k["symbol"] == "ETHUSDT")
     assert kwargs["floor_pct"] == settings.binance_usdm_testnet.min_stop_distance_pct
     assert kwargs["poll_seconds"] == settings.binance_usdm_testnet.breakeven_poll_seconds
-    assert binance_usdm_testnet._read_guard("ADAUSDT") is not None, "旧 guard 记录不得动"
 
 # ── 撤单审计 (cancel audit trail) ───────────────────────────────────────
 
