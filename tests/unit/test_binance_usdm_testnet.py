@@ -1913,6 +1913,47 @@ def test_counter_trend_scales_risk_size_in_risk_sizing_mode() -> None:
     against = next(call[1] for call in client.calls if call[0] == "entry")
     assert Decimal(str(against["quantity"])) == Decimal("1")
 
+
+def test_counter_trend_block_rejects_high_confidence_counter_order() -> None:
+    """counter_trend_block 开启: 逆势单直接拒绝, 与置信度无关.
+
+    故意把 min_confidence 和 size_scale 都关掉, 验证拦截不依赖那两个旧开关
+    (guard_active 必须单独识别 block).
+    """
+    settings = _trend_settings()
+    settings.binance_usdm_testnet.counter_trend_block = True
+    settings.binance_usdm_testnet.counter_trend_min_confidence = 0
+    settings.binance_usdm_testnet.counter_trend_size_scale = 1.0
+    client = FakeClient()
+    decision = _long_decision() | {"trade_confidence": 99}
+    result = execute_market_signal(
+        decision, settings, analysis_symbol="BTCUSDT", client=client,
+        trend_30d_pct=-20.0,
+    )
+    assert result.status == "rejected", result.reason
+    assert "counter_trend_block" in result.reason
+    assert "entry" not in [call[0] for call in client.calls]
+
+
+def test_counter_trend_block_does_not_touch_with_trend_orders() -> None:
+    """禁逆势不能误伤顺势单, 中性带内的单也不受影响."""
+    settings = _trend_settings()
+    settings.binance_usdm_testnet.counter_trend_block = True
+
+    client = FakeClient()
+    result = execute_market_signal(
+        _long_decision(), settings, analysis_symbol="BTCUSDT", client=client,
+        trend_30d_pct=20.0,
+    )
+    assert result.status == "submitted", result.reason
+
+    client = FakeClient()
+    result = execute_market_signal(
+        _long_decision() | {"take_profit_price": 130}, settings,
+        analysis_symbol="BTCUSDT", client=client, trend_30d_pct=1.0,
+    )
+    assert result.status == "submitted", result.reason
+
 # ---- P0-1: TP1 部分止盈 + runner(TP2) --------------------------------
 
 def _partial_settings(pct: float = 50.0) -> Settings:

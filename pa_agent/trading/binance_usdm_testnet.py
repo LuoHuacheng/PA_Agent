@@ -1042,7 +1042,9 @@ def _execute_market_signal_once(
         size_scale = 1.0
         trend_note = ""
         guard_active = (
-            config.counter_trend_min_confidence > 0 or config.counter_trend_size_scale < 1.0
+            bool(getattr(config, "counter_trend_block", False))
+            or config.counter_trend_min_confidence > 0
+            or config.counter_trend_size_scale < 1.0
         )
         if guard_active:
             trend_pct = trend_30d_pct
@@ -1051,6 +1053,13 @@ def _execute_market_signal_once(
             bucket = _trend_bucket(trend_pct, config.trend_30d_neutral_pct)
             counter = (side == "BUY" and bucket == "bear") or (side == "SELL" and bucket == "bull")
             if counter:
+                if bool(getattr(config, "counter_trend_block", False)):
+                    return ExecutionResult(
+                        "rejected",
+                        f"Counter-trend vs {config.trend_30d_days}d trend "
+                        f"({trend_pct:+.1f}%) blocked by counter_trend_block",
+                        symbol,
+                    )
                 conf = signal_conf
                 if config.counter_trend_min_confidence > 0 and (
                     conf is None or conf < config.counter_trend_min_confidence

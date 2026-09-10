@@ -258,6 +258,11 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # trend_30d_neutral_pct 视为无趋势 (不做限制). 仅作用于白名单内的币种.
     trend_30d_days: int = Field(default=7, ge=5, le=120)
     trend_30d_neutral_pct: float = Field(default=3.0, ge=0.0, le=100.0)
+    # 逆大趋势的单直接拒绝。2026-09-10 实证: 逆势单的方向命中比同期市场基线低
+    # 24 个百分点(顺势 45.9% / 逆势 37.9% / 基线 62.1%), 是样本里最大的亏损来源。
+    # 开启后 counter_trend_min_confidence 与 counter_trend_size_scale 不再参与
+    # 判定(先拦, 再谈减仓)。
+    counter_trend_block: bool = False
     # 逆大趋势的单所需最低 trade_confidence; 不足直接拒绝 (0 = 关闭该门槛).
     counter_trend_min_confidence: int = Field(default=55, ge=0, le=100)
     # 逆大趋势且通过门槛的单, 杠杆 (名义仓位随杠杆同比例) 乘以此系数, 最小 1x.
