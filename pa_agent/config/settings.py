@@ -269,6 +269,11 @@ class BinanceUSDMTestnetSettings(BaseModel):
     counter_trend_min_confidence: int = Field(default=55, ge=0, le=100)
     # 逆大趋势且通过门槛的单, 杠杆 (名义仓位随杠杆同比例) 乘以此系数, 最小 1x.
     counter_trend_size_scale: float = Field(default=0.5, ge=0.1, le=1.0)
+    # --- 日度亏损熔断 ---
+    # 当日已实现净亏损(REALIZED_PNL + COMMISSION, 不含资金费)达到该值时停止自动
+    # 开新仓, 次日(本地日)自动解除。0 = 关闭。账本查询 weight 30, 所以当天一旦
+    # 触发就不再重复查询(直接读运行时 state)。
+    daily_loss_limit_usdt: float = Field(default=0.0, ge=0.0, le=10000.0)
     # --- 保本移动止损 (breakeven stop) ---
     # 持仓浮盈达标后把交易所 STOP 保护单移到入场价, 将"赚过又回吐"的亏损转成
     # 保本离场. 触发条件: 1r = 浮盈 >= 1R (risk = |entry - stop|); tp = 浮盈触及

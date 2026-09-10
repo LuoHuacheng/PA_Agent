@@ -3650,4 +3650,91 @@ def test_replaced_entry_remembers_entry_for_the_cooldown(tmp_path) -> None:
     assert remembered.get("reason") == "plan_replaced"
 
 
+# ---- 日度亏损熔断 (daily loss circuit breaker) -------------------------
+
+
+def _income_rows(*pairs) -> list[dict]:
+    return [{"incomeType": kind, "income": str(value)} for kind, value in pairs]
+
+
+class DailyLossClient(FakeClient):
+    """income_history 返回固定账本, 并记录被查询的次数."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        super().__init__()
+        self._rows = list(rows)
+        self.income_calls = 0
+
+    def income_history(self, *, start_ms: int, end_ms=None, limit: int = 1000) -> list[dict]:
+        self.calls.append(("income_history", start_ms))
+        self.income_calls += 1
+        return self._rows
+
+
+def test_daily_loss_guard_blocks_then_serves_from_state() -> None:
+    """当日亏损超限: 首次拒绝并落盘熔断, 之后直接读 state 不再查账本."""
+    settings = _settings()
+    settings.binance_usdm_testnet.daily_loss_limit_usdt = 30.0
+    client = DailyLossClient(_income_rows(("REALIZED_PNL", -32.0), ("COMMISSION", -1.5)))
+
+    first = execute_market_signal(
+        _long_decision(), settings, analysis_symbol="BTCUSDT", client=client
+    )
+    assert first.status == "rejected", first.reason
+    assert "Daily loss limit hit" in first.reason
+    assert client.income_calls == 1
+    assert "entry" not in [call[0] for call in client.calls]
+    halt = _state().get("risk_halt")
+    assert isinstance(halt, dict) and halt["net_usdt"] == -33.5
+
+    second = execute_market_signal(
+        _long_decision(), settings, analysis_symbol="BTCUSDT", client=client
+    )
+    assert second.status == "skipped", second.reason
+    assert "halt active" in second.reason
+    assert client.income_calls == 1, "当天已触发后不得重复查账本"
+
+
+def test_daily_loss_guard_allows_orders_under_limit() -> None:
+    """未超限照常下单, 且不写熔断."""
+    settings = _settings()
+    settings.binance_usdm_testnet.daily_loss_limit_usdt = 30.0
+    client = DailyLossClient(_income_rows(("REALIZED_PNL", -5.0), ("COMMISSION", -1.0)))
+    result = execute_market_signal(
+        _long_decision(), settings, analysis_symbol="BTCUSDT", client=client
+    )
+    assert result.status == "submitted", result.reason
+    assert client.income_calls == 1
+    assert "risk_halt" not in _state()
+
+
+def test_daily_loss_guard_disabled_by_default() -> None:
+    """limit=0 时完全不查账本."""
+    settings = _settings()
+    client = DailyLossClient(_income_rows(("REALIZED_PNL", -999.0)))
+    result = execute_market_signal(
+        _long_decision(), settings, analysis_symbol="BTCUSDT", client=client
+    )
+    assert result.status == "submitted", result.reason
+    assert client.income_calls == 0
+
+
+def test_daily_loss_guard_fails_open_when_ledger_unavailable() -> None:
+    """账本拉取失败必须放行: 熔断是保护, 不该因一次网络抖动卡死交易."""
+    class FailingLedgerClient(DailyLossClient):
+        def income_history(self, *, start_ms: int, end_ms=None, limit: int = 1000) -> list[dict]:
+            self.calls.append(("income_history", start_ms))
+            self.income_calls += 1
+            raise BinanceAPIError("Binance network error: test outage")
+
+    settings = _settings()
+    settings.binance_usdm_testnet.daily_loss_limit_usdt = 30.0
+    client = FailingLedgerClient(_income_rows(("REALIZED_PNL", -99.0)))
+    result = execute_market_signal(
+        _long_decision(), settings, analysis_symbol="BTCUSDT", client=client
+    )
+    assert result.status == "submitted", result.reason
+    assert "risk_halt" not in _state()
+
+
 

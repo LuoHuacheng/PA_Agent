@@ -895,6 +895,54 @@ class BinanceUSDMTestnetClient:
         )
 
 
+def _daily_loss_guard(
+    client: BinanceUSDMTestnetClient, config: BinanceUSDMTestnetSettings
+) -> ExecutionResult | None:
+    """日度亏损熔断: 当日净亏损超限则拒绝开新仓, 并把熔断状态写进 state.
+
+    账本查询 weight 30, 所以当天一旦触发就不再重复查询(直接读 state)。
+    账本拉取失败一律放行(fail-open): 熔断是保护, 不该因为一次网络抖动把正常
+    交易全部卡死。
+    """
+    from pa_agent.trading import risk_guard
+
+    limit = float(getattr(config, "daily_loss_limit_usdt", 0.0) or 0.0)
+    if limit <= 0:
+        return None
+    now_ms = int(time.time() * 1000)
+    with _STATE_LOCK:
+        record = risk_guard.halt_record(_load_state(), now_ms)
+    if record is not None:
+        return ExecutionResult(
+            "skipped",
+            f"Daily loss halt active for {record.get('day')} "
+            f"(net {float(record.get('net_usdt') or 0.0):+.2f}U vs -{limit:.2f}U); "
+            f"resumes next local day",
+        )
+    try:
+        rows = client.income_history(start_ms=risk_guard.day_start_ms(now_ms))
+    except BinanceAPIError as exc:
+        logger.warning("Daily loss check skipped (income fetch failed): %s", exc)
+        return None
+    hit, net = risk_guard.breach(rows, limit)
+    if not hit:
+        return None
+    with _STATE_LOCK:
+        state = _load_state()
+        state[risk_guard.HALT_KEY] = risk_guard.build_halt(net, limit, now_ms)
+        _save_state(state)
+    logger.error(
+        "Daily loss limit hit: net %+.2fU <= -%.2fU; auto-entry halted until next local day",
+        net,
+        limit,
+    )
+    return ExecutionResult(
+        "rejected",
+        f"Daily loss limit hit (net {net:+.2f}U <= -{limit:.2f}U); "
+        f"auto-entry halted until next local day",
+    )
+
+
 def execute_market_signal(
     decision: dict[str, Any],
     settings: Settings | None,
@@ -1004,6 +1052,9 @@ def _execute_market_signal_once(
             config.api_key,
             config.api_secret,
         )
+        halted = _daily_loss_guard(active_client, config)
+        if halted is not None:
+            return halted
         # Resolve any previous resting entry for this symbol before the
         # open-position guard: a watcher that died between fill and protection
         # (process restart) or a partial fill is repaired here with the SL/TP
