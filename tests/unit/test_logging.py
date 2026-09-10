@@ -40,3 +40,17 @@ def test_console_formatter_omits_ansi_color_when_redirected() -> None:
     assert "●" in rendered
     assert "ready" in rendered
     assert "\033[" not in rendered
+
+
+def test_rotating_log_retention_covers_the_cancel_review_window() -> None:
+    """Cancel-reason reviews look back 12 h; one log file is worth about an hour.
+
+    The previous 5 MB x 10 budget covered roughly ten hours, so late-evening
+    events had already rotated away by morning. Keep at least 15 files.
+    """
+    from pa_agent.util import logging as logging_util
+
+    retained_bytes = logging_util._MAX_LOG_BYTES * logging_util._LOG_BACKUP_COUNT
+    assert logging_util._LOG_BACKUP_COUNT >= 15
+    assert retained_bytes >= 75 * 1024 * 1024
+

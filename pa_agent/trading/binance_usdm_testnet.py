@@ -30,6 +30,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
+from pa_agent.records import cancel_log
 from pa_agent.trading import binance_env
 from pa_agent.trading.binance_env import BinanceTradeEnv
 from pa_agent.trading.rate_limit import parse_banned_until_ms, rate_limiter
@@ -1256,6 +1257,14 @@ def _execute_limit_signal(
     replacement = _replace_pending_limit(client, symbol, config)
     if replacement is not None:
         return replacement
+    cooldown_reason = _repricing_cooldown_reason(symbol, entry_price, exchange_info, config)
+    if cooldown_reason is not None:
+        logger.info(
+            f"Skipped {active_environment().label_en} limit entry for %s: %s",
+            symbol,
+            cooldown_reason,
+        )
+        return ExecutionResult("skipped", cooldown_reason, symbol)
     client.set_leverage(symbol, leverage)
     entry_client_id = _entry_client_id(signal_id)
     target2 = _positive_decimal(decision.get("take_profit_price_2"))
@@ -1268,6 +1277,7 @@ def _execute_limit_signal(
         "target": _decimal_text(target),
         "target2": "" if target2 is None else _decimal_text(target2),
         "conf": "" if conf is None else str(conf),
+        "entry": _decimal_text(entry_price),
         "placed_at": time.time(),
     }
     _persist_pending(symbol, pending_record)
@@ -1350,6 +1360,14 @@ def _replace_pending_limit(
     except BinanceAPIError as exc:
         if _is_missing_order_error(exc):
             logger.info(f"Removing stale {active_environment().label_en} pending entry for %s: %s", symbol, exc)
+            _record_cancel_event(
+                symbol,
+                old_client_id,
+                cancel_log.REASON_STALE_ENTRY_REMOVED,
+                detail="Exchange no longer knows the resting entry",
+                entry_price=old.get("entry"),
+                signal_id=old_signal_id,
+            )
             _drop_pending(symbol, old_client_id)
             return None
         logger.warning("Cannot inspect previous limit entry for %s: %s", symbol, exc)
@@ -1385,7 +1403,24 @@ def _replace_pending_limit(
         try:
             client.cancel_order(symbol=symbol, client_id=old_client_id)
         except BinanceAPIError as exc:
+            _record_cancel_event(
+                symbol,
+                old_client_id,
+                cancel_log.REASON_CANCEL_FAILED,
+                detail=str(exc),
+                entry_price=old.get("entry"),
+                signal_id=old_signal_id,
+            )
             return ExecutionResult("failed", f"Cannot replace pending limit entry: {exc}", symbol)
+        _record_cancel_event(
+            symbol,
+            old_client_id,
+            cancel_log.REASON_PLAN_REPLACED,
+            detail="Replaced stale resting limit entry with a fresh plan",
+            entry_price=old.get("entry"),
+            signal_id=old_signal_id,
+        )
+        _remember_canceled_entry(symbol, old.get("entry"), cancel_log.REASON_PLAN_REPLACED)
         logger.info(f"Replaced stale {active_environment().label_en} limit entry %s for %s", old_client_id, symbol)
         if status == "PARTIALLY_FILLED":
             # Never discard a partial fill while replacing the entry: protect
@@ -3312,9 +3347,18 @@ def _cancel_and_settle(
     roll back any partial fill. When the cancel itself fails the pending
     record is kept so a later signal or a restart resume can still recover.
     """
+    entry_price = _pending_entry_price(symbol, client_id)
     try:
         client.cancel_order(symbol=symbol, client_id=client_id)
     except BinanceAPIError as exc:
+        _record_cancel_event(
+            symbol,
+            client_id,
+            cancel_log.REASON_CANCEL_FAILED,
+            detail=str(exc),
+            entry_price=entry_price,
+            signal_id=signal_id,
+        )
         logger.error(
             "Cancel %s limit entry failed for %s (%s): %s; pending record kept",
             context,
@@ -3323,6 +3367,20 @@ def _cancel_and_settle(
             exc,
         )
         return
+    reason = (
+        cancel_log.REASON_LIMIT_ENTRY_TIMEOUT
+        if "timed out" in context
+        else cancel_log.REASON_STALE_ENTRY_REMOVED
+    )
+    _record_cancel_event(
+        symbol,
+        client_id,
+        reason,
+        detail=context,
+        entry_price=entry_price,
+        signal_id=signal_id,
+    )
+    _remember_canceled_entry(symbol, entry_price, reason)
     logger.info(
         f"{active_environment().label_en} limit entry %s; resting remainder canceled: %s %s", context, symbol, client_id
     )
@@ -3768,6 +3826,121 @@ def _drop_pending(symbol: str, client_id: str | None = None) -> None:
             return
         del pending[symbol]
         _save_state(state)
+
+
+def _tick_size(exchange_info: dict[str, Any]) -> Decimal | None:
+    """Return the PRICE_FILTER tick size, or None when it is unusable."""
+    filters = exchange_info.get("filters") if isinstance(exchange_info, dict) else None
+    for item in filters or []:
+        if isinstance(item, dict) and item.get("filterType") == "PRICE_FILTER":
+            return _positive_decimal(item.get("tickSize"))
+    return None
+
+
+def _remember_canceled_entry(symbol: str, entry_price: object, reason: str) -> None:
+    """Anchor the repricing cooldown at the price of the entry just canceled."""
+    price = _positive_decimal(entry_price)
+    if price is None:
+        return
+    try:
+        with _STATE_LOCK:
+            state = _load_state()
+            entries = state.get("last_canceled_entries")
+            if not isinstance(entries, dict):
+                entries = {}
+                state["last_canceled_entries"] = entries
+            entries[symbol] = {
+                "entry": _decimal_text(price),
+                "reason": reason,
+                "ts": time.time(),
+            }
+            _save_state(state)
+    except BinanceAPIError as exc:
+        # Not being able to persist the anchor only weakens the churn guard;
+        # it must never fail an execution path.
+        logger.warning("Cannot persist repricing cooldown anchor for %s: %s", symbol, exc)
+
+
+def _repricing_cooldown_reason(
+    symbol: str,
+    entry_price: Decimal,
+    exchange_info: dict[str, Any],
+    config: BinanceUSDMTestnetSettings | None,
+) -> str | None:
+    """Return why this level must not be re-hung yet (None means allowed).
+
+    A new analysis round can cancel a resting entry and immediately propose an
+    entry a couple of ticks away; that only pays spread and fees. After a
+    cancel, the same price band stays off limits for the cooldown window.
+    """
+    if config is None:
+        return None
+    max_ticks = int(config.limit_repricing_min_ticks or 0)
+    cooldown_minutes = int(config.limit_repricing_cooldown_minutes or 0)
+    if max_ticks <= 0 or cooldown_minutes <= 0:
+        return None
+    with _STATE_LOCK:
+        entries = _load_state().get("last_canceled_entries")
+    record = entries.get(symbol) if isinstance(entries, dict) else None
+    if not isinstance(record, dict):
+        return None
+    canceled_at = record.get("ts")
+    if not isinstance(canceled_at, (int, float)):
+        return None
+    age_seconds = time.time() - canceled_at
+    if age_seconds >= cooldown_minutes * 60:
+        return None
+    previous = _positive_decimal(record.get("entry"))
+    tick = _tick_size(exchange_info)
+    if previous is None or tick is None:
+        return None
+    ticks_apart = abs(entry_price - previous) / tick
+    if ticks_apart > max_ticks:
+        return None
+    return (
+        f"同价位轮换冷却：上一笔挂单在 {max(0, int(age_seconds // 60))} 分钟前撤销，"
+        f"本轮入场价与它相差 {ticks_apart:.0f} 跳（阈值 {max_ticks} 跳），暂不重挂"
+    )
+
+
+def _pending_entry_price(symbol: str, client_id: str) -> str | None:
+    """Return the recorded entry price of a resting entry, when still known."""
+    with _STATE_LOCK:
+        pending = _load_state().get("pending")
+    record = pending.get(symbol) if isinstance(pending, dict) else None
+    if not isinstance(record, dict) or record.get("client_id") != client_id:
+        return None
+    entry = record.get("entry")
+    return None if entry is None else str(entry)
+
+
+def _record_cancel_event(
+    symbol: str,
+    client_id: str,
+    reason: str,
+    *,
+    detail: str = "",
+    entry_price: object = None,
+    signal_id: str = "",
+) -> None:
+    """Mirror one cancel into the append-only audit trail.
+
+    The audit trail is best effort: a failure here must never abort or alter
+    an order flow, so every exception is logged and swallowed.
+    """
+    try:
+        cancel_log.record_cancel(
+            symbol=symbol,
+            client_id=client_id,
+            reason=reason,
+            detail=detail,
+            environment=active_environment().label_en,
+            entry_price=entry_price,
+            signal_id=signal_id,
+        )
+    except Exception:
+        # Best effort by contract: a broken audit trail must not fail a cancel.
+        logger.exception("Cancel audit record failed for %s %s", symbol, client_id)
 
 
 def _dict_response(value: dict[str, Any] | list[Any]) -> dict[str, Any]:

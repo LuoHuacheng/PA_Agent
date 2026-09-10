@@ -219,6 +219,11 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # Resting limit entries use a fill watcher and attach TP/SL after fill.
     limit_fill_timeout_minutes: int = Field(default=60, ge=1, le=1440)
     limit_poll_interval_seconds: int = Field(default=10, ge=2, le=300)
+    # 同价位轮换冷却：上一笔挂单被撤后，若新方案的入场价与它相差不超过 N 跳，
+    # 且在冷却窗内，则跳过本次挂单（同价位反复撤挂只赔价差与手续费）。
+    # 任一参数取 0 即关闭该闸门。
+    limit_repricing_min_ticks: int = Field(default=3, ge=0, le=1000)
+    limit_repricing_cooldown_minutes: int = Field(default=30, ge=0, le=1440)
     # Stop loss minimum distance from the entry/mark price (percent). "fixed"
     # mode: constant min_stop_distance_pct floor. "atr" mode: floor =
     # max(min_stop_distance_pct, min_stop_atr_multiple × 分析周期 ATR%), where

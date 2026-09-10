@@ -13,6 +13,7 @@ from urllib.error import HTTPError
 import pytest
 
 from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
+from pa_agent.records import cancel_log
 from pa_agent.trading import binance_usdm_testnet
 from pa_agent.trading.binance_usdm_testnet import BinanceAPIError, execute_market_signal
 
@@ -1204,6 +1205,7 @@ def _persist_pending_record(symbol: str, client_id: str, signal_id: str) -> None
             "quantity": "167.79",
             "stop": "90",
             "target": "120",
+            "entry": "100",
             "placed_at": time.time() - 3600,
         },
     )
@@ -3287,4 +3289,261 @@ def test_resume_stop_watchdogs_arms_terminal_records(monkeypatch) -> None:
     assert kwargs["floor_pct"] == settings.binance_usdm_testnet.min_stop_distance_pct
     assert kwargs["poll_seconds"] == settings.binance_usdm_testnet.breakeven_poll_seconds
     assert binance_usdm_testnet._read_guard("ADAUSDT") is not None, "旧 guard 记录不得动"
+
+# ── 撤单审计 (cancel audit trail) ───────────────────────────────────────
+
+
+def _cancel_records(tmp_path) -> list[dict]:
+    directory = tmp_path / "cancels"
+    if not directory.exists():
+        return []
+    records: list[dict] = []
+    for path in sorted(directory.glob("cancels-*.jsonl")):
+        records.extend(
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+    return records
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cancel_log(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cancel_log, "CANCEL_LOG_DIR", tmp_path / "cancels")
+
+
+def test_timed_out_limit_entry_is_recorded_in_cancel_audit(tmp_path) -> None:
+    """Timeout cancels must land in the audit trail with a stable reason."""
+    client = FakeClient()
+    client.limit_orders["pa-entry-timeout"] = {"status": "NEW"}
+    _persist_pending_record("BTCUSDT", "pa-entry-timeout", "timeout-signal")
+
+    binance_usdm_testnet._cancel_and_settle(
+        client,
+        "BTCUSDT",
+        "pa-entry-timeout",
+        "BUY",
+        Decimal("90"),
+        Decimal("120"),
+        Decimal("167.79"),
+        "timeout-signal",
+        context="timed out",
+    )
+
+    records = _cancel_records(tmp_path)
+    assert [record["reason"] for record in records] == ["limit_entry_timeout"]
+    assert records[0]["symbol"] == "BTCUSDT"
+    assert records[0]["client_id"] == "pa-entry-timeout"
+    assert records[0]["entry_price"] == "100"
+    assert records[0]["signal_id"] == "timeout-signal"
+    assert records[0]["detail"]
+
+
+def test_timed_out_after_status_failures_maps_to_timeout_reason(tmp_path) -> None:
+    """The status-failure timeout is the same cancel reason as a plain timeout."""
+    client = FakeClient()
+    client.limit_orders["pa-entry-timeout"] = {"status": "NEW"}
+    _persist_pending_record("BTCUSDT", "pa-entry-timeout", "timeout-signal")
+
+    binance_usdm_testnet._cancel_and_settle(
+        client,
+        "BTCUSDT",
+        "pa-entry-timeout",
+        "BUY",
+        Decimal("90"),
+        Decimal("120"),
+        Decimal("167.79"),
+        "timeout-signal",
+        context="timed out after status failures",
+    )
+
+    records = _cancel_records(tmp_path)
+    assert [record["reason"] for record in records] == ["limit_entry_timeout"]
+
+
+def test_replaced_limit_entry_is_recorded_in_cancel_audit(tmp_path) -> None:
+    """Replacing a resting entry must record the old order as plan_replaced."""
+    client = FakeClient()
+    client.limit_orders["pa-entry-old"] = {"status": "NEW"}
+    _persist_pending_record("BTCUSDT", "pa-entry-old", "old-signal")
+
+    result = binance_usdm_testnet._replace_pending_limit(client, "BTCUSDT")
+
+    assert result is None, "a stale resting entry must not block a fresh one"
+    records = _cancel_records(tmp_path)
+    assert [record["reason"] for record in records] == ["plan_replaced"]
+    assert records[0]["client_id"] == "pa-entry-old"
+    assert records[0]["entry_price"] == "100"
+
+
+def test_failed_cancel_is_recorded_in_cancel_audit(tmp_path) -> None:
+    """A rejected cancel must be visible: pending record stays, audit says why."""
+    client = FakeClient()
+    client.limit_orders["pa-entry-old"] = {"status": "NEW"}
+    _persist_pending_record("BTCUSDT", "pa-entry-old", "old-signal")
+
+    def refuse(**_kwargs: object) -> None:
+        raise BinanceAPIError("Binance error -1003: too many requests")
+
+    client.cancel_order = refuse  # type: ignore[method-assign]
+
+    result = binance_usdm_testnet._replace_pending_limit(client, "BTCUSDT")
+
+    assert result is not None and result.status == "failed"
+    records = _cancel_records(tmp_path)
+    assert [record["reason"] for record in records] == ["cancel_failed"]
+    assert records[0]["client_id"] == "pa-entry-old"
+
+
+def test_stale_entry_removed_is_recorded_in_cancel_audit(tmp_path) -> None:
+    """An entry the exchange already forgot is still worth one audit line."""
+    client = FakeClient()
+    binance_usdm_testnet._persist_pending(
+        "BTCUSDT",
+        {
+            "client_id": "pa-entry-dead",
+            "signal_id": "dead-signal",
+            "side": "BUY",
+            "quantity": "1",
+            "stop": "90",
+            "target": "120",
+            "entry": "100",
+            "placed_at": time.time() - 60,
+        },
+    )
+
+    def missing(**_kwargs: object) -> str:
+        raise BinanceAPIError('Binance HTTP 400: {"code":-2013,"msg":"Order does not exist."}')
+
+    client.order_status = missing  # type: ignore[method-assign]
+
+    assert binance_usdm_testnet._replace_pending_limit(client, "BTCUSDT") is None
+    records = _cancel_records(tmp_path)
+    assert [record["reason"] for record in records] == ["stale_entry_removed"]
+    assert records[0]["client_id"] == "pa-entry-dead"
+
+
+# ── 同价位轮换冷却 (same-level repricing cooldown) ──────────────────────
+
+
+def _stub_watcher_thread(monkeypatch) -> list[dict]:
+    started: list[dict] = []
+
+    class FakeThread:
+        def __init__(self, *, target, kwargs, daemon: bool = True) -> None:
+            self.kwargs = kwargs
+
+        def start(self) -> None:
+            started.append(self.kwargs)
+
+    monkeypatch.setattr(binance_usdm_testnet.threading, "Thread", FakeThread)
+    return started
+
+
+def _seed_last_canceled_entry(
+    symbol: str, entry: str, *, age_seconds: float = 60.0, reason: str = "limit_entry_timeout"
+) -> None:
+    with binance_usdm_testnet._STATE_LOCK:
+        state = binance_usdm_testnet._load_state()
+        state.setdefault("last_canceled_entries", {})[symbol] = {
+            "entry": entry,
+            "reason": reason,
+            "ts": time.time() - age_seconds,
+        }
+        binance_usdm_testnet._save_state(state)
+
+
+def _limit_decision(entry: float = 95) -> dict:
+    return _long_decision() | {"order_type": "限价单", "entry_price": entry}
+
+
+def test_same_level_reentry_inside_cooldown_is_skipped(monkeypatch) -> None:
+    """Cancel-then-rehang the same level is churn: skip instead of re-placing."""
+    _stub_watcher_thread(monkeypatch)
+    _seed_last_canceled_entry("BTCUSDT", "95.2")  # 2 ticks away (tick size 0.1)
+    client = FakeClient()
+
+    result = execute_market_signal(
+        _limit_decision(95), _settings(), analysis_symbol="BTCUSDT", client=client
+    )
+
+    assert result.status == "skipped", result.reason
+    assert "同价位轮换冷却" in result.reason
+    assert "limit_entry" not in [call[0] for call in client.calls]
+
+
+def test_reentry_far_from_the_last_cancel_is_placed(monkeypatch) -> None:
+    started = _stub_watcher_thread(monkeypatch)
+    _seed_last_canceled_entry("BTCUSDT", "90")  # 50 ticks away
+    client = FakeClient()
+
+    result = execute_market_signal(
+        _limit_decision(95), _settings(), analysis_symbol="BTCUSDT", client=client
+    )
+
+    assert result.status == "pending", result.reason
+    assert [call[0] for call in client.calls].count("limit_entry") == 1
+    assert started, "an accepted entry must arm its fill watcher"
+
+
+def test_reentry_is_allowed_after_the_cooldown_expires(monkeypatch) -> None:
+    _stub_watcher_thread(monkeypatch)
+    _seed_last_canceled_entry("BTCUSDT", "95.2", age_seconds=31 * 60)
+    client = FakeClient()
+
+    result = execute_market_signal(
+        _limit_decision(95), _settings(), analysis_symbol="BTCUSDT", client=client
+    )
+
+    assert result.status == "pending", result.reason
+
+
+def test_repricing_cooldown_can_be_disabled(monkeypatch) -> None:
+    _stub_watcher_thread(monkeypatch)
+    _seed_last_canceled_entry("BTCUSDT", "95")
+    settings = _settings()
+    settings.binance_usdm_testnet.limit_repricing_min_ticks = 0
+    client = FakeClient()
+
+    result = execute_market_signal(
+        _limit_decision(95), settings, analysis_symbol="BTCUSDT", client=client
+    )
+
+    assert result.status == "pending", result.reason
+
+
+def test_timed_out_cancel_remembers_entry_for_the_cooldown(tmp_path) -> None:
+    client = FakeClient()
+    client.limit_orders["pa-entry-timeout"] = {"status": "NEW"}
+    _persist_pending_record("BTCUSDT", "pa-entry-timeout", "timeout-signal")
+
+    binance_usdm_testnet._cancel_and_settle(
+        client,
+        "BTCUSDT",
+        "pa-entry-timeout",
+        "BUY",
+        Decimal("90"),
+        Decimal("120"),
+        Decimal("167.79"),
+        "timeout-signal",
+        context="timed out",
+    )
+
+    remembered = (_state().get("last_canceled_entries") or {}).get("BTCUSDT") or {}
+    assert remembered.get("entry") == "100"
+    assert remembered.get("reason") == "limit_entry_timeout"
+
+
+def test_replaced_entry_remembers_entry_for_the_cooldown(tmp_path) -> None:
+    client = FakeClient()
+    client.limit_orders["pa-entry-old"] = {"status": "NEW"}
+    _persist_pending_record("BTCUSDT", "pa-entry-old", "old-signal")
+
+    assert binance_usdm_testnet._replace_pending_limit(client, "BTCUSDT") is None
+
+    remembered = (_state().get("last_canceled_entries") or {}).get("BTCUSDT") or {}
+    assert remembered.get("entry") == "100"
+    assert remembered.get("reason") == "plan_replaced"
+
+
 

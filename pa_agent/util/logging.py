@@ -75,6 +75,13 @@ class ConsoleFormatter(MaskingFormatter):
 
 _LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 
+# Rotation sizing is an operational contract, not a style choice: one file is
+# worth about an hour of trading logs, and cancel-reason reviews look back 12 h.
+# 5 MB x 20 (approximately 100 MB, about 18 h) keeps that window readable in the
+# application log itself; records/cancels/*.jsonl is the durable audit trail.
+_MAX_LOG_BYTES = 5 * 1024 * 1024
+_LOG_BACKUP_COUNT = 20
+
 _THIRD_PARTY_LOGGERS = ("urllib3", "openai", "httpx")
 
 # tvdatafeed opens a websocket every refresh tick and logs at DEBUG — keep quiet
@@ -133,8 +140,8 @@ def configure_logging(api_key: str = "") -> None:
     LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.handlers.RotatingFileHandler(
         LOG_FILE_PATH,
-        maxBytes=5 * 1024 * 1024,
-        backupCount=10,
+        maxBytes=_MAX_LOG_BYTES,
+        backupCount=_LOG_BACKUP_COUNT,
         encoding="utf-8",
     )
     file_handler.setFormatter(file_formatter)
