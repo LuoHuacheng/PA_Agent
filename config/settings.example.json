@@ -190,10 +190,16 @@
     "require_analysis_symbol_match": true,
     "symbol": "BTCUSDT",
     "symbol_whitelist": [
+      "BTCUSDT",
       "ETHUSDT",
-      "LINKUSDT",
+      "BNBUSDT",
       "XRPUSDT",
-      "TRXUSDT"
+      "SOLUSDT",
+      "ADAUSDT",
+      "DOGEUSDT",
+      "LINKUSDT",
+      "TRXUSDT",
+      "ZECUSDT"
     ],
     "leverage": 20,
     "max_notional_usdt": 100.0,
