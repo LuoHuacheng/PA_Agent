@@ -35,8 +35,34 @@ BAR_MS = {"1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
           "30m": 1_800_000, "1h": 3_600_000, "4h": 14_400_000}
 
 
+#: 主网公共日线: 与 testnet 价格一致, 但不占用 testnet 共享 IP 的配额.
+DAILY_URL = "https://fapi.binance.com/fapi/v1/klines"
+
+
 def _cutoff(days):
     return (datetime.now(TZ8) - timedelta(days=days)).strftime("%Y-%m-%d") if days else None
+
+
+def fetch_daily_closes(symbol, limit=90):
+    """[(open_time_ms, close)] 真实 epoch, 主网公共接口."""
+    import json as _json
+    import urllib.request
+    url = "%s?symbol=%s&interval=1d&limit=%d" % (DAILY_URL, symbol, limit)
+    req = urllib.request.Request(url, headers={"User-Agent": "PA_Agent/1.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        rows = _json.loads(resp.read())
+    return [(int(row[0]), float(row[4])) for row in rows]
+
+
+def trend_pct_at(closes, ms, days):
+    """决策时刻往回 days 根日线的涨跌幅(%); 数据不足返回 None."""
+    past = [close for ts, close in closes if ts <= ms]
+    if len(past) < 2:
+        return None
+    window = past[-days:] if len(past) >= days else past
+    if len(window) < 2 or window[0] <= 0:
+        return None
+    return (window[-1] - window[0]) / window[0] * 100
 
 
 def load_records(days=None):
@@ -130,11 +156,62 @@ def audit(args):
             if ret is not None:
                 rets[h] = ret
         if rets:
-            rows.append((str(diag.get("cycle_position") or "unknown"), direction, conf, rets))
+            rows.append((str(diag.get("cycle_position") or "unknown"), direction, conf,
+                         rets, symbol, ms))
 
     print("有方向且数据连续的记录:", len(rows))
     if not rows:
         return 0
+
+    # ---- 30 天趋势对齐: 验证模型是否系统性逆势 ----
+    if not args.no_trend:
+        symbols = sorted({r[4] for r in rows})
+        daily = {}
+        for sym in symbols:
+            try:
+                daily[sym] = fetch_daily_closes(sym)
+            except Exception as exc:
+                print("  日线拉取失败 %s: %s" % (sym, exc))
+        tagged = []
+        for row in rows:
+            closes = daily.get(row[4])
+            if not closes:
+                continue
+            pct = trend_pct_at(closes, row[5], args.trend_days)
+            if pct is None:
+                continue
+            trend = "bull" if pct > args.trend_neutral else ("bear" if pct < -args.trend_neutral else "neutral")
+            if trend == "neutral":
+                align = "neutral"
+            else:
+                align = "with" if (row[1] == "bullish") == (trend == "bull") else "against"
+            tagged.append((row, pct, align))
+        if tagged:
+            h = horizons[-1]
+            print()
+            print("=== %d 天趋势对齐 (horizon=%d, 中性带 %.1f%%) ===" % (
+                args.trend_days, h, args.trend_neutral))
+            groups = collections.defaultdict(list)
+            for row, _pct, align in tagged:
+                if h in row[3]:
+                    groups[align].append(row)
+            print("%-10s %6s %8s %8s %10s %10s" % ("对齐", "n", "占比", "命中率", "基线", "超额"))
+            total = sum(len(v) for v in groups.values())
+            for name, label in (("with", "顺势"), ("against", "逆势"), ("neutral", "中性")):
+                bucket = groups.get(name, [])
+                if not bucket:
+                    continue
+                up = sum(1 for r in bucket if r[3][h] > 0) / len(bucket)
+                hit = sum(1 for r in bucket if (r[3][h] > 0) == (r[1] == "bullish")) / len(bucket)
+                print("%-10s %6d %7.0f%% %7.1f%% %7.1f%% %+9.1f" % (
+                    label, len(bucket), len(bucket) / total * 100 if total else 0,
+                    hit * 100, max(up, 1 - up) * 100,
+                    (hit - max(up, 1 - up)) * 100))
+            pcts = [p for _r, p, _a in tagged]
+            pcts.sort()
+            print("  决策时刻 %d 天趋势分布: p25 %+.1f%%  中位 %+.1f%%  p75 %+.1f%%" % (
+                args.trend_days, pcts[len(pcts) // 4], pcts[len(pcts) // 2],
+                pcts[len(pcts) * 3 // 4]))
 
     for h in horizons:
         usable = [r for r in rows if h in r[3]]
@@ -144,9 +221,18 @@ def audit(args):
         hits = sum(1 for r in usable if (r[3][h] > 0) == (r[1] == "bullish"))
         print()
         print("=== 未来 %d 根 K 线 ===" % h)
-        print("样本 %d   方向命中 %.1f%%   基线(上涨占比) %.1f%%   超额 %+.1f 个百分点" % (
-            len(usable), hits / len(usable) * 100, up_rate * 100,
+        print("样本 %d   方向命中 %.1f%%   基线(多数类) %.1f%%   超额 %+.1f 个百分点" % (
+            len(usable), hits / len(usable) * 100, max(up_rate, 1 - up_rate) * 100,
             (hits / len(usable) - max(up_rate, 1 - up_rate)) * 100))
+        bulls = [r for r in usable if r[1] == "bullish"]
+        bears = [r for r in usable if r[1] == "bearish"]
+        b_hit = sum(1 for r in bulls if r[3][h] > 0) / len(bulls) * 100 if bulls else 0
+        s_hit = sum(1 for r in bears if r[3][h] < 0) / len(bears) * 100 if bears else 0
+        print("  bull 预测 %4d 笔(%.0f%%)  其中真涨 %.1f%%   市场涨占比 %.1f%%   超额 %+.1f" % (
+            len(bulls), len(bulls) / len(usable) * 100, b_hit, up_rate * 100, b_hit - up_rate * 100))
+        print("  bear 预测 %4d 笔(%.0f%%)  其中真跌 %.1f%%   市场跌占比 %.1f%%   超额 %+.1f" % (
+            len(bears), len(bears) / len(usable) * 100, s_hit, (1 - up_rate) * 100,
+            s_hit - (1 - up_rate) * 100))
         groups = collections.defaultdict(list)
         for r in usable:
             groups[r[0]].append(r)
@@ -189,6 +275,10 @@ def main():
     ap.add_argument("--horizons", default="1,2,4,8")
     ap.add_argument("--min-conf", type=float, default=None)
     ap.add_argument("--min-samples", type=int, default=20)
+    ap.add_argument("--no-trend", action="store_true", help="跳过 30 天趋势对齐分析")
+    ap.add_argument("--trend-days", type=int, default=30)
+    ap.add_argument("--trend-neutral", type=float, default=3.0,
+                    help="|涨跌幅| 不超过该值视为无趋势(%%)")
     args = ap.parse_args()
     return audit(args)
 

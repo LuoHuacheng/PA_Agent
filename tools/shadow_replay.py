@@ -328,6 +328,44 @@ def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
                    net / risk_usdt, bars_held)
 
 
+def report_variants(rows):
+    """同一批模拟成交上比较各个过滤条件, 看边际收益."""
+    filters = [
+        ("基线 全部", lambda r: True),
+        ("禁做空", lambda r: r["direction"] == "做多"),
+        ("禁做多(对照)", lambda r: r["direction"] == "做空"),
+        ("RR>=1.0", lambda r: (r["rr"] or 0) >= 1.0),
+        ("RR>=1.5", lambda r: (r["rr"] or 0) >= 1.5),
+        ("RR>=2.0", lambda r: (r["rr"] or 0) >= 2.0),
+        ("禁 trending_tr", lambda r: r["cycle_position"] != "trending_tr"),
+        ("禁空+禁trending_tr", lambda r: r["direction"] == "做多" and r["cycle_position"] != "trending_tr"),
+        ("normal_channel且做多", lambda r: r["cycle_position"] == "normal_channel" and r["direction"] == "做多"),
+        ("trade_conf>=55", lambda r: (r["trade_conf"] or 0) >= 55),
+        ("做多+RR>=1.5", lambda r: r["direction"] == "做多" and (r["rr"] or 0) >= 1.5),
+        ("做多+RR>=1.5+禁trend_tr", lambda r: r["direction"] == "做多" and (r["rr"] or 0) >= 1.5
+         and r["cycle_position"] != "trending_tr"),
+        ("做多+RR>=1.5+仅channel", lambda r: r["direction"] == "做多" and (r["rr"] or 0) >= 1.5
+         and r["cycle_position"] in ("normal_channel", "broad_channel")),
+    ]
+    base = [r for r in rows if r["filled"]]
+    base_net = sum(r["net"] for r in base)
+    print()
+    print("=== 过滤变体 (基线 %d 笔, 净 %+.2fU) ===" % (len(base), base_net))
+    print("%-26s %5s %6s %10s %8s %7s %9s %10s" %
+          ("变体", "笔数", "保留", "净U", "均U", "胜率", "净/风险", "相比基线"))
+    for name, pred in filters:
+        sub = [r for r in base if pred(r)]
+        if not sub:
+            print("%-26s %5d" % (name, 0))
+            continue
+        net = sum(r["net"] for r in sub)
+        risk = sum(r["risk_usdt"] for r in sub)
+        print("%-26s %5d %5.0f%% %10.2f %8.2f %6.0f%% %9.3f %+10.2f" % (
+            name, len(sub), len(sub) / len(base) * 100, net, net / len(sub),
+            sum(1 for r in sub if r["net"] > 0) / len(sub) * 100,
+            net / risk if risk else 0, net - base_net))
+
+
 def fee_rate_from_outcomes(path):
     """从真实成交反推往返手续费率(手续费 / 名义)的中位数."""
     if not path.exists():
@@ -406,6 +444,9 @@ def run_replay(args):
             "filled": out.filled, "reason": out.reason,
             "entry": round(out.entry, 8),
             "exit_avg": None if out.exit_avg is None else round(out.exit_avg, 8),
+            "stop": plan.stop, "target": plan.target,
+            "rr": round(abs(plan.target - plan.entry) / abs(plan.entry - plan.stop), 4)
+            if abs(plan.entry - plan.stop) > 0 else None,
             "notional": round(out.notional, 2),
             "gross": round(out.gross, 4), "fees": round(out.fees, 4),
             "net": round(out.net, 4), "win_r": round(out.win_r, 4),
@@ -434,6 +475,8 @@ def run_replay(args):
     print()
     print("=== 按方向 ===")
     summarize(rows, "direction")
+    if args.variants:
+        report_variants(rows)
 
     out_csv = Path(args.csv) if args.csv else (ROOT / "logs" / "shadow_rows.csv")
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -506,6 +549,7 @@ def main():
     ap.add_argument("--symbols", default="")
     ap.add_argument("--csv", default="")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--variants", action="store_true", help="输出过滤变体对比表")
     ap.add_argument("--risk-usdt", type=float, default=DEFAULT_RISK_USDT)
     ap.add_argument("--leverage", type=int, default=DEFAULT_LEVERAGE)
     ap.add_argument("--margin-usdt", type=float, default=DEFAULT_MARGIN_USDT)
