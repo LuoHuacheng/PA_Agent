@@ -126,6 +126,37 @@ def window_return(timeline, record_ms, horizon, bar_ms):
     return (future[horizon - 1][4] - anchor) / anchor
 
 
+def _trend_day_list(raw):
+    """'30' 或 '2,3,5,7,14,30' -> [30] / [2,3,5,7,14,30]."""
+    out = []
+    for part in str(raw).split(","):
+        part = part.strip()
+        if part:
+            try:
+                out.append(int(part))
+            except ValueError:
+                pass
+    return out or [30]
+
+
+def _print_align(tagged, h):
+    groups = collections.defaultdict(list)
+    for row, _pct, align in tagged:
+        if h in row[3]:
+            groups[align].append(row)
+    print("%-10s %6s %8s %8s %10s %10s" % ("对齐", "n", "占比", "命中率", "基线", "超额"))
+    total = sum(len(v) for v in groups.values())
+    for name, label in (("with", "顺势"), ("against", "逆势"), ("neutral", "中性")):
+        bucket = groups.get(name, [])
+        if not bucket:
+            continue
+        up = sum(1 for r in bucket if r[3][h] > 0) / len(bucket)
+        hit = sum(1 for r in bucket if (r[3][h] > 0) == (r[1] == "bullish")) / len(bucket)
+        print("%-10s %6d %7.0f%% %7.1f%% %7.1f%% %+9.1f" % (
+            label, len(bucket), len(bucket) / total * 100 if total else 0,
+            hit * 100, max(up, 1 - up) * 100, (hit - max(up, 1 - up)) * 100))
+
+
 def audit(args):
     records = load_records(args.days)
     print("加载诊断记录:", len(records))
@@ -163,7 +194,7 @@ def audit(args):
     if not rows:
         return 0
 
-    # ---- 30 天趋势对齐: 验证模型是否系统性逆势 ----
+    # ---- 趋势对齐: 验证模型是否系统性逆势, 并扫描不同时间尺度 ----
     if not args.no_trend:
         symbols = sorted({r[4] for r in rows})
         daily = {}
@@ -172,46 +203,32 @@ def audit(args):
                 daily[sym] = fetch_daily_closes(sym)
             except Exception as exc:
                 print("  日线拉取失败 %s: %s" % (sym, exc))
-        tagged = []
-        for row in rows:
-            closes = daily.get(row[4])
-            if not closes:
+        h = horizons[-1]
+        for td in _trend_day_list(args.trend_days):
+            tagged = []
+            for row in rows:
+                closes = daily.get(row[4])
+                if not closes:
+                    continue
+                pct = trend_pct_at(closes, row[5], td)
+                if pct is None:
+                    continue
+                trend = "bull" if pct > args.trend_neutral else (
+                    "bear" if pct < -args.trend_neutral else "neutral")
+                if trend == "neutral":
+                    align = "neutral"
+                else:
+                    align = "with" if (row[1] == "bullish") == (trend == "bull") else "against"
+                tagged.append((row, pct, align))
+            if not tagged:
                 continue
-            pct = trend_pct_at(closes, row[5], args.trend_days)
-            if pct is None:
-                continue
-            trend = "bull" if pct > args.trend_neutral else ("bear" if pct < -args.trend_neutral else "neutral")
-            if trend == "neutral":
-                align = "neutral"
-            else:
-                align = "with" if (row[1] == "bullish") == (trend == "bull") else "against"
-            tagged.append((row, pct, align))
-        if tagged:
-            h = horizons[-1]
             print()
             print("=== %d 天趋势对齐 (horizon=%d, 中性带 %.1f%%) ===" % (
-                args.trend_days, h, args.trend_neutral))
-            groups = collections.defaultdict(list)
-            for row, _pct, align in tagged:
-                if h in row[3]:
-                    groups[align].append(row)
-            print("%-10s %6s %8s %8s %10s %10s" % ("对齐", "n", "占比", "命中率", "基线", "超额"))
-            total = sum(len(v) for v in groups.values())
-            for name, label in (("with", "顺势"), ("against", "逆势"), ("neutral", "中性")):
-                bucket = groups.get(name, [])
-                if not bucket:
-                    continue
-                up = sum(1 for r in bucket if r[3][h] > 0) / len(bucket)
-                hit = sum(1 for r in bucket if (r[3][h] > 0) == (r[1] == "bullish")) / len(bucket)
-                print("%-10s %6d %7.0f%% %7.1f%% %7.1f%% %+9.1f" % (
-                    label, len(bucket), len(bucket) / total * 100 if total else 0,
-                    hit * 100, max(up, 1 - up) * 100,
-                    (hit - max(up, 1 - up)) * 100))
-            pcts = [p for _r, p, _a in tagged]
-            pcts.sort()
+                td, h, args.trend_neutral))
+            _print_align(tagged, h)
+            pcts = sorted(p for _r, p, _a in tagged)
             print("  决策时刻 %d 天趋势分布: p25 %+.1f%%  中位 %+.1f%%  p75 %+.1f%%" % (
-                args.trend_days, pcts[len(pcts) // 4], pcts[len(pcts) // 2],
-                pcts[len(pcts) * 3 // 4]))
+                td, pcts[len(pcts) // 4], pcts[len(pcts) // 2], pcts[len(pcts) * 3 // 4]))
 
     for h in horizons:
         usable = [r for r in rows if h in r[3]]
@@ -276,7 +293,8 @@ def main():
     ap.add_argument("--min-conf", type=float, default=None)
     ap.add_argument("--min-samples", type=int, default=20)
     ap.add_argument("--no-trend", action="store_true", help="跳过 30 天趋势对齐分析")
-    ap.add_argument("--trend-days", type=int, default=30)
+    ap.add_argument("--trend-days", default="30",
+                    help="单个天数或逗号列表, 如 2,3,5,7,14,30")
     ap.add_argument("--trend-neutral", type=float, default=3.0,
                     help="|涨跌幅| 不超过该值视为无趋势(%%)")
     args = ap.parse_args()
