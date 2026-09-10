@@ -182,7 +182,7 @@
     "user_data_stream_enabled": false,
     "user_data_stream_ws_url": "",
     "trend_lookback_days": 7,
-    "trend_neutral_band_pct": 3.0
+    "trend_neutral_band_pct": 1.0
   },
   "binance_usdm_testnet": {
     "enabled": false,
@@ -227,7 +227,7 @@
     "structure_exit_confirm_bars": 2,
     "direction_gates_mode": "dry_run",
     "trend_lookback_days": 7,
-    "trend_neutral_band_pct": 3.0
+    "trend_neutral_band_pct": 1.0
   },
   "telegram": {
     "enabled": false,

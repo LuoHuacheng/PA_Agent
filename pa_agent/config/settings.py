@@ -259,7 +259,7 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # 命名不写死天数: 窗口本身是配置值, 早期 trend_30d_* 的写法在窗口调成 7 天
     # 之后已经名不副实 (2026-09-10 改名).
     trend_lookback_days: int = Field(default=7, ge=5, le=120)
-    trend_neutral_band_pct: float = Field(default=3.0, ge=0.0, le=100.0)
+    trend_neutral_band_pct: float = Field(default=1.0, ge=0.0, le=100.0)
     # 逆大趋势的单直接拒绝。2026-09-10 实证: 逆势单的方向命中比同期市场基线低
     # 24 个百分点(顺势 45.9% / 逆势 37.9% / 基线 62.1%), 是样本里最大的亏损来源。
     # 开启后 counter_trend_min_confidence 与 counter_trend_size_scale 不再参与
