@@ -328,7 +328,71 @@ def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
                    net / risk_usdt, bars_held)
 
 
-def report_variants(rows):
+DAILY_URL = "https://fapi.binance.com/fapi/v1/klines"
+
+
+def _fetch_daily_closes(symbol, limit=60):
+    """主网公共日线收盘 [(open_time_ms, close)]; 不占用 testnet 共享 IP 配额."""
+    import json as _json
+    import urllib.request
+    url = "%s?symbol=%s&interval=1d&limit=%d" % (DAILY_URL, symbol, limit)
+    req = urllib.request.Request(url, headers={"User-Agent": "PA_Agent/1.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        rows = _json.loads(resp.read())
+    return [(int(row[0]), float(row[4])) for row in rows]
+
+
+def _trend_pct_at(closes, ms, days):
+    """决策时刻往回 days 根日线的涨跌幅(%); 数据不足返回 None."""
+    past = [close for ts, close in closes if ts <= ms]
+    if len(past) < 2:
+        return None
+    window = past[-days:] if len(past) >= days else past
+    if len(window) < 2 or window[0] <= 0:
+        return None
+    return (window[-1] - window[0]) / window[0] * 100
+
+
+def attach_trends(plans, days):
+    """给每条计划单贴上决策时刻的日线趋势(%), 键为 pending 文件名."""
+    by_symbol = {}
+    for plan in plans:
+        if plan.symbol in by_symbol:
+            continue
+        try:
+            by_symbol[plan.symbol] = _fetch_daily_closes(plan.symbol)
+        except Exception as exc:
+            print("  日线拉取失败 %s: %s" % (plan.symbol, exc))
+            by_symbol[plan.symbol] = []
+    return {
+        os.path.basename(plan.path): _trend_pct_at(
+            by_symbol.get(plan.symbol) or [], plan.record_ms, days)
+        for plan in plans
+    }
+
+
+def _float_list(raw):
+    """'3' 或 '1,2,3' -> [3.0] / [1.0,2.0,3.0]."""
+    out = []
+    for part in str(raw).split(","):
+        part = part.strip()
+        if part:
+            try:
+                out.append(float(part))
+            except ValueError:
+                pass
+    return out or [3.0]
+
+
+def _is_counter_trend(row, neutral):
+    """该笔是否逆决策时刻的日线趋势."""
+    pct = row.get("trend_pct")
+    if pct is None or abs(pct) <= neutral:
+        return False
+    return (row["direction"] == "做多") != (pct > 0)
+
+
+def report_variants(rows, neutral_list=()):
     """同一批模拟成交上比较各个过滤条件, 看边际收益."""
     filters = [
         ("基线 全部", lambda r: True),
@@ -347,6 +411,11 @@ def report_variants(rows):
         ("做多+RR>=1.5+仅channel", lambda r: r["direction"] == "做多" and (r["rr"] or 0) >= 1.5
          and r["cycle_position"] in ("normal_channel", "broad_channel")),
     ]
+    for neutral in neutral_list:
+        filters.append((
+            "禁逆势 %.1f%%" % neutral,
+            lambda r, n=neutral: not _is_counter_trend(r, n),
+        ))
     base = [r for r in rows if r["filled"]]
     base_net = sum(r["net"] for r in base)
     print()
@@ -425,6 +494,11 @@ def run_replay(args):
     print("K 线时间线:", {k[0] + "/" + k[1]: len(v) for k, v in sorted(timelines.items())})
     fee_rate = args.fee_rate if args.fee_rate is not None else fee_rate_from_outcomes(OUTCOMES_CSV)
     print("手续费率(往返, 名义占比): %.5f" % fee_rate)
+    trends = attach_trends(plans, args.trend_days) if args.trend_days > 0 else {}
+    if trends:
+        tagged = sum(1 for v in trends.values() if v is not None)
+        print("日线趋势标签: %d 天, 覆盖 %d/%d 条计划单" % (
+            args.trend_days, tagged, len(plans)))
 
     rows = []
     for plan in plans:
@@ -451,6 +525,7 @@ def run_replay(args):
             "gross": round(out.gross, 4), "fees": round(out.fees, 4),
             "net": round(out.net, 4), "win_r": round(out.win_r, 4),
             "risk_usdt": args.risk_usdt, "bars_held": out.bars_held,
+            "trend_pct": trends.get(os.path.basename(plan.path)),
             "record_file": os.path.basename(plan.path),
         })
 
@@ -476,7 +551,7 @@ def run_replay(args):
     print("=== 按方向 ===")
     summarize(rows, "direction")
     if args.variants:
-        report_variants(rows)
+        report_variants(rows, _float_list(args.trend_neutral))
 
     out_csv = Path(args.csv) if args.csv else (ROOT / "logs" / "shadow_rows.csv")
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -550,6 +625,10 @@ def main():
     ap.add_argument("--csv", default="")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--variants", action="store_true", help="输出过滤变体对比表")
+    ap.add_argument("--trend-days", type=int, default=0,
+                    help="变体表贴日线趋势标签的回看天数(0=不拉日线)")
+    ap.add_argument("--trend-neutral", default="3.0",
+                    help="逆势判定中性带(%%)列表, 如 1,2,3")
     ap.add_argument("--risk-usdt", type=float, default=DEFAULT_RISK_USDT)
     ap.add_argument("--leverage", type=int, default=DEFAULT_LEVERAGE)
     ap.add_argument("--margin-usdt", type=float, default=DEFAULT_MARGIN_USDT)
