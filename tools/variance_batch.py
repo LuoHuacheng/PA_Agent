@@ -55,8 +55,36 @@ def _is_directional(name):
     return str(diag.get("direction") or "").lower() in ("bullish", "bearish")
 
 
-def pick_records(count, timeframe, per_symbol, days=15, directional_only=True):
-    """每个 symbol 在近 days 天内均匀取几条, 默认只保留方向明确的记录。"""
+def _name_ms(name):
+    """从文件名解析决策时刻 (本地墙上时间 -> epoch ms)。"""
+    try:
+        dt = datetime.strptime(name[:19], "%Y-%m-%d_%H-%M-%S").replace(tzinfo=TZ8)
+    except ValueError:
+        return None
+    return int(dt.timestamp() * 1000)
+
+
+def _has_future(timeline, record_ms, horizon, bar_ms):
+    """决策之后是否有连续 horizon 根 K 线可判定 (挑样本时先剔除, 免得白花调用)。"""
+    if record_ms is None or not timeline:
+        return False
+    future = [b for b in timeline if b[0] > record_ms]
+    if len(future) < horizon:
+        return False
+    for i in range(horizon - 1):
+        if future[i + 1][0] - future[i][0] != bar_ms:
+            return False
+    return True
+
+
+def pick_records(count, timeframe, per_symbol, days=45, directional_only=False,
+                 timelines=None, horizon=8, bar_ms=1_800_000):
+    """按 symbol 与时间分散地挑记录.
+
+    默认**不**过滤方向: 只挑"当时方向明确"的记录, 等于把高方差的模糊场景先
+    筛掉, 会让"投票是否有用"天然偏向"没用"。改为只剔除没有后续 K 线可判定的
+    记录 —— 那条是纯粹的样本浪费, 与偏差无关。
+    """
     cutoff = (datetime.now(TZ8) - timedelta(days=days)).strftime("%Y-%m-%d")
     files = sorted(glob.glob(str(vb.RECORDS_PENDING_DIR / ("*_%s.json" % timeframe))))
     by_symbol = defaultdict(list)
@@ -71,12 +99,17 @@ def pick_records(count, timeframe, per_symbol, days=15, directional_only=True):
     picked = []
     for symbol in sorted(by_symbol):
         names = sorted(by_symbol[symbol], reverse=True)
-        step = max(1, len(names) // max(1, per_symbol * 3))
+        timeline = (timelines or {}).get((symbol, timeframe), [])
+        step = max(1, len(names) // max(1, per_symbol * 4))
         taken = 0
         for name in names[::step]:
             if taken >= per_symbol:
                 break
             if directional_only and not _is_directional(name):
+                continue
+            if timelines is not None and not _has_future(
+                timeline, _name_ms(name), horizon, bar_ms
+            ):
                 continue
             picked.append(name)
             taken += 1
@@ -161,9 +194,9 @@ def main():
     ap.add_argument("--horizon", type=int, default=8, help="判定用的后续 K 线根数")
     ap.add_argument("--timeframe", default="30m")
     ap.add_argument("--per-symbol", type=int, default=3)
-    ap.add_argument("--days", type=int, default=15, help="只看近 N 天的记录")
-    ap.add_argument("--allow-neutral", action="store_true",
-                    help="默认只挑方向明确的记录; 加上此参数则不过滤")
+    ap.add_argument("--days", type=int, default=45, help="只看近 N 天的记录")
+    ap.add_argument("--directional-only", action="store_true",
+                    help="只挑当时方向明确的记录(会引入选择偏差, 一般不用)")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--variant", default="trimmed")
     args = ap.parse_args()
@@ -172,9 +205,19 @@ def main():
     settings = vb.load_settings()
     validator = vb.JsonValidator(settings)
 
+    bar_ms = BAR_MS.get(args.timeframe, 1_800_000)
+    symbols = set()
+    for path in glob.glob(str(vb.RECORDS_PENDING_DIR / ("*_%s.json" % args.timeframe))):
+        parts = os.path.basename(path).split("_")
+        if len(parts) >= 4:
+            symbols.add(parts[-2])
+    print("加载 %d 个品种的 K 线时间线..." % len(symbols), flush=True)
+    timelines = {s: load_timeline(s, args.timeframe) for s in sorted(symbols)}
     names = pick_records(
         args.count, args.timeframe, args.per_symbol,
-        days=args.days, directional_only=not args.allow_neutral,
+        days=args.days, directional_only=args.directional_only,
+        timelines={(s, args.timeframe): tl for s, tl in timelines.items()},
+        horizon=args.horizon, bar_ms=bar_ms,
     )
     print("选中记录 %d 条:" % len(names))
     for n in names:
@@ -214,9 +257,7 @@ def main():
         print("没有成功的记录")
         return 1
 
-    # ---- 用后续真实 K 线作裁判 ----
-    bar_ms = BAR_MS.get(args.timeframe, 1_800_000)
-    timelines = {}
+    # ---- 用后续真实 K 线作裁判 (timelines / bar_ms 在选样阶段已建好) ----
     scored = []
     for data in results:
         key = (data["symbol"], data["timeframe"])
