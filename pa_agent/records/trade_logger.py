@@ -28,6 +28,26 @@ logger = logging.getLogger(__name__)
 
 _TRADE_RECORDS_DIR = Path("trade_records")
 
+
+def latest_chart_image(symbol: str, timeframe: str) -> Path | None:
+    """Newest chart PNG for a symbol/timeframe pair, or None.
+
+    Public query interface for the image-naming convention documented in the
+    module docstring; callers (notify/pipeline) must not glob the records
+    directory themselves.
+    """
+    safe_sym = str(symbol or "").replace("/", "-").replace("\\", "-")
+    safe_tf = str(timeframe or "").replace("/", "-")
+    try:
+        candidates = sorted(
+            _TRADE_RECORDS_DIR.glob(f"{safe_sym}_{safe_tf}_*.png"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    return candidates[0] if candidates else None
+
 # Maximum bars to show in the chart image
 _CHART_MAX_BARS = 50
 

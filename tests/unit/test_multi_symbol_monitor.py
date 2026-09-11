@@ -14,11 +14,32 @@ from pa_agent.monitoring.cli import format_decision_result
 from pa_agent.monitoring.service import (
     MultiSymbolMonitor,
     _default_validate_symbols,
-    _frame_atr_pct,
-    _signal_notification_allowed,
     next_poll_at,
     timeframe_seconds,
 )
+from pa_agent.trading.signal_pipeline import (
+    OrderSignal,
+    frame_atr_pct as _frame_atr_pct,
+    signal_notification_allowed as _signal_notification_allowed,
+)
+
+
+def _pipeline_signal(
+    decision: dict, *, symbol: str = "BTCUSDT", timeframe: str = "15m"
+) -> OrderSignal:
+    """Build an OrderSignal shaped like the ones monitor/GUI hand the pipeline."""
+    frame = _order_frame() if symbol == "BTCUSDT" else None
+    return OrderSignal(
+        decision=decision,
+        inner=decision["decision"],
+        symbol=symbol,
+        timeframe=timeframe,
+        frame=frame,
+        stage1_diagnosis={"direction": "up"},
+        previous_record=None,
+        decision_stance="balanced",
+        model_name="test-model",
+    )
 
 
 class FakeSource(DataSource):
@@ -618,15 +639,6 @@ def _order_decision() -> dict:
     }
 
 
-def _record_double() -> object:
-    meta = type(
-        "Meta",
-        (),
-        {"decision_stance": "balanced", "ai_provider": {"model": "test-model"}},
-    )()
-    return type("Record", (), {"meta": meta, "stage1_diagnosis": {"direction": "up"}})()
-
-
 def test_monitor_auto_execution_calls_executor_and_logger(tmp_path: Path, monkeypatch) -> None:
     """When enabled, _save_order_opportunity wires through to the executor."""
     settings = _settings(MonitorTarget(symbol="BTCUSDT", timeframe="15m"))
@@ -654,11 +666,9 @@ def test_monitor_auto_execution_calls_executor_and_logger(tmp_path: Path, monkey
         analyze=lambda _frame, **_kw: _order_decision(),
     )
 
-    ret = monitor._save_order_opportunity(
-        _order_frame(), _order_decision(), _order_decision()["decision"], _record_double()
-    )
+    ret = monitor._signal_pipeline.dispatch(_pipeline_signal(_order_decision()))
 
-    assert ret is not None and ret.status == "dry_run"
+    assert ret.exec_result is not None and ret.exec_result.status == "dry_run"
     assert calls and calls[0]["analysis_symbol"] == "BTCUSDT"
     assert calls[0]["inner"]["order_type"] == "市价单"
     assert recorded and recorded[0]["meta_symbol"] == "BTCUSDT"
@@ -692,10 +702,8 @@ def test_monitor_auto_execution_disabled_by_default_returns_skipped(
 
     assert result.status == "skipped"
     assert result.reason == "Binance Testnet automation disabled"
-    # The monitor helper itself must not raise when pointing at the real executor.
-    monitor._save_order_opportunity(
-        _order_frame(), _order_decision(), _order_decision()["decision"], _record_double()
-    )
+    # The pipeline itself must not raise when pointing at the real executor.
+    monitor._signal_pipeline.dispatch(_pipeline_signal(_order_decision()))
 
 
 def test_save_order_opportunity_lifts_stop_to_atr_floor_before_record(
@@ -761,11 +769,20 @@ def test_save_order_opportunity_lifts_stop_to_atr_floor_before_record(
         analyze=lambda _frame, **_kw: decision,
     )
 
-    ret = monitor._save_order_opportunity(
-        frame, decision, decision["decision"], _record_double()
+    signal = OrderSignal(
+        decision=decision,
+        inner=decision["decision"],
+        symbol="XRPUSDT",
+        timeframe="30m",
+        frame=frame,
+        stage1_diagnosis=None,
+        previous_record=None,
+        decision_stance="balanced",
+        model_name="test-model",
     )
+    ret = monitor._signal_pipeline.dispatch(signal)
 
-    assert ret is not None and ret.status == "submitted"
+    assert ret.exec_result is not None and ret.exec_result.status == "submitted"
     assert recorded and recorded[0]["decision_inner"]["stop_loss_price"] == 1.4274
     assert calls and calls[0]["stop_loss_price"] == 1.4274
 
@@ -827,12 +844,16 @@ def test_rejected_execution_skips_order_signal_push(tmp_path: Path, monkeypatch)
             "pa_agent.notify.%s.send_order_signal" % mod,
             lambda _m=mod, **_kw: calls.append(_m) or True,
         )
-    monitor = _notify_monitor(tmp_path)
-    out = monitor._notify_order_signal(
-        _order_frame(), _order_decision(), _order_decision()["decision"],
-        _Res("rejected", "Stop loss too close to entry (0.2% < 0.4% minimum)"),
+    monkeypatch.setattr(
+        "pa_agent.records.trade_logger.save_trade_record", lambda **_kw: None
     )
-    assert out == _order_decision()
+    monkeypatch.setattr(
+        "pa_agent.trading.binance_usdm_testnet.execute_market_signal",
+        lambda *_a, **_kw: _Res("rejected", "Stop loss too close to entry (0.2% < 0.4% minimum)"),
+    )
+    monitor = _notify_monitor(tmp_path)
+    out = monitor._signal_pipeline.dispatch(_pipeline_signal(_order_decision()))
+    assert out.exec_result is not None and out.exec_result.status == "rejected"
     assert calls == [], "rejected 的信号不得推送任何渠道"
 
 
@@ -843,10 +864,15 @@ def test_successful_execution_still_pushes_order_signal(tmp_path: Path, monkeypa
             "pa_agent.notify.%s.send_order_signal" % mod,
             lambda _m=mod, **_kw: calls.append(_m) or True,
         )
-    monitor = _notify_monitor(tmp_path)
-    monitor._notify_order_signal(
-        _order_frame(), _order_decision(), _order_decision()["decision"], _Res("submitted")
+    monkeypatch.setattr(
+        "pa_agent.records.trade_logger.save_trade_record", lambda **_kw: None
     )
+    monkeypatch.setattr(
+        "pa_agent.trading.binance_usdm_testnet.execute_market_signal",
+        lambda *_a, **_kw: _Res("submitted"),
+    )
+    monitor = _notify_monitor(tmp_path)
+    monitor._signal_pipeline.dispatch(_pipeline_signal(_order_decision()))
     assert sorted(calls) == ["feishu_notifier", "pushplus_notifier", "telegram_notifier"]
 
 

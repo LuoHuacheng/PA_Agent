@@ -43,7 +43,6 @@ _TIMEFRAME_SECONDS: dict[str, int] = {
     "1d": 86400,
     "1w": 604800,
 }
-_ORDER_OPPORTUNITY_TYPES = frozenset({"限价单", "突破单", "市价单"})
 
 
 def timeframe_seconds(timeframe: str) -> int:
@@ -118,54 +117,6 @@ def _default_validate_symbols(symbols: list[str], settings: Settings) -> list[st
     return valid
 
 
-def _has_order_opportunity(decision: dict[str, Any], confidence_threshold: int) -> bool:
-    """Return whether a decision is eligible for alert-only notification."""
-    if str(decision.get("order_type") or "") not in _ORDER_OPPORTUNITY_TYPES:
-        return False
-    try:
-        confidence = int(float(str(decision.get("trade_confidence") or "")))
-    except (TypeError, ValueError):
-        return False
-    return confidence >= confidence_threshold
-
-
-def _frame_atr_pct(frame: Any) -> float | None:
-    """Latest analyzed-bar ATR14 as a percent of its close; None when unavailable.
-
-    ATR is already computed on the analysis frame (IndicatorBundle.atr14,
-    newest-first); this helper only converts it to a percentage so the executor
-    can apply the dynamic stop-distance floor without any extra API request.
-    """
-    indicators = getattr(frame, "indicators", None)
-    if indicators is None:
-        return None
-    atr14 = tuple(getattr(indicators, "atr14", ()) or ())
-    bars = tuple(getattr(frame, "bars", ()) or ())
-    if not atr14 or not bars:
-        return None
-    try:
-        atr = float(atr14[0])
-        close = float(bars[0].close)
-    except (TypeError, ValueError, IndexError):
-        return None
-    if atr != atr or close <= 0:  # NaN during ATR warm-up
-        return None
-    return atr / close * 100.0
-
-
-def _signal_notification_allowed(exec_result: Any) -> bool:
-    """Whether the order-signal push should still be sent after execution.
-
-    A rejected execution (stop too close, whitelist, trader equation, duplicate
-    position, ...) means no order is working, so announcing the signal as if it
-    were live is misleading. Every other status - submitted, pending, dry_run,
-    skipped (disabled/cooldown) and failed - keeps the notification; dry-run
-    and disabled still feed the human pipeline and failures carry their own
-    alert.
-    """
-    return exec_result is None or getattr(exec_result, "status", "") != "rejected"
-
-
 @dataclass
 class _TargetState:
     target: MonitorTarget
@@ -233,6 +184,12 @@ class MultiSymbolMonitor:
         self._light_quiet: dict[str, int] = {}
         #: Direction-gate rejection counters keyed by gate name (G1/G2...).
         self._direction_gate_stats: dict[str, int] = {}
+        from pa_agent.trading.signal_pipeline import SignalPipeline
+
+        #: 统一开仓管线：机会判定/方向闸门/落盘/执行/通知只在这一处。
+        self._signal_pipeline = SignalPipeline(
+            settings, on_gate_hit=self._bump_direction_gate_stats
+        )
         self._load_state()
 
         for target in self._cfg.targets:
@@ -697,21 +654,28 @@ class MultiSymbolMonitor:
         if not isinstance(decision, dict):
             return None
         inner = decision.get("decision") or {}
-        from pa_agent.ai.decision_stance import confidence_threshold_for_stance
-        threshold = confidence_threshold_for_stance(self._settings.general.decision_stance)
-        if not _has_order_opportunity(inner, threshold):
-            return decision
-        if self._blocked_by_direction_gates(frame, inner, previous_record):
-            return decision
+        # 统一安全管线：置信度机会判定、方向闸门、atr 注入/止损下限抬升、
+        # 落盘、执行、失败告警与信号推送全部在 SignalPipeline.dispatch 内。
+        # 默认配置 binance_usdm_testnet.enabled=False 时执行层自行跳过。
+        meta = getattr(record, "meta", None)
+        provider = getattr(meta, "ai_provider", None) or {}
+        from pa_agent.trading.signal_pipeline import OrderSignal
 
-        # Persist a trade record and (when configured) auto-execute the Testnet
-        # market order. Both are best-effort: a failure never disrupts analysis
-        # or notifications. The default settings keep automated execution
-        # disabled (binance_usdm_testnet.enabled=False), so this is a no-op
-        # unless the operator explicitly enables it.
-        exec_result = None
+        pipeline_signal = OrderSignal(
+            decision=decision,
+            inner=inner,
+            symbol=frame.symbol,
+            timeframe=str(getattr(frame, "timeframe", "") or ""),
+            frame=frame,
+            stage1_diagnosis=getattr(record, "stage1_diagnosis", None),
+            previous_record=previous_record,
+            decision_stance=str(getattr(meta, "decision_stance", "") or ""),
+            model_name=(
+                str(provider.get("model") or "") if isinstance(provider, dict) else ""
+            ),
+        )
         try:
-            exec_result = self._save_order_opportunity(frame, decision, inner, record)
+            self._signal_pipeline.dispatch(pipeline_signal)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Monitor trade-record/execution failed for %s %s: %s",
@@ -719,118 +683,12 @@ class MultiSymbolMonitor:
                 frame.timeframe,
                 exc,
             )
-
-        # 被下单检验拒绝的信号不推通知（避免"像有单在跑"的误导）；dry_run/
-        # disabled/成功/失败等其余状态照常推送。
-        return self._notify_order_signal(frame, decision, inner, exec_result)
-
-    def _notify_order_signal(
-        self, frame: Any, decision: dict, inner: dict, exec_result: Any
-    ) -> dict:
-        """Push the order-signal alert unless the execution was rejected.
-
-        A rejected execution (stop too close, whitelist, trader equation,
-        duplicate position, ...) means no order is working, so the signal push
-        is skipped to avoid announcing a plan as if it were live. Dry-run /
-        disabled executions keep feeding the human pipeline and failed
-        executions carry their own dedicated alert.
-        """
-        if not _signal_notification_allowed(exec_result):
-            logger.info(
-                "跳过被拒信号的推送 %s %s (status=%s reason=%s)",
-                frame.symbol,
-                frame.timeframe,
-                getattr(exec_result, "status", "?"),
-                getattr(exec_result, "reason", ""),
-            )
-            return decision
-        from pa_agent.notify.feishu_notifier import send_order_signal as send_feishu
-        from pa_agent.notify.pushplus_notifier import send_order_signal as send_pushplus
-        from pa_agent.notify.telegram_notifier import send_order_signal as send_telegram
-
-        feishu_sent = send_feishu(
-            decision_inner=inner,
-            stage2_full=decision,
-            symbol=frame.symbol,
-            timeframe=frame.timeframe,
-            settings=self._settings,
-        )
-        pushplus_sent = send_pushplus(
-            decision_inner=inner,
-            stage2_full=decision,
-            symbol=frame.symbol,
-            timeframe=frame.timeframe,
-            settings=self._settings,
-        )
-        telegram_sent = send_telegram(
-            decision_inner=inner,
-            stage2_full=decision,
-            symbol=frame.symbol,
-            timeframe=frame.timeframe,
-            settings=self._settings,
-        )
-        logger.info(
-            "Monitor notification outcomes for %s %s: feishu=%s pushplus=%s telegram=%s",
-            frame.symbol,
-            frame.timeframe,
-            feishu_sent,
-            pushplus_sent,
-            telegram_sent,
-        )
         return decision
 
-    def _blocked_by_direction_gates(
-        self, frame: Any, inner: dict, previous_record: Any
-    ) -> bool:
-        """Run direction-quality gates on an order decision.
-
-        Returns True when the decision must be blocked (mode=on). In dry_run
-        mode every rejection is logged and counted but the order still flows.
-        Best-effort: gate errors never block anything.
-        """
-        cfg = self._binance_cfg
-        mode = str(getattr(cfg, "direction_gates_mode", "off") or "off").strip()
-        if mode == "off":
-            return False
-        try:
-            from pa_agent.trading.direction_gates import evaluate_direction_gates
-            from pa_agent.util.price_tick import infer_price_tick_from_frame
-
-            tick = infer_price_tick_from_frame(frame)
-            if tick is None:
-                return False
-            reasons = evaluate_direction_gates(
-                decision=inner,
-                bars=getattr(frame, "bars", None),
-                tick=tick,
-                previous_record=previous_record,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Direction-gate evaluation failed for %s %s: %s",
-                frame.symbol,
-                frame.timeframe,
-                exc,
-            )
-            return False
-        if not reasons:
-            return False
-        gates = ",".join(sorted({str(r).split(":", 1)[0] for r in reasons}))
-        self._direction_gate_stats[gates] = self._direction_gate_stats.get(gates, 0) + 1
-        detail = "; ".join(reasons)
-        if mode == "dry_run":
-            logger.info(
-                "[方向闸门 dry-run] %s %s 命中 %s: %s",
-                frame.symbol,
-                frame.timeframe,
-                gates,
-                detail,
-            )
-            return False
-        logger.warning(
-            "[方向闸门] %s %s 拦截 %s: %s", frame.symbol, frame.timeframe, gates, detail
+    def _bump_direction_gate_stats(self, gates_key: str) -> None:
+        self._direction_gate_stats[gates_key] = (
+            self._direction_gate_stats.get(gates_key, 0) + 1
         )
-        return True
 
     def _fetch_htf_context(self, state: _TargetState, symbol: str, timeframe: str) -> str:
         """D1: fetch higher-timeframe bars and summarize them programmatically.
@@ -1055,103 +913,6 @@ class MultiSymbolMonitor:
             )
         except Exception:
             logger.exception("Structure-exit notice failed for %s", frame.symbol)
-
-    def _save_order_opportunity(self, frame: Any, decision: dict, inner: dict, record: Any) -> Any:
-        """Persist the trade record and auto-execute the Testnet market signal."""
-        from pa_agent.records.trade_logger import save_trade_record
-        from pa_agent.trading.binance_usdm_testnet import execute_market_signal
-
-        meta = getattr(record, "meta", None)
-        decision_stance = ""
-        model_name = ""
-        if meta is not None:
-            decision_stance = getattr(meta, "decision_stance", "") or ""
-            provider = getattr(meta, "ai_provider", None) or {}
-            if isinstance(provider, dict):
-                model_name = str(provider.get("model") or "")
-        flip_cooldown = int(getattr(self._settings.general, "structure_flip_cooldown_bars", 3) or 3)
-        exec_decision = dict(inner)
-        atr_pct = _frame_atr_pct(frame)
-        if atr_pct is not None:
-            exec_decision["atr_pct"] = atr_pct
-        # Plan B (止损距离下限前移): 结构止损低于执行层 ATR 动态下限时, 在落盘前
-        # 抬升止损到 tick 对齐下限, 消除"计划已记录、执行被 Stop loss too close
-        # to entry 拒绝"的断层(P0-2)。仅真实执行(非 dry-run/停用)时介入。
-        binance_cfg = self._binance_cfg
-        if (
-            atr_pct is not None
-            and str(inner.get("order_type") or "") in ("限价单", "市价单")
-            and getattr(binance_cfg, "enabled", False)
-            and not getattr(binance_cfg, "dry_run", False)
-            and not getattr(binance_cfg, "emergency_stop", False)
-        ):
-            try:
-                from pa_agent.trading.binance_usdm_testnet import (
-                    lift_stop_to_min_distance_floor,
-                )
-                from pa_agent.util.price_tick import infer_price_tick_from_frame
-
-                old_stop = inner.get("stop_loss_price")
-                if lift_stop_to_min_distance_floor(
-                    exec_decision,
-                    binance_cfg,
-                    tick=infer_price_tick_from_frame(frame),
-                ):
-                    inner["stop_loss_price"] = exec_decision["stop_loss_price"]
-                    logger.info(
-                        "计划止损抬升至 ATR 动态下限 %s %s: %s -> %s",
-                        frame.symbol,
-                        getattr(frame, "timeframe", ""),
-                        old_stop,
-                        inner["stop_loss_price"],
-                    )
-            except Exception as exc:  # 抬升失败不阻断记录/执行
-                logger.warning(
-                    "Stop-floor lift failed for %s %s: %s",
-                    frame.symbol,
-                    getattr(frame, "timeframe", ""),
-                    exc,
-                )
-        save_trade_record(
-            decision_inner=inner,
-            stage2_full=decision,
-            stage1_diagnosis=getattr(record, "stage1_diagnosis", None),
-            frame=frame,
-            meta_symbol=frame.symbol,
-            meta_timeframe=frame.timeframe,
-            decision_stance=decision_stance,
-            model_name=model_name,
-            structure_flip_cooldown_bars=flip_cooldown,
-        )
-        result = execute_market_signal(exec_decision, self._settings, analysis_symbol=frame.symbol)
-        logger.info(
-            f"Binance U本位 {self._binance_env.label_zh} 自动执行: status=%s symbol=%s reason=%s",
-            result.status,
-            result.symbol,
-            result.reason,
-        )
-        # A failed execution must not be silent: notify besides the signal message.
-        if result.status == "failed":
-            try:
-                from pa_agent.notify.telegram_notifier import send_execution_failure
-
-                failed_sent = send_execution_failure(
-                    symbol=frame.symbol,
-                    timeframe=getattr(frame, "timeframe", ""),
-                    status=result.status,
-                    reason=result.reason,
-                    settings=self._settings,
-                )
-                logger.info(
-                    "Monitor execution-failure notification for %s: telegram=%s",
-                    frame.symbol,
-                    failed_sent,
-                )
-            except Exception:  # noqa: BLE001 - best-effort alerting
-                logger.exception(
-                    "Execution-failure notification failed for %s", frame.symbol
-                )
-        return result
 
     @staticmethod
     def _key_text(key: tuple[str, str]) -> str:

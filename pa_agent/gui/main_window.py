@@ -3384,9 +3384,18 @@ class MainWindow(QMainWindow):
             self._bind_decision_tree(decision, stage1_diag or None)
             order = inner.get("order_type", "—")
             self._decision_badge.setText(f"决策: {order}")
-            if self._maybe_alert_order_opportunity(inner):
-                self._spawn_post_order_followup(inner, decision)
-
+            # 统一开仓管线：机会判定/门控/落盘/执行/通知都在 SignalPipeline。
+            # 用原始 stage2 内层 decision（而非 UI 合并载荷）作为执行面。
+            raw_inner = decision.get("decision") if isinstance(decision, dict) else {}
+            evaluation = self._signal_pipeline.evaluate(
+                raw_inner,
+                frame=getattr(self, "_last_analysis_frame", None),
+                previous_record=getattr(self, "_analysis_previous_record", None),
+            )
+            if evaluation.opportunity:
+                if not getattr(self, "_demo_mode", False):
+                    self._spawn_post_order_followup(raw_inner, decision)
+                self._maybe_alert_order_opportunity(inner)
             elif getattr(self, "_demo_mode", False):
                 self._present_decision_flow_playback(force_play=True)
 
@@ -3967,132 +3976,55 @@ class MainWindow(QMainWindow):
         return int(getattr(settings.general, "decision_confidence_threshold", 0))
 
     def _has_order_opportunity(self, decision_inner: dict) -> bool:
-        from pa_agent.gui.order_opportunity import has_order_opportunity
+        """机会判定已统一到 SignalPipeline（stance 档位 + 用户下限）。"""
+        return self._signal_pipeline.has_order_opportunity(decision_inner)
 
-        return has_order_opportunity(
-            decision_inner,
-            confidence_threshold=self._confidence_threshold(),
-        )
+    @property
+    def _signal_pipeline(self):
+        """统一开仓管线（GUI 与 monitor 共用同一实现，见 signal_pipeline.py）。"""
+        cached = getattr(self, "_signal_pipeline_obj", None)
+        if cached is None:
+            from pa_agent.trading.signal_pipeline import SignalPipeline
+
+            cached = SignalPipeline(getattr(self._ctx, "settings", None))
+            self._signal_pipeline_obj = cached
+        return cached
 
     def _spawn_post_order_followup(self, inner: dict, decision: dict) -> None:
-        """Run trade CSV/chart + notifications off the UI thread (can take seconds)."""
-        import threading
+        """把落盘/执行/通知交给统一管线，在后台线程跑（可耗时数秒）。"""
+        from pa_agent.trading.signal_pipeline import OrderSignal
 
         settings = getattr(self._ctx, "settings", None)
-        model_name = ""
-        meta_symbol = ""
-        meta_timeframe = ""
-        decision_stance = ""
-        if settings is not None:
-            model_name = getattr(settings.provider, "model", "") or ""
-            meta_symbol = getattr(settings.general, "last_symbol", "") or ""
-            meta_timeframe = getattr(settings.general, "last_timeframe", "") or ""
-            decision_stance = getattr(settings.general, "decision_stance", "") or ""
-        stage1_diag = self._current_stage1_diagnosis() or None
         frame = getattr(self, "_last_analysis_frame", None)
-
-        def _run() -> None:
-            try:
-                from pa_agent.records.trade_logger import save_trade_record
-
-                save_trade_record(
-                    decision_inner=inner,
-                    stage2_full=decision,
-                    stage1_diagnosis=stage1_diag,
-                    frame=frame,
-                    meta_symbol=meta_symbol,
-                    meta_timeframe=meta_timeframe,
-                    decision_stance=decision_stance,
-                    model_name=model_name,
-                    structure_flip_cooldown_bars=int(
-                        getattr(settings.general, "structure_flip_cooldown_bars", 3) or 3
-                    )
-                    if settings is not None
-                    else 3,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Trade record logging failed: %s", exc)
-
-            try:
-                from pa_agent.trading.binance_usdm_testnet import execute_market_signal
-
-                result = execute_market_signal(inner, settings, analysis_symbol=meta_symbol)
-                if settings is not None:
-                    from pa_agent.trading.binance_env import resolve_env
-
-                    exec_env_label = resolve_env(settings).label_zh
-                else:
-                    exec_env_label = "测试网"
-                logger.info(
-                    f"Binance U本位 {exec_env_label} 自动执行: status=%s symbol=%s reason=%s",
-                    result.status,
-                    result.symbol,
-                    result.reason,
-                )
-                if result.status == "failed":
-                    try:
-                        from pa_agent.notify.telegram_notifier import send_execution_failure
-
-                        send_execution_failure(
-                            symbol=meta_symbol,
-                            timeframe=meta_timeframe,
-                            status=result.status,
-                            reason=result.reason,
-                            settings=settings,
-                        )
-                    except Exception:  # noqa: BLE001
-                        logger.exception("Execution-failure notification failed")
-            except Exception as exc:  # noqa: BLE001
-                # Execution must never disrupt analysis, records, or notifications.
-                logger.exception("Binance U本位 Testnet 自动执行异常: %s", exc)
-
-            try:
-                from pa_agent.notify.feishu_notifier import send_order_signal as send_feishu_order
-                from pa_agent.notify.pushplus_notifier import send_order_signal as send_pushplus_order
-                from pa_agent.records.trade_logger import _TRADE_RECORDS_DIR
-
-                safe_sym = meta_symbol.replace("/", "-").replace("\\", "-")
-                safe_tf = meta_timeframe.replace("/", "-")
-                img_glob = f"{safe_sym}_{safe_tf}_*.png"
-                candidates = sorted(
-                    _TRADE_RECORDS_DIR.glob(img_glob),
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True,
-                )
-                latest_img = candidates[0] if candidates else None
-
-                send_feishu_order(
-                    decision_inner=inner,
-                    stage2_full=decision,
-                    symbol=meta_symbol,
-                    timeframe=meta_timeframe,
-                    chart_image_path=latest_img,
-                    settings=settings,
-                )
-                from pa_agent.notify.pushplus_notifier import pushplus_is_active
-
-                if pushplus_is_active(settings):
-                    send_pushplus_order(
-                        decision_inner=inner,
-                        stage2_full=decision,
-                        symbol=meta_symbol,
-                        timeframe=meta_timeframe,
-                        settings=settings,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("下单信号通知失败（不影响主流程）: %s", exc)
-
-        threading.Thread(
-            target=_run,
-            name="post-order-followup",
-            daemon=True,
-        ).start()
+        # 品种必须来自被分析的 frame；frame 缺失时才退回 UI 状态。
+        general = getattr(settings, "general", None)
+        symbol = str(getattr(frame, "symbol", "") or "") or str(
+            getattr(general, "last_symbol", "") or ""
+        )
+        timeframe = str(getattr(frame, "timeframe", "") or "") or str(
+            getattr(general, "last_timeframe", "") or ""
+        )
+        signal = OrderSignal(
+            decision=decision,
+            inner=inner,
+            symbol=symbol,
+            timeframe=timeframe,
+            frame=frame,
+            stage1_diagnosis=self._current_stage1_diagnosis() or None,
+            previous_record=getattr(self, "_analysis_previous_record", None),
+            decision_stance=str(getattr(general, "decision_stance", "") or ""),
+            model_name=str(
+                getattr(getattr(settings, "provider", None), "model", "") or ""
+            ),
+        )
+        self._signal_pipeline.dispatch_async(signal)
 
     def _maybe_alert_order_opportunity(self, decision_inner: dict) -> bool:
-        """Beep, popup, and focus decision tab when stage-2 proposes an order."""
+        """Beep, popup, and focus decision tab when stage-2 proposes an order.
+
+        只管 UI 提醒；机会判定已由管线在 dispatch 前完成，这里不再重复门槛。
+        """
         if not self._order_opportunity_alert_enabled():
-            return False
-        if not self._has_order_opportunity(decision_inner):
             return False
 
         from pa_agent.gui.order_opportunity import (
