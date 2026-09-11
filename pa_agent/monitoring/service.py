@@ -900,7 +900,7 @@ class MultiSymbolMonitor:
         source = getattr(state, "source", None)
         if source is None:
             return ""
-        cfg = getattr(self._settings, "binance_usdm_testnet", None)
+        cfg = self._binance_cfg  # 环境感知: live 时读 live 节, 而非写死 testnet 节
         if cfg is None or not getattr(cfg, "enabled", False):
             return ""
         days = int(getattr(cfg, "trend_lookback_days", 7) or 7)
