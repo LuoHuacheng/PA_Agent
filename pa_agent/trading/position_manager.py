@@ -17,11 +17,10 @@ from typing import Any
 
 from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
 from pa_agent.trading import binance_env
-from pa_agent.trading.guard_loop import ErrorBudget
 from pa_agent.trading.binance_usdm_testnet import (
+    _STATE_STORE,
     BinanceAPIError,
     BinanceUSDMTestnetClient,
-    _STATE_STORE,
     _decimal_text,
     _drop_guard,
     _guard_enabled,
@@ -38,6 +37,7 @@ from pa_agent.trading.binance_usdm_testnet import (
     current_mark_price,
     current_position,
 )
+from pa_agent.trading.guard_loop import ErrorBudget
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ def _rehang_stop_candidates(
 _REHANG_SKIP_MARKERS = ('"-1111"', '"-2021"', "-1111", "-2021")
 
 
-def _stop_resting_alive(client: "BinanceUSDMTestnetClient", client_algo_id: str) -> bool:
+def _stop_resting_alive(client: BinanceUSDMTestnetClient, client_algo_id: str) -> bool:
     """True when the algo stop really rests on the exchange (NEW).
 
     Terminal/missing states (CANCELED/EXPIRED/triggered/unknown id) return
@@ -135,7 +135,7 @@ def _stop_resting_alive(client: "BinanceUSDMTestnetClient", client_algo_id: str)
 
 
 def _rehang_protective_stop(
-    client: "BinanceUSDMTestnetClient",
+    client: BinanceUSDMTestnetClient,
     *,
     symbol: str,
     side: str,
@@ -185,7 +185,7 @@ def _rehang_protective_stop(
 
 
 def _ensure_protective_stop(
-    client: "BinanceUSDMTestnetClient",
+    client: BinanceUSDMTestnetClient,
     *,
     symbol: str,
     record: dict[str, Any],
@@ -233,7 +233,7 @@ def _ensure_protective_stop(
 
 
 def _swap_stop_to_price(
-    client: "BinanceUSDMTestnetClient",
+    client: BinanceUSDMTestnetClient,
     *,
     symbol: str,
     side: str,
