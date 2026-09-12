@@ -33,6 +33,7 @@ from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
 from pa_agent.records import cancel_log
 from pa_agent.trading import binance_env
 from pa_agent.trading.binance_env import BinanceTradeEnv
+from pa_agent.trading.guard_loop import ErrorBudget
 from pa_agent.trading.rate_limit import parse_banned_until_ms, rate_limiter
 from pa_agent.trading.runtime_state import RuntimeStateStore as _RuntimeStateStore
 from pa_agent.util.trade_metrics import (
@@ -2218,7 +2219,7 @@ def _breakeven_guard_loop(
     the resting STOP algo order with one at the entry price (breakeven).
     Exits when the position is closed or the stop has been moved.
     """
-    consecutive_errors = 0
+    budget = ErrorBudget()
     while True:
         record = _read_guard(symbol)
         if record is None or record.get("moved"):
@@ -2243,14 +2244,14 @@ def _breakeven_guard_loop(
                 # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
                 _guard_rate_limit_wait(poll_seconds)
                 continue
-            consecutive_errors += 1
+            _exhausted = budget.record()
             logger.warning(
                 "Breakeven guard poll failed for %s (attempt %d): %s",
                 symbol,
-                consecutive_errors,
+                budget.count,
                 exc,
             )
-            if consecutive_errors >= 5:
+            if _exhausted:
                 logger.error(
                     "Breakeven guard gave up for %s after repeated API errors; "
                     "original stop stays in place",
@@ -2267,7 +2268,7 @@ def _breakeven_guard_loop(
             side=side,
             trigger=trigger,
         ):
-            consecutive_errors = 0
+            budget.reset()
             time.sleep(poll_seconds)
             continue
         # 移损临界区: 与 TP runner 互斥, 锁内重读注册表防双撤双挂。
@@ -2290,7 +2291,7 @@ def _breakeven_guard_loop(
                     symbol,
                     live_stop,
                 )
-                consecutive_errors = 0
+                budget.reset()
                 time.sleep(poll_seconds)
                 continue
             # 交易所只许一个同方向 closePosition STOP resting(-4130), 先挂新后撤旧
@@ -2318,7 +2319,7 @@ def _breakeven_guard_loop(
                     floor_pct=floor_pct,
                 )
                 if guard_status == "error":
-                    consecutive_errors += 1
+                    _exhausted = budget.record()
                     logger.error(
                         "Breakeven stop placement failed for %s (%s) and "
                         "re-hang verification failed: %s",
@@ -2326,7 +2327,7 @@ def _breakeven_guard_loop(
                         stop_algo_id,
                         guard_note,
                     )
-                    if consecutive_errors >= 5:
+                    if _exhausted:
                         logger.error(
                             "Breakeven guard gave up for %s after repeated errors; "
                             "record kept for restart resume",
@@ -2344,7 +2345,7 @@ def _breakeven_guard_loop(
                     )
                     _patch_guard(symbol, moved=True, stop_algo_id=guard_stop)
                     return
-                consecutive_errors += 1
+                _exhausted = budget.record()
                 logger.error(
                     "Breakeven stop placement failed for %s (%s), original stop "
                     "kept resting: %s",
@@ -2352,7 +2353,7 @@ def _breakeven_guard_loop(
                     stop_algo_id,
                     exc,
                 )
-                if consecutive_errors >= 5:
+                if _exhausted:
                     logger.error(
                         "Breakeven guard gave up placing breakeven stop for %s after "
                         "repeated errors; original stop stays in place",
@@ -2391,7 +2392,7 @@ def _tp_runner_loop(
     is hung so the remainder can run to the far target. When the position is
     fully closed the resting partial TP1 is cancelled and the record removed.
     """
-    consecutive_errors = 0
+    budget = ErrorBudget()
     while True:
         record = _read_guard(symbol)
         if record is None or record.get("partial_done"):
@@ -2420,14 +2421,14 @@ def _tp_runner_loop(
                 # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
                 _guard_rate_limit_wait(poll_seconds)
                 continue
-            consecutive_errors += 1
+            _exhausted = budget.record()
             logger.warning(
                 "TP runner poll failed for %s (attempt %d): %s",
                 symbol,
-                consecutive_errors,
+                budget.count,
                 exc,
             )
-            if consecutive_errors >= 5:
+            if _exhausted:
                 logger.error(
                     "TP runner gave up for %s after repeated API errors; "
                     "partial TP1 stays in place",
@@ -2451,14 +2452,14 @@ def _tp_runner_loop(
                         exc,
                     )
                 else:
-                    consecutive_errors += 1
+                    _exhausted = budget.record()
                     logger.error(
                         "TP runner cleanup failed for %s (partial TP1 %s): %s",
                         symbol,
                         tp_algo_id,
                         exc,
                     )
-                    if consecutive_errors >= 5:
+                    if _exhausted:
                         logger.error(
                             "TP runner gave up cleaning %s after repeated errors; "
                             "record kept so a restart resume can retry the cancel",
@@ -2477,7 +2478,7 @@ def _tp_runner_loop(
         # positionRisk 返回带符号 positionAmt(空单为负), qty 记的是正数量:
         # 必须比绝对值, 否则空单永远不等, 首轮就误判 TP1 已半平(2026-09-10 事故)。
         if abs(amount) == qty:
-            consecutive_errors = 0
+            budget.reset()
             time.sleep(poll_seconds)
             continue
         # TP1 半仓已触发(|amount| < qty): 进入 TP2 阶段。
@@ -2509,14 +2510,14 @@ def _tp_runner_loop(
                         exc,
                     )
                 else:
-                    consecutive_errors += 1
+                    _exhausted = budget.record()
                     logger.error(
                         "TP runner partial TP1 cancel failed for %s (%s): %s",
                         symbol,
                         current_tp,
                         exc,
                     )
-                    if consecutive_errors >= 5:
+                    if _exhausted:
                         logger.error(
                             "TP runner gave up clearing TP1 for %s after repeated "
                             "errors; original stop stays in place",
@@ -2551,7 +2552,7 @@ def _tp_runner_loop(
                     floor_pct=floor_pct,
                 )
                 if runner_status == "error":
-                    consecutive_errors += 1
+                    _exhausted = budget.record()
                     logger.error(
                         "TP runner: protective-stop verification failed for %s "
                         "(%s): %s",
@@ -2559,7 +2560,7 @@ def _tp_runner_loop(
                         current_stop,
                         runner_note,
                     )
-                    if consecutive_errors >= 5:
+                    if _exhausted:
                         logger.error(
                             "TP runner gave up verifying stop for %s after repeated "
                             "errors; record kept for restart resume",
@@ -2590,7 +2591,7 @@ def _tp_runner_loop(
                     floor_pct=floor_pct,
                 )
                 if runner_status == "error":
-                    consecutive_errors += 1
+                    _exhausted = budget.record()
                     logger.error(
                         "TP runner: protective-stop verification failed for %s "
                         "(%s): %s",
@@ -2598,7 +2599,7 @@ def _tp_runner_loop(
                         current_stop,
                         runner_note,
                     )
-                    if consecutive_errors >= 5:
+                    if _exhausted:
                         logger.error(
                             "TP runner gave up verifying stop for %s after repeated "
                             "errors; record kept for restart resume",
@@ -2627,14 +2628,14 @@ def _tp_runner_loop(
                             bridge_qty=abs(amount),
                         )
                     except BinanceAPIError as exc:
-                        consecutive_errors += 1
+                        _exhausted = budget.record()
                         logger.error(
                             "TP runner breakeven stop placement failed for %s "
                             "(kept original stop): %s",
                             symbol,
                             exc,
                         )
-                        if consecutive_errors >= 5:
+                        if _exhausted:
                             logger.error(
                                 "TP runner gave up placing breakeven stop for %s after "
                                 "repeated errors; original stop stays in place",
@@ -2659,13 +2660,13 @@ def _tp_runner_loop(
                     client_algo_id=new_tp_id,
                 )
             except BinanceAPIError as exc:
-                consecutive_errors += 1
+                _exhausted = budget.record()
                 logger.error(
                     "TP runner TP2 placement failed for %s: %s",
                     symbol,
                     exc,
                 )
-                if consecutive_errors >= 5:
+                if _exhausted:
                     logger.error(
                         "TP runner gave up placing TP2 for %s after repeated errors; "
                         "record kept for restart resume",
@@ -3183,7 +3184,7 @@ def _stop_watchdog_loop(
     position naked until the next restart. A missing stop is re-hung; when the
     position is flat the residual TP order is cancelled and the record dropped.
     """
-    consecutive_errors = 0
+    budget = ErrorBudget()
     unmoved_ticks = 0
     while True:
         record = _read_guard(symbol)
@@ -3204,14 +3205,14 @@ def _stop_watchdog_loop(
                 # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数.
                 _guard_rate_limit_wait(poll_seconds)
                 continue
-            consecutive_errors += 1
+            _exhausted = budget.record()
             logger.warning(
                 "Stop watchdog poll failed for %s (attempt %d): %s",
                 symbol,
-                consecutive_errors,
+                budget.count,
                 exc,
             )
-            if consecutive_errors >= 5:
+            if _exhausted:
                 logger.error(
                     "Stop watchdog gave up polling %s after repeated API errors; "
                     "record kept for restart resume",
@@ -3230,14 +3231,14 @@ def _stop_watchdog_loop(
                     client.cancel_algo_order(client_algo_id=tp_algo_id)
                 except BinanceAPIError as exc:
                     if not _is_missing_algo_order_error(exc):
-                        consecutive_errors += 1
+                        _exhausted = budget.record()
                         logger.error(
                             "Stop watchdog residual TP cancel failed for %s (%s): %s",
                             symbol,
                             tp_algo_id,
                             exc,
                         )
-                        if consecutive_errors >= 5:
+                        if _exhausted:
                             return
                         time.sleep(poll_seconds)
                         continue
@@ -3273,14 +3274,14 @@ def _stop_watchdog_loop(
                             floor_pct=floor_pct,
                         )
                     if status == "error":
-                        consecutive_errors += 1
+                        _exhausted = budget.record()
                         logger.error(
                             "Stop watchdog pre-move verify/re-hang failed for %s (%s): %s",
                             symbol,
                             current_stop,
                             note,
                         )
-                        if consecutive_errors >= 5:
+                        if _exhausted:
                             logger.error(
                                 "Stop watchdog gave up polling %s after repeated API "
                                 "errors before the stop move; record kept for restart resume",
@@ -3288,7 +3289,7 @@ def _stop_watchdog_loop(
                             )
                             return
                     else:
-                        consecutive_errors = 0
+                        budget.reset()
                         if status == "rehung":
                             logger.warning(
                                 "Stop watchdog: %s pre-move recorded stop %s was gone; %s",
@@ -3316,14 +3317,14 @@ def _stop_watchdog_loop(
                 floor_pct=floor_pct,
             )
         if status == "error":
-            consecutive_errors += 1
+            _exhausted = budget.record()
             logger.error(
                 "Stop watchdog verify/re-hang failed for %s (%s): %s",
                 symbol,
                 current_stop,
                 note,
             )
-            if consecutive_errors >= 5:
+            if _exhausted:
                 logger.error(
                     "Stop watchdog gave up for %s after repeated errors; "
                     "record kept for restart resume",
@@ -3339,7 +3340,7 @@ def _stop_watchdog_loop(
                 current_stop,
                 note,
             )
-        consecutive_errors = 0
+        budget.reset()
         time.sleep(poll_seconds)
 
 
