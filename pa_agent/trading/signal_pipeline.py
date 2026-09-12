@@ -372,45 +372,17 @@ class SignalPipeline:
                 getattr(exec_result, "reason", ""),
             )
             return False
-        outcomes: dict[str, bool] = {}
-        try:
-            from pa_agent.notify.feishu_notifier import send_order_signal as send_feishu
-            from pa_agent.records.trade_logger import latest_chart_image
+        from pa_agent.notify.dispatcher import send_order_signal_all
+        from pa_agent.records.trade_logger import latest_chart_image
 
-            outcomes["feishu"] = send_feishu(
-                decision_inner=signal.inner,
-                stage2_full=signal.decision,
-                symbol=signal.symbol,
-                timeframe=signal.timeframe,
-                chart_image_path=latest_chart_image(signal.symbol, signal.timeframe),
-                settings=self._settings,
-            )
-        except Exception as exc:
-            logger.warning("feishu 下单信号通知失败（不影响主流程）: %s", exc)
-        try:
-            from pa_agent.notify.pushplus_notifier import send_order_signal as send_pushplus
-
-            outcomes["pushplus"] = send_pushplus(
-                decision_inner=signal.inner,
-                stage2_full=signal.decision,
-                symbol=signal.symbol,
-                timeframe=signal.timeframe,
-                settings=self._settings,
-            )
-        except Exception as exc:
-            logger.warning("pushplus 下单信号通知失败（不影响主流程）: %s", exc)
-        try:
-            from pa_agent.notify.telegram_notifier import send_order_signal as send_telegram
-
-            outcomes["telegram"] = send_telegram(
-                decision_inner=signal.inner,
-                stage2_full=signal.decision,
-                symbol=signal.symbol,
-                timeframe=signal.timeframe,
-                settings=self._settings,
-            )
-        except Exception as exc:
-            logger.warning("telegram 下单信号通知失败（不影响主流程）: %s", exc)
+        outcomes = send_order_signal_all(
+            decision_inner=signal.inner,
+            stage2_full=signal.decision,
+            symbol=signal.symbol,
+            timeframe=signal.timeframe,
+            settings=self._settings,
+            chart_image_path=latest_chart_image(signal.symbol, signal.timeframe),
+        )
         logger.info(
             "Order-signal notification outcomes for %s %s: %s",
             signal.symbol,
