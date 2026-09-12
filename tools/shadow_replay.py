@@ -426,6 +426,15 @@ def _is_counter_trend(row, neutral):
     return (row["direction"] == "做多") != (pct > 0)
 
 
+def _plan_hour_utc8(record_ms: int) -> int:
+    return datetime.fromtimestamp(record_ms / 1000, TZ8).hour
+
+
+def _bad_session_ms(record_ms: int) -> bool:
+    """04:00-11:59 UTC+8 = 美盘尾段+亚盘早段低流动性窗口 (2026-09-13 分桶: -290U/-500U)."""
+    return 4 <= _plan_hour_utc8(record_ms) < 12
+
+
 def report_variants(rows, neutral_list=()):
     """同一批模拟成交上比较各个过滤条件, 看边际收益."""
     filters = [
@@ -487,8 +496,12 @@ def report_matrix(plans_with_tl, *, args, fee_rate, maker_fee, taker_fee):
         ("全部", lambda r: True),
         ("禁空", lambda r: r["direction"] == "做多"),
         ("禁trending_tr", lambda r: r["cycle_position"] != "trending_tr"),
+        ("禁04-12时", lambda r: not r.get("_bad_session", False)),
         ("禁空+禁trend_tr",
          lambda r: r["direction"] == "做多" and r["cycle_position"] != "trending_tr"),
+        ("禁空+禁trend_tr+禁04-12",
+         lambda r: r["direction"] == "做多" and r["cycle_position"] != "trending_tr"
+         and not r.get("_bad_session", False)),
         ("禁空+禁trend_tr+禁neutral",
          lambda r: r["direction"] == "做多" and r["cycle_position"] != "trending_tr"
          and (r.get("diag_direction") or "") != "neutral"),
@@ -498,6 +511,7 @@ def report_matrix(plans_with_tl, *, args, fee_rate, maker_fee, taker_fee):
           % (maker_fee, taker_fee))
     print("%-6s %-4s | %-22s %5s %9s %7s %9s" %
           ("保本", "入场", "环境门控", "笔数", "净U", "胜率", "净/风险"))
+    base_rows: list[dict] = []
     for be_name, be_tr in BE_MODES:
         for gtx in (False, True):
             rows = []
@@ -518,8 +532,11 @@ def report_matrix(plans_with_tl, *, args, fee_rate, maker_fee, taker_fee):
                     "direction": plan.direction,
                     "cycle_position": plan.cycle_position,
                     "diag_direction": plan.diag_direction,
+                    "_bad_session": _bad_session_ms(plan.record_ms),
                     "net": out.net, "risk_usdt": args.risk_usdt,
                 })
+            if be_name == "off" and not gtx:
+                base_rows = rows
             for gname, gpred in gate_filters:
                 sub = [r for r in rows if gpred(r)]
                 if not sub:
@@ -530,6 +547,14 @@ def report_matrix(plans_with_tl, *, args, fee_rate, maker_fee, taker_fee):
                 print("%-6s %-4s | %-22s %5d %+9.2f %6.0f%% %+9.2f" %
                       (be_name, "gtx" if gtx else "gtc", gname,
                        len(sub), net, wr, net / risk if risk else 0.0))
+    # 时段过滤与 trending_tr 的独立性: 若高度重叠, 两闸门叠加无增量。
+    if base_rows:
+        tt = sum(1 for r in base_rows if r["cycle_position"] == "trending_tr")
+        bs = sum(1 for r in base_rows if r["_bad_session"])
+        both = sum(1 for r in base_rows
+                   if r["cycle_position"] == "trending_tr" and r["_bad_session"])
+        print("时段×trending_tr 重叠度(成交): trending_tr %d, 04-12时 %d, 两者皆 %d "
+              "(交集占比 %.0f%%)" % (tt, bs, both, (both / min(tt, bs) * 100) if min(tt, bs) else 0))
     print()
 
 
@@ -580,6 +605,124 @@ def summarize(rows, key):
         net, (net / len(total)) if total else 0,
         (sum(1 for r in total if r["net"] > 0) / len(total) * 100) if total else 0,
         (net / risk) if risk else 0))
+
+
+def generate_baseline_plans(timeline, symbol, timeframe, *,
+                            days, ema_period=20, target_rr=2.0,
+                            stop_atr_mult=1.0, per_day=1):
+    """无模型对照流: 机械趋势回踩信号, 与模型计划共用同一模拟引擎.
+
+    规则(全程序化, 零模型输入):
+      - EMA%d 趋势过滤: 收盘 > EMA 且 EMA 较上一根上升 → 只做多; 反之只做空;
+      - 回踩触发: 当根最低价触及 EMA(多) / 最高价触及 EMA(空) → 计划挂单;
+      - entry = EMA 值, stop = entry ∓ stop_atr_mult×ATR14, target = entry ± target_rr×risk;
+      - 同一 symbol/timeframe 同时只持一仓, 每日至多 per_day 笔.
+    目的不是做策略, 而是给"模型计划"一个同市况、同成本的哑巴对照组:
+    若哑巴组也大亏 → 亏损主要来自市况/成本; 若哑巴组明显好于模型 → 模型是负边际本体.
+    """
+    plans: list[Plan] = []
+    if len(timeline) < ema_period + 60:
+        return plans
+    closes = [bar[4] for bar in timeline]
+    # EMA 序列
+    k = 2.0 / (ema_period + 1)
+    ema = [closes[0]]
+    for c in closes[1:]:
+        ema.append(ema[-1] + k * (c - ema[-1]))
+    # ATR14 序列(简化: 真实波幅均值)
+    atrs: list[float | None] = [None] * len(timeline)
+    trs: list[float] = []
+    for i in range(1, len(timeline)):
+        _ts, o, h, low, c = timeline[i]
+        prev_c = timeline[i - 1][4]
+        trs.append(max(h - low, abs(h - prev_c), abs(low - prev_c)))
+        window = trs[-14:]
+        atrs[i] = sum(window) / len(window)
+    cutoff = _cutoff_from_days(days) if days else None
+    cooldown_until_idx = -1
+    day_key = None
+    day_count = 0
+    for i in range(ema_period + 1, len(timeline) - 5):
+        ts = timeline[i][0]
+        if cutoff and datetime.fromtimestamp(ts / 1000, TZ8).strftime("%Y-%m-%d") < cutoff:
+            continue
+        e_now, e_prev = ema[i], ema[i - 1]
+        c_now = closes[i]
+        up = c_now > e_now > e_prev
+        down = c_now < e_now < e_prev
+        if not up and not down:
+            continue
+        dk = datetime.fromtimestamp(ts / 1000, TZ8).strftime("%Y-%m-%d")
+        if dk != day_key:
+            day_key, day_count = dk, 0
+        if day_count >= per_day or i <= cooldown_until_idx:
+            continue
+        side = 1 if up else -1
+        entry = ema[i]
+        atr = atrs[i] or 0.0
+        if atr <= 0:
+            continue
+        stop = entry - side * stop_atr_mult * atr
+        target = entry + side * target_rr * (stop_atr_mult * atr)
+        plans.append(Plan(
+            path="baseline", symbol=symbol, timeframe=timeframe,
+            record_ms=ts, order_type="限价单",
+            direction="做多" if side == 1 else "做空",
+            entry=entry, stop=stop, target=target, target2=None,
+            cycle_position="baseline", diag_direction="baseline",
+            trade_conf=None, diag_conf=None, est_win_rate=None,
+        ))
+        day_count += 1
+        # 持仓冷却: 粗略按 8 根 K 计, 与模拟互斥近似
+        cooldown_until_idx = i + 8
+    return plans
+
+
+def run_baseline(args):
+    """哑巴对照组: 同引擎同成本, 机械规则 vs 模型计划. --baseline 触发."""
+    symbols = {s.strip().upper() for s in args.symbols.split(",") if s.strip()} or None
+    plans = load_plans(PENDING_DIR, days=args.days, symbols=symbols)
+    timelines = merge_timelines(plans)
+    fee_rate = args.fee_rate if args.fee_rate is not None else fee_rate_from_outcomes(OUTCOMES_CSV)
+    maker_fee = args.maker_fee if args.maker_fee is not None else fee_rate * 0.4
+    taker_fee = args.taker_fee if args.taker_fee is not None else fee_rate * 0.8
+    be_tr = None
+    if getattr(args, "baseline_be", "0.5r") == "0.5r":
+        be_tr = 0.5
+    elif getattr(args, "baseline_be", "") == "1r":
+        be_tr = 1.0
+
+    def _simulate(plan, tl):
+        return simulate_plan(
+            plan, tl, risk_usdt=args.risk_usdt, fee_rate=fee_rate,
+            leverage=args.leverage, margin_usdt=args.margin_usdt,
+            partial_pct=args.partial_pct, timeout_min=args.timeout_min,
+            time_stop_min=args.time_stop_min,
+            min_stop_pct=args.min_stop_pct, min_stop_atr=args.min_stop_atr,
+            be_trigger=be_tr, entry_gtx=True,
+            maker_fee=maker_fee, taker_fee=taker_fee,
+        )
+
+    print("=== 无模型对照流 (EMA%d 回踩, RR=%.1f, be=%s, gtx) ==="
+          % (20, args.baseline_rr, getattr(args, "baseline_be", "0.5r")))
+    b_rows = []
+    for (sym, tf), tl in sorted(timelines.items()):
+        b_plans = generate_baseline_plans(
+            tl, sym, tf, days=args.days, target_rr=args.baseline_rr)
+        for bp in b_plans:
+            out = _simulate(bp, tl)
+            if out.filled:
+                b_rows.append((sym, out.net))
+    if not b_rows:
+        print("  基线流无成交")
+        return 0
+    net = sum(n for _s, n in b_rows)
+    wr = sum(1 for _s, n in b_rows if n > 0) / len(b_rows) * 100
+    print("  成交 %d 笔 | 净 %+.2fU | 均 %+.2fU | 胜率 %.0f%% | 净/风险 %+.2f"
+          % (len(b_rows), net, net / len(b_rows), wr,
+             net / (len(b_rows) * args.risk_usdt)))
+    print("  对照: 同窗口模型计划(见 --replay 输出) — 两者差值 = 模型贡献的方向性估计")
+    return 0
 
 
 def run_replay(args):
@@ -742,6 +885,10 @@ def main():
     ap.add_argument("--timeout-min", type=float, default=DEFAULT_TIMEOUT_MIN)
     ap.add_argument("--time-stop-min", type=float, default=DEFAULT_TIME_STOP_MIN)
     ap.add_argument("--fee-rate", type=float, default=None)
+    ap.add_argument("--baseline", action="store_true",
+                    help="无模型对照流: 机械规则信号走同一引擎, 量化模型贡献")
+    ap.add_argument("--baseline-rr", type=float, default=2.0)
+    ap.add_argument("--baseline-be", default="0.5r", choices=["off", "0.5r", "1r"])
     ap.add_argument("--matrix", action="store_true",
                     help="输出 保本移损×入场方式×环境门控 组合矩阵")
     ap.add_argument("--maker-fee", type=float, default=None,
@@ -755,6 +902,8 @@ def main():
     args = ap.parse_args()
     if args.calibrate:
         return run_calibrate(args)
+    if args.baseline:
+        return run_baseline(args)
     return run_replay(args)
 
 

@@ -95,6 +95,15 @@ class DispatchResult:
     notified: bool = False
 
 
+def _session_blocked_now(now_hour: int | None = None) -> bool:
+    """04:00-11:59 UTC+8 低流动性窗口(与回放分桶口径一致)."""
+    if now_hour is None:
+        from datetime import datetime, timedelta, timezone
+
+        now_hour = datetime.now(timezone(timedelta(hours=8))).hour
+    return 4 <= now_hour < 12
+
+
 class SignalPipeline:
     """下单机会的单一入口：评估、门控、落盘、执行、通知。"""
 
@@ -215,6 +224,8 @@ class SignalPipeline:
             reasons.append("trending_tr_block: 回放 118 笔净/风险 -0.55")
         if getattr(cfg, "block_neutral_diag_entry", False) and str(diag.get("direction") or "") == "neutral":
             reasons.append("neutral_diag_block: 实盘 neutral 单胜率 25%")
+        if getattr(cfg, "block_session_entry", False) and _session_blocked_now():
+            reasons.append("session_block: 回放 04-12时(UTC+8) 74 笔 -290U")
         return tuple(reasons)
 
     def _direction_gate_reasons(

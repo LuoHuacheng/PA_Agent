@@ -259,6 +259,10 @@ class BinanceUSDMTestnetSettings(BaseModel):
     block_short_entry: bool = False
     block_trending_tr_entry: bool = False
     block_neutral_diag_entry: bool = False
+    # 禁 04:00-11:59(UTC+8) 自动开仓: 回放 45 天该时段 74 笔亏 -290U(美盘尾段+
+    # 亚盘早段低流动性); 与 trending_tr 仅 51% 交集, 独立有效 — 组合后模型流
+    # 从 -0.40R/笔 收到 ≈0.00R (shadow_replay --matrix 2026-09-13)。
+    block_session_entry: bool = False
     # --- 日度亏损熔断 ---
     # 当日已实现净亏损(REALIZED_PNL + COMMISSION, 不含资金费)达到该值时停止自动
     # 开新仓, 次日(本地日)自动解除。0 = 关闭。账本查询 weight 30, 所以当天一旦
