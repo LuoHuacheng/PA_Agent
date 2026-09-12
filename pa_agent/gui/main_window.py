@@ -21,7 +21,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QSplitter,
     QStatusBar,
     QVBoxLayout,
@@ -2676,7 +2675,6 @@ class MainWindow(QMainWindow):
 
     def _exit_demo_mode(self, *, silent: bool = False) -> None:
         """Leave demo mode and restore live controls."""
-        from pathlib import Path
 
         self._demo_auto_next_armed = False
         self._demo_waiting_flow_playback = False
@@ -4211,7 +4209,6 @@ class MainWindow(QMainWindow):
                 compute_incremental_bar_delta,
                 find_latest_successful_record,
             )
-            from pa_agent.data.snapshot import INDICATOR_WARMUP_BARS
 
             bar_count = self._analysis_bar_count()
             frame = self._build_chart_frame_from_bars(

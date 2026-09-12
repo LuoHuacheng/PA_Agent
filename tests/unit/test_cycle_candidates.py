@@ -6,7 +6,6 @@ validator-level tests.
 """
 from __future__ import annotations
 
-import pytest
 
 from pa_agent.ai.cycle_candidates import (
     CycleCandidate,

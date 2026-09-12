@@ -510,7 +510,7 @@ def render_continuity_prompt_block(ctx: dict[str, Any]) -> str:
         f">{DEFAULT_MAX_PENDING_LIMIT_BARS} 根 K 线 / 阶段一 `cycle_position` 变化 / "
         "`direction` 变化）→ **不得**写「仍等待上一轮限价/setup」；须按本轮结构重新评估，"
         "可给新方案或明确观望。",
-        f"1. **未失效 + 限价未触发** → 默认 `order_type=不下单`、`terminal.outcome=wait`，"
+        "1. **未失效 + 限价未触发** → 默认 `order_type=不下单`、`terminal.outcome=wait`，"
         "在 watch_points 说明仍等待上一轮限价/setup 触价；"
         "**禁止**立即在相近结构位反手，除非 K1 收盘已触发失效。",
         "2. **未失效 + 限价已触发** → **禁止**写「仍等待限价触发/尚未触价」；"

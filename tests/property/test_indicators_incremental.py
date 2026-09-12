@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import math
-import pytest
 from hypothesis import given, assume, settings as h_settings
 from hypothesis import strategies as st
-from pa_agent.indicators.ema import ema_full, ema_incremental, make_ema_state, state_after
-from pa_agent.indicators.atr import atr_full, atr_incremental, make_atr_state, state_after_atr
+from pa_agent.indicators.ema import ema_full, ema_incremental, state_after
+from pa_agent.indicators.atr import atr_full, atr_incremental, state_after_atr
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

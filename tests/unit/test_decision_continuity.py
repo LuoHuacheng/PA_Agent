@@ -1,7 +1,7 @@
 """Tests for decision continuity (flip cooldown, neutral+AIS, guard)."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from pa_agent.ai.decision_continuity import (
     apply_continuity_guard,

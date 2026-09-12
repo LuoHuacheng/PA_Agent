@@ -18,7 +18,7 @@ from pa_agent.data.market_defaults import (
     resolve_tv_fetch_pair,
     tv_auto_probe_plan,
 )
-from pa_agent.data.tv_symbol_lookup import TvSymbolNotFoundError, is_tv_name_input
+from pa_agent.data.tv_symbol_lookup import TvSymbolNotFoundError
 from pa_agent.data.tradingview_errors import format_tradingview_fetch_error
 
 logger = logging.getLogger(__name__)

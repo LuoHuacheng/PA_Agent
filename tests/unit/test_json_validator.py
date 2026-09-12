@@ -2,14 +2,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-import pytest
 
 from pa_agent.ai.json_validator import (
     JsonValidator,
     Ok,
-    ValidationError,
     _repair_unclosed_string_before_brace,
     _repair_unescaped_quotes,
     _strip_fences,

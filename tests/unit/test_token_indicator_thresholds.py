@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import pytest
 
-from PyQt6.QtWidgets import QProgressBar
 
 # Guard: skip entire module if PyQt6 display is unavailable
 pytest.importorskip("PyQt6.QtWidgets")

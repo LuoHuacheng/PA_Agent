@@ -4,7 +4,7 @@ Property 1b: data insufficient → zero AI calls, record.exception.type=="insuff
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import httpx
 import pytest

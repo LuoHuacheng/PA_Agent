@@ -1,7 +1,6 @@
 """Property-based tests for analysis snapshot from bar lists (PR1)."""
 from __future__ import annotations
 
-import math
 
 from hypothesis import given, settings as h_settings
 from hypothesis import strategies as st

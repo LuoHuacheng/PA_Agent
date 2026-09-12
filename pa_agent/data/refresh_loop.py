@@ -5,7 +5,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from pa_agent.data.base import DataSource, DataSourceTransientError, KlineBar
+from pa_agent.data.base import DataSource, DataSourceTransientError
 from pa_agent.data.snapshot import INDICATOR_WARMUP_BARS
 
 if TYPE_CHECKING:

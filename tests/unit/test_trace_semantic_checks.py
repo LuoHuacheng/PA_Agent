@@ -1,7 +1,6 @@
 """Unit tests for trace semantic validation."""
 from __future__ import annotations
 
-import json
 
 from pa_agent.ai.stage1_normalizer import normalize_stage1
 from pa_agent.ai.trace_semantic_checks import (

@@ -5,7 +5,7 @@ Covers correctness properties P1–P7 from design.md.
 from __future__ import annotations
 
 import copy
-from hypothesis import given, settings as h_settings, assume
+from hypothesis import given, settings as h_settings
 from hypothesis import strategies as st
 
 from pa_agent.ai.json_validator import JsonValidator

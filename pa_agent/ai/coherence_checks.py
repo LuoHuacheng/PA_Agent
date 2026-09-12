@@ -871,12 +871,4 @@ def validate_incremental_stage1_coherence(
                         "from previous stage1"
                     )
 
-    blob_parts: list[str] = []
-    blob_parts.append(str(stage1.get("risk_warning", "") or ""))
-    if isinstance(delta, dict):
-        blob_parts.append(str(delta.get("summary", "") or ""))
-    for item in stage1.get("gate_trace") or []:
-        if isinstance(item, dict):
-            blob_parts.append(str(item.get("reason", "") or ""))
-    blob = "\n".join(blob_parts)
     return errors

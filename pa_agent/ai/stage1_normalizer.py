@@ -693,8 +693,6 @@ def normalize_stage1(
                 out["incremental_delta"] = delta_top
             logger.debug("Unwrapped stage1_diagnosis nested wrapper")
 
-    lenient = normalization_mode == "lenient"
-
     # ── Rescue pattern names misplaced in cycle_position ─────────────────────
     _rescue_pattern_from_cycle_position(out)
 

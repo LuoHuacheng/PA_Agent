@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from typing import Any
 
 from pa_agent.util.trade_metrics import (
     compute_risk_reward,

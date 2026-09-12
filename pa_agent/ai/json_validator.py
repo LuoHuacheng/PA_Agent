@@ -1004,7 +1004,6 @@ class JsonValidator:
         tied_winners = [k for k in order if probs[k] == max_value]
         direction = pred.get("direction")
         if direction not in tied_winners:
-            expected = tied_winners[0]
             errors.append(
                 f"next_bar_prediction.direction: expected one of {tied_winners} "
                 f"(argmax of probabilities), got {direction!r}"

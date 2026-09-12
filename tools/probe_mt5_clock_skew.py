@@ -5,7 +5,6 @@ Run: python tools/probe_mt5_clock_skew.py [SYMBOL] [TIMEFRAME]
 from __future__ import annotations
 
 import sys
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

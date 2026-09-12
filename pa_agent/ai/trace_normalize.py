@@ -1,7 +1,6 @@
 """Normalize gate_trace / decision_trace items before JSON schema validation."""
 from __future__ import annotations
 
-import copy
 import logging
 import re
 from typing import Any

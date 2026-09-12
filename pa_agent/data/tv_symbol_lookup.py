@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from pathlib import Path
 
 from pa_agent.config.paths import CONFIG_DIR
 

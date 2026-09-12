@@ -1,7 +1,6 @@
 """Validation retry policy: which errors may retry and immutable field guards."""
 from __future__ import annotations
 
-import re
 from typing import Any, Literal
 
 StageName = Literal["stage1", "stage2"]

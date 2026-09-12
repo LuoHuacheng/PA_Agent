@@ -229,7 +229,6 @@ def _save_trade_record_impl(
     model_name: str,
     structure_flip_cooldown_bars: int = 3,
 ) -> None:
-    s1 = stage1_diagnosis or {}
     dec = decision_inner or {}
     diag = stage2_full.get("diagnosis_summary") or {}
     bar_analysis = stage2_full.get("bar_analysis") or {}

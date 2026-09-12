@@ -8,20 +8,17 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
 # Guard: skip the whole module if PyQt6 is not available
 pytest.importorskip("PyQt6")
 
-from PyQt6.QtCore import QThread
-from PyQt6.QtWidgets import QApplication, QPlainTextEdit
 
 from pa_agent.app_context import AppContext
 from pa_agent.data.base import IndicatorBundle, KlineBar, KlineFrame
-from pa_agent.util.threading import CancelToken, OrchestratorEvent
+from pa_agent.util.threading import CancelToken
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

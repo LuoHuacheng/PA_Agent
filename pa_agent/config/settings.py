@@ -1,4 +1,4 @@
-# ruff: noqa: RUF003 - Chinese config copy
+# ruff: noqa: RUF002, RUF003 - Chinese config copy
 """Pydantic settings models for PA Agent."""
 
 from __future__ import annotations

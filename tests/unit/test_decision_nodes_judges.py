@@ -4,22 +4,15 @@ Covers Properties 2-10 and override Properties 15-22.
 """
 from __future__ import annotations
 
-import math
-from unittest.mock import MagicMock
 
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from pa_agent.ai.decision_nodes import (
-    ALWAYS_IN_SAME_SIDE_RATIO,
-    BAR_COUNT_THRESHOLD,
     SIGNAL_BAR_LONG_ATR_RATIO,
     DecisionNodeEngine,
-    NodeFill,
     apply_overrides,
     judge_always_in,
-    judge_data_sufficiency,
     judge_direction,
     judge_follow_through,
     judge_signal_bar_closed,

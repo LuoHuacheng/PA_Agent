@@ -11,7 +11,7 @@ from pa_agent.config.paths import PROMPT_DIR, RECORDS_PENDING_DIR
 from pa_agent.config.settings import load_settings
 from pa_agent.ai.client_factory import create_ai_client
 from pa_agent.ai.prompt_assembler import PromptAssembler
-from pa_agent.ai.json_validator import JsonValidator, Ok, ValidationError
+from pa_agent.ai.json_validator import JsonValidator, ValidationError
 from pa_agent.records.experience_reader import ExperienceReader
 from pa_agent.demo.record_loader import frame_from_record_klines
 from pa_agent.util.threading import CancelToken

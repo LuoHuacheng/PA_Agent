@@ -13,9 +13,8 @@ import pytest
 
 from tests.fixtures.validators import schema_test_validator
 from pa_agent.ai.router import route_strategy_files
-from pa_agent.data.base import KlineFrame
 from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
-from pa_agent.util.threading import CancelToken, OrchestratorEvent
+from pa_agent.util.threading import CancelToken
 
 from .conftest import (
     VALID_STAGE1,

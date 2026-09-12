@@ -10,7 +10,6 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
 
 from pa_agent.ai.prompt_assembler import PromptAssembler, _NEXT_BAR_PREDICTION_INSTRUCTION
 from pa_agent.data.base import KlineBar, KlineFrame, IndicatorBundle

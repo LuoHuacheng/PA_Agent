@@ -6,11 +6,9 @@ import json
 from pa_agent.ai.json_validator import Ok
 from pa_agent.ai.pattern_routing import ensure_detected_patterns_coherent
 from pa_agent.ai.stage1_normalizer import normalize_stage1
-from pa_agent.ai.stage2_normalizer import normalize_stage2
 from pa_agent.config.settings import ValidationSettings
 from pa_agent.ai.json_validator import JsonValidator
 
-from tests.fixtures.validators import schema_test_validator
 from tests.unit.test_trade_metrics_validation import _frame, _stage2_trade_obj
 
 validator = JsonValidator(ValidationSettings(normalization_mode="lenient"))

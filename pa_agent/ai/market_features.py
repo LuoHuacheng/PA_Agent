@@ -506,7 +506,7 @@ def _spike_aftermath_hint(bars: tuple[KlineBar, ...], atr: float | None) -> str:
     best = None  # (start_i, end_i, direction)
     i = 0
     while i < len(chrono):
-        o, h, l, c = float(chrono[i].open), float(chrono[i].high), float(chrono[i].low), float(chrono[i].close)
+        o, c = float(chrono[i].open), float(chrono[i].close)
         body = abs(c - o)
         d = 1 if c > o else (-1 if c < o else 0)
         if d == 0 or body < 0.5 * atr:
@@ -515,12 +515,7 @@ def _spike_aftermath_hint(bars: tuple[KlineBar, ...], atr: float | None) -> str:
         run = [i]
         j = i + 1
         while j < len(chrono):
-            oj, hj, lj, cj = (
-                float(chrono[j].open),
-                float(chrono[j].high),
-                float(chrono[j].low),
-                float(chrono[j].close),
-            )
+            oj, cj = float(chrono[j].open), float(chrono[j].close)
             dj = 1 if cj > oj else (-1 if cj < oj else 0)
             if dj != d or abs(cj - oj) < 0.35 * atr:
                 break

@@ -2,13 +2,12 @@
 """Compare fixed vs ATR-based dynamic min_stop using real fills."""
 import sys, json, time
 from pathlib import Path
-from collections import defaultdict
 import urllib.request
 
 sys.path.insert(0, "tools"); sys.path.insert(0, ".")
 from _pa_sim_common import (  # noqa: E402
     fetch_account_data, load_decision_index, make_client,
-    rebuild_trades, window_bounds, fmt_ms,
+    rebuild_trades, window_bounds,
 )
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ZECUSDT",
@@ -103,7 +102,6 @@ for label, kw in [
 
 print("\n各方案胜率对照(全部已平):")
 closed = [r for r in rows if r["closed"]]
-import statistics
 for label, lo, hi in [("<0.2%", 0, 0.2), ("0.2-0.45", 0.2, 0.45), ("0.45-1", 0.45, 1.0), (">=1%", 1.0, 99)]:
     grp = [r for r in closed if lo <= r["gap"] < hi]
     if grp:

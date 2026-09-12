@@ -5,7 +5,6 @@ from pa_agent.ai.decision_nodes import judge_always_in, judge_direction
 from pa_agent.ai.trend_context import (
     build_trend_context,
     detect_recent_spike,
-    compute_background_direction,
 )
 from pa_agent.data.base import IndicatorBundle, KlineBar, KlineFrame
 

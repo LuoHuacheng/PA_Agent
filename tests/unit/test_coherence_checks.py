@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from pa_agent.ai.coherence_checks import (
     validate_bar_by_bar_vs_features,

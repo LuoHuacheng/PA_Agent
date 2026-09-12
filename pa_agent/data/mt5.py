@@ -12,7 +12,6 @@ Usage:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 
 from pa_agent.data.base import (
     DataSource,

@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003 - Chinese product copy
 """Binance USDⓈ-M Futures order execution (testnet default, live opt-in).
 
 The execution environment follows ``settings.binance_usdm_environment``
