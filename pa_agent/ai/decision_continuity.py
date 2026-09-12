@@ -1,15 +1,11 @@
 """Previous-decision continuity: invalidation checks, flip cooldown, Stage-2 prompt block."""
 from __future__ import annotations
 
-import csv
 import re
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from pa_agent.util.price_tick import infer_price_tick_from_frame
-
-_TRADE_RECORDS_DIR = Path("trade_records")
 
 # Default: no opposite-direction plan at the same structure within N closed bars.
 DEFAULT_STRUCTURE_FLIP_COOLDOWN_BARS = 3
@@ -227,17 +223,10 @@ def assess_limit_order_triggered(
 
 
 def load_last_trade_csv_row(symbol: str, timeframe: str) -> dict[str, str] | None:
-    safe_symbol = symbol.replace("/", "-").replace("\\", "-")
-    safe_tf = timeframe.replace("/", "-")
-    csv_path = _TRADE_RECORDS_DIR / f"{safe_symbol}_{safe_tf}.csv"
-    if not csv_path.is_file():
-        return None
-    try:
-        with open(csv_path, encoding="utf-8-sig", newline="") as f:
-            rows = list(csv.DictReader(f))
-        return rows[-1] if rows else None
-    except OSError:
-        return None
+    """Delegated to records.trade_logger — the record format's single owner."""
+    from pa_agent.records.trade_logger import load_last_trade_row
+
+    return load_last_trade_row(symbol, timeframe)
 
 
 def decision_from_previous_record(previous_record: Any) -> dict[str, Any] | None:
