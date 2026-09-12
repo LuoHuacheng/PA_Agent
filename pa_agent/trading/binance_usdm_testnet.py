@@ -34,6 +34,7 @@ from pa_agent.records import cancel_log
 from pa_agent.trading import binance_env
 from pa_agent.trading.binance_env import BinanceTradeEnv
 from pa_agent.trading.rate_limit import parse_banned_until_ms, rate_limiter
+from pa_agent.trading.runtime_state import RuntimeStateStore as _RuntimeStateStore
 from pa_agent.util.trade_metrics import (
     compute_risk_reward,
     min_risk_reward_ratio,
@@ -47,7 +48,16 @@ _TIMEOUT_SECONDS = 12
 _RUNTIME_STATE_PATH = "trade_records/binance_usdm_testnet_state.json"
 # P2-3: conf 5分位桶实测胜率 (tools/trade_pnl_report.py --conf-buckets-out 生成)
 _CONF_BUCKETS_PATH = "trade_records/conf_buckets.json"
-_STATE_LOCK = threading.Lock()
+# RLock: 遗留外层作用域(resume_*)与 RuntimeStateStore 内部方法对同一把锁嵌套加锁。
+_STATE_LOCK = threading.RLock()
+# Runtime state store: lock + file format + namespaced ops live in one module.
+# path provider 每次调用时求值, 保证 monkeypatch _RUNTIME_STATE_PATH 仍生效.
+_STATE_STORE: "_RuntimeStateStore" = _RuntimeStateStore(
+    lambda: os.fspath(
+        os.path.join(os.path.dirname(_RUNTIME_STATE_PATH), active_environment().state_file)
+    ),
+    lock=_STATE_LOCK,
+)
 # Per-symbol transition locks: serialise breakeven-stop moves and TP2 swaps
 # that run on separate daemon threads for the same symbol (guard vs runner).
 _MANAGER_LOCKS: dict[str, threading.Lock] = {}
@@ -910,8 +920,7 @@ def _daily_loss_guard(
     if limit <= 0:
         return None
     now_ms = int(time.time() * 1000)
-    with _STATE_LOCK:
-        record = risk_guard.halt_record(_load_state(), now_ms)
+    record = risk_guard.halt_record(_STATE_STORE.load(), now_ms)
     if record is not None:
         return ExecutionResult(
             "skipped",
@@ -927,10 +936,11 @@ def _daily_loss_guard(
     hit, net = risk_guard.breach(rows, limit)
     if not hit:
         return None
-    with _STATE_LOCK:
-        state = _load_state()
-        state[risk_guard.HALT_KEY] = risk_guard.build_halt(net, limit, now_ms)
-        _save_state(state)
+    _STATE_STORE.update(
+        lambda state: state.__setitem__(
+            risk_guard.HALT_KEY, risk_guard.build_halt(net, limit, now_ms)
+        )
+    )
     logger.error(
         "Daily loss limit hit: net %+.2fU <= -%.2fU; auto-entry halted until next local day",
         net,
@@ -1406,9 +1416,7 @@ def _replace_pending_limit(
     position is now protected and no new entry is placed), else ``None`` so the
     caller proceeds with a fresh entry.
     """
-    with _STATE_LOCK:
-        pending = _load_state().get("pending")
-        old = pending.get(symbol) if isinstance(pending, dict) else None
+    old = _STATE_STORE.pending_get(symbol)
     if not isinstance(old, dict):
         return None
     old_client_id = str(old.get("client_id") or "")
@@ -1888,45 +1896,19 @@ def current_mark_price(client: BinanceUSDMTestnetClient, symbol: str) -> Decimal
 
 
 def _register_guard(symbol: str, record: dict[str, Any]) -> None:
-    with _STATE_LOCK:
-        state = _load_state()
-        guards = state.get("guards")
-        if not isinstance(guards, dict):
-            guards = {}
-            state["guards"] = guards
-        guards[symbol] = record
-        _save_state(state)
+    _STATE_STORE.guard_put(symbol, record)
 
 
 def _read_guard(symbol: str) -> dict[str, Any] | None:
-    with _STATE_LOCK:
-        guards = _load_state().get("guards")
-    if not isinstance(guards, dict):
-        return None
-    record = guards.get(symbol)
-    return dict(record) if isinstance(record, dict) else None
+    return _STATE_STORE.guard_get(symbol)
 
 
 def _patch_guard(symbol: str, **patch: Any) -> None:
-    with _STATE_LOCK:
-        state = _load_state()
-        guards = state.get("guards")
-        if not isinstance(guards, dict):
-            return
-        record = guards.get(symbol)
-        if not isinstance(record, dict):
-            return
-        record.update(patch)
-        _save_state(state)
+    _STATE_STORE.guard_patch(symbol, **patch)
 
 def _drop_guard(symbol: str) -> None:
     """Remove the guard/runner record for ``symbol`` (position is gone)."""
-    with _STATE_LOCK:
-        state = _load_state()
-        guards = state.get("guards")
-        if isinstance(guards, dict) and symbol in guards:
-            del guards[symbol]
-            _save_state(state)
+    _STATE_STORE.guard_drop(symbol)
 
 # ---------------------------------------------------------------------------
 # 止损单补挂校验 (resting-order verification & re-hang)
@@ -2974,7 +2956,7 @@ def resume_breakeven_guards(
     if str(config.breakeven_stop_trigger) == "off":
         return 0
     with _STATE_LOCK:
-        guards = _load_state().get("guards")
+        guards = _STATE_STORE.guards_all()
         records = (
             {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
             if isinstance(guards, dict)
@@ -3033,7 +3015,7 @@ def resume_tp_runners(
     if float(config.tp_partial_close_pct or 0.0) <= 0:
         return 0
     with _STATE_LOCK:
-        guards = _load_state().get("guards")
+        guards = _STATE_STORE.guards_all()
         records = (
             {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
             if isinstance(guards, dict)
@@ -3092,7 +3074,7 @@ def resume_time_stops(
     if minutes <= 0:
         return 0
     with _STATE_LOCK:
-        guards = _load_state().get("guards")
+        guards = _STATE_STORE.guards_all()
         records = (
             {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
             if isinstance(guards, dict)
@@ -3331,7 +3313,7 @@ def resume_stop_watchdogs(
     if not config.enabled or config.dry_run or config.emergency_stop:
         return 0
     with _STATE_LOCK:
-        guards = _load_state().get("guards")
+        guards = _STATE_STORE.guards_all()
         records = (
             {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
             if isinstance(guards, dict)
@@ -3667,7 +3649,7 @@ def resume_pending_limit_watchers(
     if not config.enabled or config.dry_run or config.emergency_stop:
         return 0
     with _STATE_LOCK:
-        raw_pending = _load_state().get("pending")
+        raw_pending = _STATE_STORE.pending_all()
         records = {
             symbol: record
             for symbol, record in raw_pending.items()
@@ -3836,43 +3818,19 @@ def _signal_id(symbol: str, decision: dict[str, Any]) -> str:
 
 
 def _load_state() -> dict[str, Any]:
-    """Load the runtime execution state file (empty dict when absent)."""
-    path = os.fspath(
-        os.path.join(os.path.dirname(_RUNTIME_STATE_PATH), active_environment().state_file)
-    )
-    try:
-        with open(path, encoding="utf-8") as file:
-            state = json.load(file)
-    except FileNotFoundError:
-        state = {}
-    except (OSError, json.JSONDecodeError) as exc:
-        raise BinanceAPIError(f"Cannot read {active_environment().label_en} execution state") from exc
-    return state if isinstance(state, dict) else {}
+    """Load the runtime execution state file (delegates to the state store)."""
+    return _STATE_STORE.load()
 
 
 def _save_state(state: dict[str, Any]) -> None:
-    """Atomically persist the runtime execution state file."""
-    path = os.fspath(
-        os.path.join(os.path.dirname(_RUNTIME_STATE_PATH), active_environment().state_file)
-    )
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temp = f"{path}.tmp"
-    try:
-        with open(temp, "w", encoding="utf-8") as file:
-            json.dump(state, file, ensure_ascii=False)
-        os.replace(temp, path)
-    except OSError as exc:
-        # Fail closed: an unavailable state must not allow new orders.
-        raise BinanceAPIError(f"Cannot persist {active_environment().label_en} execution state") from exc
+    """Atomically persist the runtime execution state file (state store)."""
+    _STATE_STORE.save(state)
 
 
 def _is_recent_signal(signal_id: str, cooldown_minutes: int) -> bool:
     """Return whether a successfully-submitted plan is still in cooldown."""
-    now = time.time()
-    with _STATE_LOCK:
-        seen = _load_state().get("seen")
-    seen_at = seen.get(signal_id) if isinstance(seen, dict) else None
-    return isinstance(seen_at, (int, float)) and now - seen_at < cooldown_minutes * 60
+    seen_at = _STATE_STORE.seen_get(signal_id)
+    return seen_at is not None and time.time() - seen_at < cooldown_minutes * 60
 
 
 def _is_missing_order_error(exc: BinanceAPIError) -> bool:
@@ -3910,42 +3868,17 @@ def _is_missing_algo_order_error(exc: BinanceAPIError) -> bool:
 
 def _remember_signal(signal_id: str) -> None:
     """Persist only after all entry and protective orders were accepted."""
-    with _STATE_LOCK:
-        state = _load_state()
-        seen = state.get("seen")
-        if not isinstance(seen, dict):
-            seen = {}
-            state["seen"] = seen
-        seen[signal_id] = time.time()
-        _save_state(state)
+    _STATE_STORE.seen_put(signal_id, time.time())
 
 
 def _persist_pending(symbol: str, entry: dict[str, Any]) -> None:
     """Record a resting limit entry that is awaiting fill."""
-    with _STATE_LOCK:
-        state = _load_state()
-        pending = state.get("pending")
-        if not isinstance(pending, dict):
-            pending = {}
-            state["pending"] = pending
-        pending[symbol] = entry
-        _save_state(state)
+    _STATE_STORE.pending_put(symbol, entry)
 
 
 def _drop_pending(symbol: str, client_id: str | None = None) -> None:
     """Remove the pending record for ``symbol`` unless it belongs to another order."""
-    with _STATE_LOCK:
-        state = _load_state()
-        pending = state.get("pending")
-        if not isinstance(pending, dict):
-            return
-        record = pending.get(symbol)
-        if record is None:
-            return
-        if client_id is not None and record.get("client_id") != client_id:
-            return
-        del pending[symbol]
-        _save_state(state)
+    _STATE_STORE.pending_drop(symbol, client_id)
 
 
 def _tick_size(exchange_info: dict[str, Any]) -> Decimal | None:
@@ -3963,18 +3896,12 @@ def _remember_canceled_entry(symbol: str, entry_price: object, reason: str) -> N
     if price is None:
         return
     try:
-        with _STATE_LOCK:
-            state = _load_state()
-            entries = state.get("last_canceled_entries")
-            if not isinstance(entries, dict):
-                entries = {}
-                state["last_canceled_entries"] = entries
-            entries[symbol] = {
-                "entry": _decimal_text(price),
-                "reason": reason,
-                "ts": time.time(),
-            }
-            _save_state(state)
+        _STATE_STORE.canceled_entry_put(
+            symbol,
+            entry=_decimal_text(price),
+            reason=reason,
+            ts=time.time(),
+        )
     except BinanceAPIError as exc:
         # Not being able to persist the anchor only weakens the churn guard;
         # it must never fail an execution path.
@@ -3999,9 +3926,7 @@ def _repricing_cooldown_reason(
     cooldown_minutes = int(config.limit_repricing_cooldown_minutes or 0)
     if max_ticks <= 0 or cooldown_minutes <= 0:
         return None
-    with _STATE_LOCK:
-        entries = _load_state().get("last_canceled_entries")
-    record = entries.get(symbol) if isinstance(entries, dict) else None
+    record = _STATE_STORE.canceled_entries_all().get(symbol)
     if not isinstance(record, dict):
         return None
     canceled_at = record.get("ts")
@@ -4025,9 +3950,7 @@ def _repricing_cooldown_reason(
 
 def _pending_entry_price(symbol: str, client_id: str) -> str | None:
     """Return the recorded entry price of a resting entry, when still known."""
-    with _STATE_LOCK:
-        pending = _load_state().get("pending")
-    record = pending.get(symbol) if isinstance(pending, dict) else None
+    record = _STATE_STORE.pending_get(symbol)
     if not isinstance(record, dict) or record.get("client_id") != client_id:
         return None
     entry = record.get("entry")
