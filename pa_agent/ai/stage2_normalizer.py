@@ -5,6 +5,12 @@ import copy
 import logging
 from typing import Any
 
+from pa_agent.ai.llm_contract import (
+    max_bar_seq_from_frame as _max_bar_seq_from_frame,
+    section14_violated as _section14_violated,
+    strip_enum_suffix as _strip_enum_suffix,
+    trace_node_answer as _trace_node_answer,
+)
 from pa_agent.ai.trace_normalize import normalize_stage2_traces
 from pa_agent.util.price_tick import (
     infer_price_tick_from_frame,
@@ -176,17 +182,6 @@ _VALID_FEATURES_USED = frozenset({
     "stage2_decision",
     "previous_prediction_summary",
 })
-
-
-def _strip_enum_suffix(raw: str) -> str:
-    """Drop trailing annotations models append to closed enums (e.g. ``invalid（…）``)."""
-    text = raw.strip()
-    for sep in ("（", "(", "【", "[", "—", "–", " - ", "：", ":"):
-        if sep in text:
-            head = text.split(sep, 1)[0].strip()
-            if head:
-                return head
-    return text
 
 
 def _normalize_closed_enum(
@@ -671,54 +666,6 @@ def _truncate_decision_reasoning(decision: dict[str, Any]) -> bool:
     decision["reasoning"] = text[: DECISION_REASONING_MAX_LEN - 1] + "…"
     return True
 
-
-def _trace_node_answer(trace: Any, node_id: str) -> str | None:
-    if not isinstance(trace, list):
-        return None
-    for item in trace:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("node_id", "")).strip() == node_id:
-            return str(item.get("answer", "") or "").strip()
-    return None
-
-
-def _section14_violated(trace: Any) -> bool:
-    """Return True only when §14 answer is 是 AND the reason text confirms a violation.
-
-    Background: §14 question is "是否触犯禁止行为清单？"
-      answer=是  → violated (程序强制 order_type=不下单)
-      answer=否  → not violated (can proceed)
-
-    Some models incorrectly write answer=是 to mean "I completed the scan (no violations)".
-    To guard against this common mistake we cross-check the reason text: if it contains
-    explicit denial phrases (未触犯 / 未违反 / 无触犯 / 通过) we do NOT treat it as a
-    violation.  This is a safety hatch — the prompt now clearly specifies answer=否 for
-    the no-violation case, so future outputs should be correct.
-    """
-    _DENIAL_PHRASES = ("未触犯", "未违反", "无触犯", "无违规", "通过扫描", "扫描通过", "无禁止", "未触发")
-    if not isinstance(trace, list):
-        return False
-    for item in trace:
-        if not isinstance(item, dict):
-            continue
-        nid = str(item.get("node_id", "")).strip()
-        if not nid.startswith("14"):
-            continue
-        if str(item.get("answer", "")).strip() != "是":
-            continue
-        # answer=是: check reason for denial phrases before treating as violation
-        reason = str(item.get("reason", "") or "")
-        if any(phrase in reason for phrase in _DENIAL_PHRASES):
-            # AI wrote answer=是 but reason says no violation — ignore (AI used wrong answer)
-            logger.debug(
-                "_section14_violated: node %s answer=是 but reason contains denial phrase; "
-                "treating as NOT violated (AI should use answer=否 for no-violation)",
-                nid,
-            )
-            continue
-        return True
-    return False
 
 
 def _clear_decision_to_no_order(decision: dict[str, Any]) -> None:
@@ -1466,14 +1413,6 @@ def ensure_stage2_predictions(
         changed = True
 
     return changed
-
-
-def _max_bar_seq_from_frame(kline_frame: Any) -> int | None:
-    bars = getattr(kline_frame, "bars", None) if kline_frame is not None else None
-    if not bars:
-        return None
-    seqs = [int(getattr(b, "seq", 0)) for b in bars if getattr(b, "seq", None)]
-    return max(seqs) if seqs else None
 
 
 def _fix_background_limit_trace(out: dict[str, Any]) -> bool:

@@ -7,6 +7,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from pa_agent.ai.llm_contract import (
+    find_trace_item as _find_trace_item,
+    max_bar_seq_from_frame as _max_bar_seq,
+    trace_node_ids,
+)
 from pa_agent.ai.decision_tree import normalize_bar_range, validate_bar_range_field
 
 # Target bar count for bar_by_bar_summary when the analysis window has enough bars.
@@ -68,18 +73,7 @@ _BAR_FIELD_RE = re.compile(r"K\s*(\d+)", re.IGNORECASE)
 
 
 def _trace_node_ids(trace: list[dict[str, Any]] | None) -> set[str]:
-    out: set[str] = set()
-    for item in trace or []:
-        if isinstance(item, dict) and item.get("node_id"):
-            out.add(str(item["node_id"]))
-    return out
-
-
-def _find_trace_item(trace: list[dict[str, Any]] | None, node_id: str) -> dict[str, Any] | None:
-    for item in trace or []:
-        if isinstance(item, dict) and str(item.get("node_id", "")) == node_id:
-            return item
-    return None
+    return set(trace_node_ids(trace))
 
 
 def _normalize_cycle_branch(raw: object) -> str | None:
@@ -98,14 +92,6 @@ def _normalize_direction_branch(raw: object) -> str | None:
     if not key:
         return None
     return _DIRECTION_BRANCH_ALIASES.get(key, key)
-
-
-def _max_bar_seq(kline_frame: Any) -> int | None:
-    bars = getattr(kline_frame, "bars", None) if kline_frame is not None else None
-    if not bars:
-        return None
-    seqs = [int(getattr(b, "seq", 0)) for b in bars if getattr(b, "seq", None)]
-    return max(seqs) if seqs else None
 
 
 def _parse_bar_range_seqs(bar_range: str) -> list[int]:

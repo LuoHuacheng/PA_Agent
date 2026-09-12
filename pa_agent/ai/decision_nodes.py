@@ -26,6 +26,8 @@ from dataclasses import dataclass
 
 from typing import Any
 
+from pa_agent.ai.llm_contract import section14_violated, trace_node_answer
+
 
 
 logger = logging.getLogger(__name__)
@@ -1846,62 +1848,15 @@ def route_order_method(
 
     # Check safety gates: §10.3=否 or §14 violation
 
-    def _trace_answer(trace: list, node_id: str) -> str | None:
 
-        for item in trace:
-
-            if not isinstance(item, dict):
-
-                continue
-
-            if str(item.get("node_id", "")).strip() == node_id:
-
-                return str(item.get("answer", "")).strip()
-
-        return None
-
-
-
-    if _trace_answer(decision_trace, "10.3") == "否":
+    if trace_node_answer(decision_trace, "10.3") == "否":
 
         return []
 
 
 
-    def _sec14_violated(trace: list) -> bool:
 
-        _DENIAL_PHRASES = ("未触犯", "未违反", "无触犯", "无违规", "通过扫描", "扫描通过", "无禁止", "未触发")
-
-        for item in trace:
-
-            if not isinstance(item, dict):
-
-                continue
-
-            nid = str(item.get("node_id", "")).strip()
-
-            if not nid.startswith("14"):
-
-                continue
-
-            if str(item.get("answer", "")).strip() != "是":
-
-                continue
-
-            # Cross-check reason: if it contains denial phrases the AI used wrong answer
-            reason = str(item.get("reason", "") or "")
-
-            if any(phrase in reason for phrase in _DENIAL_PHRASES):
-
-                continue
-
-            return True
-
-        return False
-
-
-
-    if _sec14_violated(decision_trace):
+    if section14_violated(decision_trace):
 
         return []
 
@@ -1933,19 +1888,19 @@ def route_order_method(
     # Preserve model's explicit limit/market choice when §10.3 already passed.
     if (
         model_order_type == "限价单"
-        and _trace_answer(decision_trace, "10.3") == "是"
+        and trace_node_answer(decision_trace, "10.3") == "是"
         and _has_trade_prices()
     ):
         candidate = "限价单"
     elif (
         model_order_type == "市价单"
-        and _trace_answer(decision_trace, "10.3") == "是"
+        and trace_node_answer(decision_trace, "10.3") == "是"
         and _has_trade_prices()
     ):
         candidate = "市价单"
     elif (
         model_order_type == "突破单"
-        and _trace_answer(decision_trace, "10.3") == "是"
+        and trace_node_answer(decision_trace, "10.3") == "是"
         and _has_trade_prices()
         and decision.get("entry_basis_bar")
         and decision.get("entry_basis_extreme")

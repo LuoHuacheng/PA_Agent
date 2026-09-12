@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from pa_agent.ai.llm_contract import trace_node_ids as _trace_node_ids
 from pa_agent.config.paths import PROMPT_DIR
 
 _BINARY_DECISION_FILE = "二元决策.txt"
@@ -73,10 +74,6 @@ def _node_sort_key(node_id: str) -> tuple[int, str]:
         if node_id.startswith(prefix) or node_id == prefix.rstrip("."):
             return (rank, node_id)
     return (999, node_id)
-
-
-def _trace_node_ids(trace: list[dict[str, Any]]) -> list[str]:
-    return [str(x.get("node_id", "")) for x in trace if isinstance(x, dict) and x.get("node_id")]
 
 
 def _index_of(nodes: list[str], node_id: str) -> int:

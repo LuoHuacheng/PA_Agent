@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any
 
+from pa_agent.ai.llm_contract import strip_enum_suffix as _strip_enum_suffix
 from pa_agent.ai.coherence_checks import BAR_BY_BAR_TARGET_COUNT
 from pa_agent.ai.trace_normalize import normalize_stage1_traces
 
@@ -139,16 +140,6 @@ _BAR_TYPE_ALIASES: dict[str, str] = {
     "outsidebull": "outside_bull",
     "outsidebear": "outside_bear",
 }
-
-
-def _strip_enum_suffix(raw: str) -> str:
-    text = raw.strip()
-    for sep in ("（", "(", "【", "[", "—", "–", " - ", "：", ":"):
-        if sep in text:
-            head = text.split(sep, 1)[0].strip()
-            if head:
-                return head
-    return text
 
 
 def _normalize_bar_type_value(raw: object) -> str | None:
