@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 sys.path.insert(0, ".")
 
