@@ -220,13 +220,7 @@ class BinanceUSDMTestnetSettings(BaseModel):
     min_stop_mode: Literal["fixed", "atr"] = "fixed"
     min_stop_distance_pct: float = Field(default=0.45, ge=0.0, le=10.0)
     min_stop_atr_multiple: float = Field(default=0.8, ge=0.0, le=10.0)
-    # Rate-limit recovery: when Binance rejects a signal with HTTP 418/-1003/429
-    # (shared Testnet IP bans), the whole signal is retried with exponential
-    # backoff. execution_retry_max_attempts counts the initial attempt, so 1
-    # disables retries. Applies only to rate-limit errors; other failures stay
-    # one-shot.
-    execution_retry_max_attempts: int = Field(default=3, ge=1, le=5)
-    execution_retry_backoff_seconds: int = Field(default=30, ge=5, le=300)
+    # Rate-limit recovery: 限流失败不重试(one-shot, 见 execute_market_signal docstring)。
     # 检测到 Testnet 共享 IP 限流(HTTP 418/-1003, banned until)时, 暂停监控的
     # 行情分析与信号推送直到封禁到期(错过的不补发信号); False = 保持现状.
     pause_monitoring_on_rate_limit: bool = True

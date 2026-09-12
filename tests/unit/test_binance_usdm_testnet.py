@@ -212,10 +212,7 @@ class RateLimitClient(FakeClient):
 
 
 def _retry_settings() -> Settings:
-    settings = _settings()
-    settings.binance_usdm_testnet.execution_retry_max_attempts = 3
-    settings.binance_usdm_testnet.execution_retry_backoff_seconds = 5
-    return settings
+    return _settings()
 
 
 def test_rate_limit_failure_is_one_shot_not_retried(monkeypatch) -> None:
