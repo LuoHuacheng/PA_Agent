@@ -205,7 +205,9 @@ class Outcome:
 
 def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
                   partial_pct, timeout_min, time_stop_min,
-                  min_stop_pct=0.0, min_stop_atr=0.0):
+                  min_stop_pct=0.0, min_stop_atr=0.0,
+                  be_trigger=None, entry_gtx=False,
+                  maker_fee=None, taker_fee=None):
     """在决策时刻之后的 K 线上重演一次计划单."""
     side = 1 if plan.direction == "做多" else -1
     entry, stop, target = plan.entry, plan.stop, plan.target
@@ -257,16 +259,34 @@ def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
     # ---- 1. 等成交 ----
     fill_i = None
     fill_px = entry
+    entry_taker = False  # GTC 下第一根开盘已越过限价 = 挂单即吃单
+    crossed0 = False
+    if future:
+        crossed0 = (future[0][1] < entry) if side == 1 else (future[0][1] > entry)
     for i, (_ts, o, h, low, _c) in enumerate(future[:timeout_bars]):
         if plan.order_type == "限价单":
+            if entry_gtx and crossed0:
+                # GTX(post-only): 越价挂单会被拒, 不立即成交; 等价格回触 entry
+                # 才以 maker 成交(挂单在簿, 触及即成交, 不吃开盘跳价).
+                if i == 0:
+                    continue
+                if (low <= entry <= h) if side == 1 else (low <= entry <= h):
+                    fill_px = entry
+                    fill_i = i
+                    break
+                continue
             if (low <= entry) if side == 1 else (h >= entry):
                 fill_px = min(entry, o) if side == 1 else max(entry, o)
+                if entry_gtx:
+                    fill_px = entry
+                entry_taker = crossed0 and i == 0 and not entry_gtx
                 fill_i = i
                 break
         else:
             if (h >= entry) if side == 1 else (low <= entry):
                 fill_px = max(entry, o) if side == 1 else min(entry, o)
                 fill_i = i
+                entry_taker = True  # 市价单恒为 taker
                 break
     if fill_i is None:
         return Outcome(False, "unfilled", entry, None, qty, qty * entry, 0, 0, 0, 0, 0)
@@ -285,21 +305,31 @@ def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
     reason = "time_stop"
     bars_held = 0
     stage = 1
+    be_stop = None  # 保本移损生效价; 触发后下一根 K 起才检查(保守, 移单有延迟)
+    be_armed_pending = False
     last_i = min(len(future) - 1, fill_i + max_hold_bars)
     for j in range(fill_i + 1, min(len(future), fill_i + 1 + max_hold_bars)):
         _ts, o, h, low, _c = future[j]
         bars_held = j - fill_i
-        if (low <= stop) if side == 1 else (h >= stop):
-            px = stop
-            if side == 1 and o < stop:
+        if be_armed_pending:
+            be_stop = fill_px
+            be_armed_pending = False
+        cur_stop = be_stop if be_stop is not None else stop
+        if (low <= cur_stop) if side == 1 else (h >= cur_stop):
+            px = cur_stop
+            if side == 1 and o < cur_stop:
                 px = o
-            if side == -1 and o > stop:
+            if side == -1 and o > cur_stop:
                 px = o
             gross += (px - fill_px) * side * remaining
             exits.append((px, remaining))
             remaining = 0.0
-            reason = "stop"
+            reason = "be_stop" if be_stop is not None else "stop"
             break
+        if be_stop is None and be_trigger:
+            be_gain = be_trigger * risk
+            if ((h >= fill_px + be_gain) if side == 1 else (low <= fill_px - be_gain)):
+                be_armed_pending = True  # 下一根 K 起按保本价检查; 本根 TP 照常评估
         if stage == 1 and ((h >= target) if side == 1 else (low <= target)):
             gross += (target - fill_px) * side * tp1_qty
             exits.append((target, tp1_qty))
@@ -321,7 +351,11 @@ def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
         exits.append((last_px, remaining))
         reason = "time_stop"
 
-    fees = fee_rate * (notional + sum(px * q for px, q in exits))
+    if maker_fee is not None and taker_fee is not None:
+        entry_fee_rate = taker_fee if entry_taker else maker_fee
+        fees = entry_fee_rate * notional + taker_fee * sum(px * q for px, q in exits)
+    else:
+        fees = fee_rate * (notional + sum(px * q for px, q in exits))
     exit_avg = (sum(px * q for px, q in exits) / qty) if qty else None
     net = gross - fees
     return Outcome(True, reason, fill_px, exit_avg, qty, notional, gross, fees, net,
@@ -439,6 +473,66 @@ def report_variants(rows, neutral_list=()):
             net / risk if risk else 0, net - base_net))
 
 
+
+BE_MODES = (("off", None), ("0.5r", 0.5), ("1r", 1.0))
+
+
+def report_matrix(plans_with_tl, *, args, fee_rate, maker_fee, taker_fee):
+    """保本移损 × 入场方式 × 环境门控 的组合矩阵(D3/D4 寻优用).
+
+    每个组合独立重演一遍成交与出场; gate 过滤在结果行上按变体筛选,
+    与 report_variants 同口径 (filled 行).
+    """
+    gate_filters = [
+        ("全部", lambda r: True),
+        ("禁空", lambda r: r["direction"] == "做多"),
+        ("禁trending_tr", lambda r: r["cycle_position"] != "trending_tr"),
+        ("禁空+禁trend_tr",
+         lambda r: r["direction"] == "做多" and r["cycle_position"] != "trending_tr"),
+        ("禁空+禁trend_tr+禁neutral",
+         lambda r: r["direction"] == "做多" and r["cycle_position"] != "trending_tr"
+         and (r.get("diag_direction") or "") != "neutral"),
+    ]
+    print()
+    print("=== 保本移损 × 入场方式 组合矩阵 (maker=%.4f taker=%.4f) ==="
+          % (maker_fee, taker_fee))
+    print("%-6s %-4s | %-22s %5s %9s %7s %9s" %
+          ("保本", "入场", "环境门控", "笔数", "净U", "胜率", "净/风险"))
+    for be_name, be_tr in BE_MODES:
+        for gtx in (False, True):
+            rows = []
+            for plan, tl in plans_with_tl:
+                out = simulate_plan(
+                    plan, tl,
+                    risk_usdt=args.risk_usdt, fee_rate=fee_rate,
+                    leverage=args.leverage, margin_usdt=args.margin_usdt,
+                    partial_pct=args.partial_pct, timeout_min=args.timeout_min,
+                    time_stop_min=args.time_stop_min,
+                    min_stop_pct=args.min_stop_pct, min_stop_atr=args.min_stop_atr,
+                    be_trigger=be_tr, entry_gtx=gtx,
+                    maker_fee=maker_fee, taker_fee=taker_fee,
+                )
+                if not out.filled:
+                    continue
+                rows.append({
+                    "direction": plan.direction,
+                    "cycle_position": plan.cycle_position,
+                    "diag_direction": plan.diag_direction,
+                    "net": out.net, "risk_usdt": args.risk_usdt,
+                })
+            for gname, gpred in gate_filters:
+                sub = [r for r in rows if gpred(r)]
+                if not sub:
+                    continue
+                net = sum(r["net"] for r in sub)
+                risk = sum(r["risk_usdt"] for r in sub)
+                wr = sum(1 for r in sub if r["net"] > 0) / len(sub) * 100
+                print("%-6s %-4s | %-22s %5d %+9.2f %6.0f%% %+9.2f" %
+                      (be_name, "gtx" if gtx else "gtc", gname,
+                       len(sub), net, wr, net / risk if risk else 0.0))
+    print()
+
+
 def fee_rate_from_outcomes(path):
     """从真实成交反推往返手续费率(手续费 / 名义)的中位数."""
     if not path.exists():
@@ -503,6 +597,14 @@ def run_replay(args):
         tagged = sum(1 for v in trends.values() if v is not None)
         print("日线趋势标签: %d 天, 覆盖 %d/%d 条计划单" % (
             args.trend_days, tagged, len(plans)))
+
+    if getattr(args, "matrix", False):
+        maker_fee = args.maker_fee if args.maker_fee is not None else fee_rate * 0.4
+        taker_fee = args.taker_fee if args.taker_fee is not None else fee_rate * 0.8
+        report_matrix(
+            [(p, timelines.get((p.symbol, p.timeframe), [])) for p in plans],
+            args=args, fee_rate=fee_rate, maker_fee=maker_fee, taker_fee=taker_fee,
+        )
 
     rows = []
     for plan in plans:
@@ -640,6 +742,12 @@ def main():
     ap.add_argument("--timeout-min", type=float, default=DEFAULT_TIMEOUT_MIN)
     ap.add_argument("--time-stop-min", type=float, default=DEFAULT_TIME_STOP_MIN)
     ap.add_argument("--fee-rate", type=float, default=None)
+    ap.add_argument("--matrix", action="store_true",
+                    help="输出 保本移损×入场方式×环境门控 组合矩阵")
+    ap.add_argument("--maker-fee", type=float, default=None,
+                    help="maker 费率(单边); 默认 fee_rate*0.4")
+    ap.add_argument("--taker-fee", type=float, default=None,
+                    help="taker 费率(单边); 默认 fee_rate*0.8")
     ap.add_argument("--min-stop-pct", type=float, default=0.2,
                     help="止损距离下限(%%), 与 min_stop_distance_pct 同步")
     ap.add_argument("--min-stop-atr", type=float, default=0.7,
