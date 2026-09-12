@@ -892,6 +892,18 @@ def stage2_prompt_txt_files(
 # ── PromptAssembler ────────────────────────────────────────────────────────────
 
 
+#: 状态转换期(market_phase=transitioning) trade_confidence 指导带 — 提示文本,
+#: 非硬约束; 硬约束在 decision_stance/执行层。
+TRANSITION_CONFIDENCE_BAND_HIGH = "30–45"
+TRANSITION_CONFIDENCE_BAND_MEDIUM = "45–60"
+TRANSITION_CONFIDENCE_BAND_LOW = "约 55–65"
+#: 计划型限价"贴近结构位"判定系数: 贴近距离 = max(ATR*系数, 价格*系数);
+#: 无有效 ATR 时回落 价格*回落系数。
+LIMIT_PROXIMITY_ATR_FACTOR = 0.35
+LIMIT_PROXIMITY_PRICE_FACTOR = 0.0008
+LIMIT_PROXIMITY_FALLBACK_FACTOR = 0.002
+
+
 class PromptAssembler:
     """Builds message lists for Stage 1 and Stage 2 API calls."""
 
@@ -901,10 +913,12 @@ class PromptAssembler:
         experience_reader: Any = None,
         *,
         prompt_settings: Any = None,
+        feedback_settings: Any = None,
     ) -> None:
         self._prompt_dir = prompt_dir
         self._experience_reader = experience_reader
         self._prompt_settings = prompt_settings
+        self._feedback_settings = feedback_settings
         self._txt_cache: dict[str, str] = {}
 
     def _load_full_strategy_library(self) -> bool:
@@ -1817,10 +1831,14 @@ class PromptAssembler:
         绝不打断分析流程.
         """
         try:
-            from pa_agent.config.settings import load_settings
             from pa_agent.feedback.base_rate_injector import load_stats_block
 
-            feedback = load_settings().feedback
+            # 优先用构造器注入的配置; 兜底 load_settings 仅服务未注入的调用方(tools)。
+            feedback = self._feedback_settings
+            if feedback is None:
+                from pa_agent.config.settings import load_settings
+
+                feedback = load_settings().feedback
             return load_stats_block(feedback)
         except Exception:  # noqa: BLE001 - best-effort injection
             return ""
@@ -1911,13 +1929,19 @@ class PromptAssembler:
             return ""
         risk = stage1_json.get("transition_risk") or "medium"
         if risk == "high":
-            size = "trade_confidence 倾向 30–45，只接受二次入场/突破回踩/边界强信号"
+            size = (
+                f"trade_confidence 倾向 {TRANSITION_CONFIDENCE_BAND_HIGH}，"
+                "只接受二次入场/突破回踩/边界强信号"
+            )
             selectivity = "只接受最清晰的二次入场、突破回踩或边界信号"
         elif risk == "medium":
-            size = "trade_confidence 倾向 45–60，放弃弱信号与中部位置"
+            size = (
+                f"trade_confidence 倾向 {TRANSITION_CONFIDENCE_BAND_MEDIUM}，"
+                "放弃弱信号与中部位置"
+            )
             selectivity = "选择性入场，放弃弱信号和中间位置"
         else:
-            size = "trade_confidence 略降（约 55–65）"
+            size = f"trade_confidence 略降（{TRANSITION_CONFIDENCE_BAND_LOW}）"
             selectivity = "保持正常流程，但在 reason 中说明状态转换风险"
         return (
             "## 状态转换期风险指导\n\n"
@@ -1978,7 +2002,11 @@ class PromptAssembler:
         except (TypeError, ValueError, IndexError):
             atr = None
 
-        proximity = max(atr * 0.35, abs(close) * 0.0008) if atr and atr > 0 else abs(close) * 0.002
+        proximity = (
+            max(atr * LIMIT_PROXIMITY_ATR_FACTOR, abs(close) * LIMIT_PROXIMITY_PRICE_FACTOR)
+            if atr and atr > 0
+            else abs(close) * LIMIT_PROXIMITY_FALLBACK_FACTOR
+        )
 
         supports = stage1_json.get("support_levels") or []
         resistances = stage1_json.get("resistance_levels") or []
