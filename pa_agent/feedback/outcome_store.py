@@ -50,7 +50,7 @@ OUTCOME_FIELDNAMES = [
     "stop", "target", "net_usdt", "fees_usdt", "risk_usdt", "win_r", "outcome",
     "close_reason", "conf", "cycle_position", "diag_direction", "strategy_files",
     "patterns", "stance", "model", "ts_record", "ts_open", "ts_close", "source",
-    "record_file",
+    "record_file", "era",
 ]
 
 _AUDIT_INCOME_TYPES = ("REALIZED_PNL", "COMMISSION")
@@ -59,6 +59,16 @@ _AUDIT_INCOME_TYPES = ("REALIZED_PNL", "COMMISSION")
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _current_strategy_era() -> str:
+    """当前策略纪元标记(D2): settings.general.strategy_era, 读取失败返回空。"""
+    try:
+        from pa_agent.config.settings import load_settings
+
+        return str(load_settings().general.strategy_era or "")
+    except Exception:
+        return ""
 
 
 def _local_ms_to_epoch(local_ms: int) -> int:
@@ -433,6 +443,7 @@ def build_outcome_rows(
             "conf": t.get("conf"),
             "cycle_position": str(row.get("cycle_position") or ""),
             "diag_direction": str(row.get("direction") or ""),
+            "era": str(row.get("era") or _current_strategy_era()),
             "strategy_files": tuple(row.get("strategy_files") or ()),
             "patterns": tuple(row.get("patterns") or ()),
             "stance": str(row.get("stance") or ""),
