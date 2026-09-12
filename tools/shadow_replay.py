@@ -402,6 +402,10 @@ def report_variants(rows, neutral_list=()):
         ("RR>=1.5", lambda r: (r["rr"] or 0) >= 1.5),
         ("RR>=2.0", lambda r: (r["rr"] or 0) >= 2.0),
         ("禁 trending_tr", lambda r: r["cycle_position"] != "trending_tr"),
+        ("禁neutral诊断", lambda r: (r.get("diag_direction") or "") != "neutral"),
+        ("禁空+禁trend_tr+禁neutral",
+         lambda r: r["direction"] == "做多" and r["cycle_position"] != "trending_tr"
+         and (r.get("diag_direction") or "") != "neutral"),
         ("禁空+禁trending_tr", lambda r: r["direction"] == "做多" and r["cycle_position"] != "trending_tr"),
         ("normal_channel且做多", lambda r: r["cycle_position"] == "normal_channel" and r["direction"] == "做多"),
         ("trade_conf>=55", lambda r: (r["trade_conf"] or 0) >= 55),

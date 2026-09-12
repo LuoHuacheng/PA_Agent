@@ -150,9 +150,24 @@ class SignalPipeline:
         *,
         frame: Any = None,
         previous_record: Any = None,
+        decision: dict | None = None,
     ) -> Evaluation:
         if not self.has_order_opportunity(inner):
             return Evaluation(opportunity=False)
+        env_reasons = self._entry_block_reasons(inner, decision=decision)
+        if env_reasons:
+            cfg = self._binance_cfg
+            gates_key = ",".join(sorted(r.split(":", 1)[0] for r in env_reasons))
+            if self._on_gate_hit is not None:
+                try:
+                    self._on_gate_hit(gates_key)
+                except Exception:
+                    logger.debug("entry-gate stats callback failed", exc_info=True)
+            logger.warning(
+                "[入口门控] %s 拦截 %s: %s",
+                self._frame_label(frame), gates_key, "; ".join(env_reasons),
+            )
+            return Evaluation(opportunity=True, gate_reasons=env_reasons, gate_mode="on")
         reasons = self._direction_gate_reasons(
             inner, frame=frame, previous_record=previous_record
         )
@@ -178,6 +193,29 @@ class SignalPipeline:
 
     def _frame_label(self, frame: Any) -> str:
         return f"{getattr(frame, 'symbol', '?')} {getattr(frame, 'timeframe', '?')}"
+
+    def _entry_block_reasons(self, inner: dict, *, decision: dict | None = None) -> tuple[str, ...]:
+        """入口环境门控（与方向闸门独立, 不受 direction_gates_mode 影响）。
+
+        配置默认全关; 开关组合来自 2026-09-13 的 45 天影子回放变体验证,
+        见 settings.py block_*_entry 注释与 tools/shadow_replay.py。
+        """
+        cfg = self._binance_cfg
+        reasons: list[str] = []
+        direction = str(inner.get("order_direction") or "")
+        if getattr(cfg, "block_short_entry", False) and "空" in direction:
+            reasons.append("short_block: 回放 45 天空单胜率 16%")
+        diag = {}
+        if isinstance(decision, dict):
+            diag = decision.get("diagnosis_summary") or {}
+            if not isinstance(diag, dict):
+                diag = {}
+        cycle = str(diag.get("cycle_position") or "")
+        if getattr(cfg, "block_trending_tr_entry", False) and cycle == "trending_tr":
+            reasons.append("trending_tr_block: 回放 118 笔净/风险 -0.55")
+        if getattr(cfg, "block_neutral_diag_entry", False) and str(diag.get("direction") or "") == "neutral":
+            reasons.append("neutral_diag_block: 实盘 neutral 单胜率 25%")
+        return tuple(reasons)
 
     def _direction_gate_reasons(
         self, inner: dict, *, frame: Any, previous_record: Any
@@ -210,7 +248,10 @@ class SignalPipeline:
 
     def dispatch(self, signal: OrderSignal) -> DispatchResult:
         evaluation = self.evaluate(
-            signal.inner, frame=signal.frame, previous_record=signal.previous_record
+            signal.inner,
+            frame=signal.frame,
+            previous_record=signal.previous_record,
+            decision=signal.decision,
         )
         if not evaluation.opportunity:
             return DispatchResult(opportunity=False)

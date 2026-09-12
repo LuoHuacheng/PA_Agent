@@ -104,6 +104,9 @@ class GeneralSettings(BaseModel):
     auto_resume_chart_after_analysis: bool = False
     #: 持续跟踪分析：有新K线收盘时自动触发新一轮分析
     keep_analysis: bool = False
+    #: 策略纪元标记: 每上线一组门控/参数就更新(如 "gates-2026-09-13"),
+    #: 让盈亏归因不跨纪元混叠(D2; tools/audit/pnl_weekly.py 按此分时报表)。
+    strategy_era: str = ""
     #: 重试后取消持续跟踪分析：校验失败触发重试后自动关闭 keep_analysis
     cancel_keep_analysis_on_retry: bool = False
     #: 交易决策置信度门槛：仅当 trade_confidence >= 此值时，才视为有下单机会（弹窗警报并提供决策详情）
@@ -249,6 +252,13 @@ class BinanceUSDMTestnetSettings(BaseModel):
     counter_trend_min_confidence: int = Field(default=55, ge=0, le=100)
     # 逆大趋势且通过门槛的单, 杠杆 (名义仓位随杠杆同比例) 乘以此系数, 最小 1x.
     counter_trend_size_scale: float = Field(default=0.5, ge=0.1, le=1.0)
+    # --- 入口环境门控 (2026-09-13 shadow_replay 45 天变体验证后新增) ---
+    # 三项只拦自动执行入口(signal_pipeline.evaluate), 不影响信号记录与推送。
+    # 依据: 回放 45 天, 空单 87 笔胜率 16% 净/风险 -0.77; trending_tr 118 笔
+    # 胜率 25% 净/风险 -0.55; 实盘 73 笔中 neutral 诊断单 20 笔胜率 25%。
+    block_short_entry: bool = False
+    block_trending_tr_entry: bool = False
+    block_neutral_diag_entry: bool = False
     # --- 日度亏损熔断 ---
     # 当日已实现净亏损(REALIZED_PNL + COMMISSION, 不含资金费)达到该值时停止自动
     # 开新仓, 次日(本地日)自动解除。0 = 关闭。账本查询 weight 30, 所以当天一旦

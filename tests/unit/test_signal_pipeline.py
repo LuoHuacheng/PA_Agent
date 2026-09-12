@@ -207,3 +207,64 @@ def test_gate_off_skips_gate_evaluation_entirely(monkeypatch, tmp_path: Path) ->
     pipeline = SignalPipeline(settings)
     assert pipeline.evaluate(_decision(), frame=_frame()).gate_mode == "off"
     assert called["gates"] == 0
+
+
+# ── 入口环境门控 (block_*_entry) ────────────────────────────────────────────
+
+def _env_signal(direction: str, cycle: str, diag: str, conf: int = 90) -> OrderSignal:
+    decision = {
+        "decision": {
+            "order_type": "市价单",
+            "order_direction": direction,
+            "trade_confidence": conf,
+            "entry_price": 100,
+            "stop_loss_price": 95,
+            "take_profit_price": 110,
+        },
+        "diagnosis_summary": {"cycle_position": cycle, "direction": diag},
+    }
+    return OrderSignal(decision=decision, inner=decision["decision"], symbol="BTCUSDT")
+
+
+def _env_settings(**flags: bool) -> Settings:
+    settings = Settings()
+    settings.general.decision_stance = "balanced"  # floor 40, conf=90 必过
+    cfg = settings.binance_usdm_testnet
+    for key, value in flags.items():
+        setattr(cfg, key, value)
+    return settings
+
+
+def test_all_entry_gates_off_by_default(monkeypatch) -> None:
+    exec_calls, _ = _patch_io(monkeypatch)
+    pipeline = SignalPipeline(_env_settings())
+    result = pipeline.dispatch(_env_signal("做空", "trending_tr", "neutral"))
+    assert result.gate_blocked is False
+    assert len(exec_calls) == 1
+
+
+def test_block_short_entry(monkeypatch) -> None:
+    exec_calls, _ = _patch_io(monkeypatch)
+    pipeline = SignalPipeline(_env_settings(block_short_entry=True))
+    result = pipeline.dispatch(_env_signal("做空", "normal_channel", "bullish"))
+    assert result.gate_blocked and "short_block" in result.gate_reasons[0]
+    assert exec_calls == []
+    # 做多不受影响
+    result2 = pipeline.dispatch(_env_signal("做多", "normal_channel", "bullish"))
+    assert not result2.gate_blocked and len(exec_calls) == 1
+
+
+def test_block_trending_tr_entry(monkeypatch) -> None:
+    exec_calls, _ = _patch_io(monkeypatch)
+    pipeline = SignalPipeline(_env_settings(block_trending_tr_entry=True))
+    result = pipeline.dispatch(_env_signal("做多", "trending_tr", "bullish"))
+    assert result.gate_blocked and "trending_tr_block" in result.gate_reasons[0]
+    assert exec_calls == []
+
+
+def test_block_neutral_diag_entry(monkeypatch) -> None:
+    exec_calls, _ = _patch_io(monkeypatch)
+    pipeline = SignalPipeline(_env_settings(block_neutral_diag_entry=True))
+    result = pipeline.dispatch(_env_signal("做多", "trading_range", "neutral"))
+    assert result.gate_blocked and "neutral_diag_block" in result.gate_reasons[0]
+    assert exec_calls == []
