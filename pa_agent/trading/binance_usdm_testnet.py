@@ -961,34 +961,16 @@ def execute_market_signal(
     client: BinanceUSDMTestnetClient | None = None,
     prefetched_trend_pct: float | None = None,
 ) -> ExecutionResult:
-    """Execute one validated market signal (one-shot; no rate-limit retries).
+    """Execute one validated market signal, with mandatory TP/SL protection.
 
-    Binance Testnet shares public egress IPs and frequently answers HTTP 418
-    (code -1003, IP banned). The request layer now refuses to send anything
-    while a ban is live, and retrying a rate-limited submission only extends
-    the penalty, so rate-limit failures are NOT retried - every other failure
-    also stays one-shot. Re-entry is safe because the first attempt never
-    records the signal on a failed path and the open-position guard blocks
-    duplicate entries.
+    One-shot; no rate-limit retries. Binance Testnet shares public egress IPs
+    and frequently answers HTTP 418 (code -1003, IP banned). The request layer
+    now refuses to send anything while a ban is live, and retrying a
+    rate-limited submission only extends the penalty, so rate-limit failures
+    are NOT retried - every other failure also stays one-shot. Re-entry is safe
+    because the first attempt never records the signal on a failed path and the
+    open-position guard blocks duplicate entries.
     """
-    return _execute_market_signal_once(
-        decision,
-        settings,
-        analysis_symbol=analysis_symbol,
-        client=client,
-        prefetched_trend_pct=prefetched_trend_pct,
-    )
-
-
-def _execute_market_signal_once(
-    decision: dict[str, Any],
-    settings: Settings | None,
-    *,
-    analysis_symbol: str = "",
-    client: BinanceUSDMTestnetClient | None = None,
-    prefetched_trend_pct: float | None = None,
-) -> ExecutionResult:
-    """Execute one validated market signal, with mandatory TP/SL protection."""
     configure_binance_environment(settings)
     conflict = binance_env.env_conflicts(settings)
     if conflict:
@@ -1202,47 +1184,23 @@ def _execute_market_signal_once(
                 f"({gap:.3f}% < {stop_floor:.3f}% minimum)",
                 symbol,
             )
-        active_client.set_leverage(symbol, leverage)
-        entry = active_client.place_market_order(
+        return _enter_and_protect(
+            active_client,
             symbol=symbol,
             side=side,
             quantity=quantity,
-            client_id=_entry_client_id(signal_id),
-        )
-        target2 = _positive_decimal(decision.get("take_profit_price_2"))
-        try:
-            sl_algo_id, tp_algo_id, partial_qty = _attach_protection(
-                active_client, symbol, side, stop, target,
-                quantity=quantity, target2=target2,
-                partial_pct=float(config.tp_partial_close_pct or 0.0),
-            )
-        except BinanceAPIError:
-            # Never leave an unprotected automatically-created position.
-            active_client.close_market_position(
-                symbol=symbol, side="SELL" if side == "BUY" else "BUY", quantity=quantity
-            )
-            raise
-        _remember_signal(signal_id)
-        _maybe_guard(
-            active_client,
-            config,
-            symbol,
-            side,
-            stop,
-            target,
-            sl_algo_id,
-            signal_conf,
-            quantity=quantity,
-            target2=target2,
-            tp_algo_id=tp_algo_id,
-            partial_qty=partial_qty,
-        )
-        return ExecutionResult(
-            "submitted",
-            f"{active_environment().label_en} entry and protective orders submitted" + trend_note,
-            symbol,
-            _decimal_text(quantity),
-            str(entry.get("orderId", "")),
+            leverage=leverage,
+            stop=stop,
+            target=target,
+            target2=_positive_decimal(decision.get("take_profit_price_2")),
+            partial_pct=float(config.tp_partial_close_pct or 0.0),
+            signal_id=signal_id,
+            conf=signal_conf,
+            config=config,
+            message=(
+                f"{active_environment().label_en} entry and protective orders submitted"
+                + trend_note
+            ),
         )
     except (BinanceAPIError, ValueError) as exc:
         message = str(exc)
@@ -1294,42 +1252,23 @@ def _execute_limit_signal(
     if crosses_mark:
         # A crossed limit would fill immediately. Submit a market entry instead
         # so protection is attached through the same rollback-safe path.
-        client.set_leverage(symbol, leverage)
-        entry = client.place_market_order(
+        return _enter_and_protect(
+            client,
             symbol=symbol,
             side=side,
             quantity=quantity,
-            client_id=_entry_client_id(signal_id),
-        )
-        target2 = _positive_decimal(decision.get("take_profit_price_2"))
-        try:
-            sl_algo_id, tp_algo_id, partial_qty = _attach_protection(
-                client, symbol, side, stop, target,
-                quantity=quantity, target2=target2,
-                partial_pct=float(config.tp_partial_close_pct or 0.0),
-            )
-        except BinanceAPIError:
-            client.close_market_position(
-                symbol=symbol,
-                side="SELL" if side == "BUY" else "BUY",
-                quantity=quantity,
-            )
-            raise
-        _remember_signal(signal_id)
-        _maybe_guard(
-            client, config, symbol, side, stop, target, sl_algo_id, conf,
-            quantity=quantity,
-            target2=target2,
-            tp_algo_id=tp_algo_id,
-            partial_qty=partial_qty,
-        )
-        return ExecutionResult(
-            "submitted",
-            "Limit entry crossed mark price; submitted market entry and protective orders"
-            + trend_note,
-            symbol,
-            _decimal_text(quantity),
-            str(entry.get("orderId", "")),
+            leverage=leverage,
+            stop=stop,
+            target=target,
+            target2=_positive_decimal(decision.get("take_profit_price_2")),
+            partial_pct=float(config.tp_partial_close_pct or 0.0),
+            signal_id=signal_id,
+            conf=conf,
+            config=config,
+            message=(
+                "Limit entry crossed mark price; submitted market entry and "
+                "protective orders" + trend_note
+            ),
         )
     replacement = _replace_pending_limit(client, symbol, config)
     if replacement is not None:
@@ -1581,6 +1520,65 @@ def _attach_protection(
                 logger.exception(f"Failed to cancel orphaned {active_environment().label_en} protective order")
         raise
     return stop_algo_id, target_algo_id, partial_qty
+
+
+def _enter_and_protect(
+    client: BinanceUSDMTestnetClient,
+    *,
+    symbol: str,
+    side: str,
+    quantity: Decimal,
+    leverage: int,
+    stop: Decimal,
+    target: Decimal,
+    target2: Decimal | None,
+    partial_pct: float,
+    signal_id: str,
+    conf: float | None,
+    config: BinanceUSDMTestnetSettings,
+    message: str,
+) -> ExecutionResult:
+    """Place a market entry, attach SL/TP protection, roll back on failure.
+
+    Single owner of the entry sequence shared by the market pipeline and the
+    crossed-limit pipeline. The rollback invariant ("never leave an
+    unprotected automatically-created position") holds by construction instead
+    of by keeping two copies in sync.
+    """
+    client.set_leverage(symbol, leverage)
+    entry = client.place_market_order(
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        client_id=_entry_client_id(signal_id),
+    )
+    try:
+        sl_algo_id, tp_algo_id, partial_qty = _attach_protection(
+            client, symbol, side, stop, target,
+            quantity=quantity, target2=target2,
+            partial_pct=partial_pct,
+        )
+    except BinanceAPIError:
+        # Never leave an unprotected automatically-created position.
+        client.close_market_position(
+            symbol=symbol, side="SELL" if side == "BUY" else "BUY", quantity=quantity
+        )
+        raise
+    _remember_signal(signal_id)
+    _maybe_guard(
+        client, config, symbol, side, stop, target, sl_algo_id, conf,
+        quantity=quantity,
+        target2=target2,
+        tp_algo_id=tp_algo_id,
+        partial_qty=partial_qty,
+    )
+    return ExecutionResult(
+        "submitted",
+        message,
+        symbol,
+        _decimal_text(quantity),
+        str(entry.get("orderId", "")),
+    )
 
 
 
@@ -2469,8 +2467,6 @@ def _tp_runner_loop(
                         return
                     time.sleep(poll_seconds)
                     continue
-                    time.sleep(poll_seconds)
-                    continue
             _drop_guard(symbol)
             logger.info("TP runner: %s position closed; cleared partial TP1 %s",
                 symbol, tp_algo_id,
@@ -2939,6 +2935,41 @@ def _maybe_guard(
             side,
             time_stop_minutes,
         )
+def _resume_guards(
+    settings: Settings | None,
+    *,
+    label: str,
+    kind_enabled: Callable[[BinanceUSDMTestnetSettings], bool],
+    spawn: Callable[[BinanceUSDMTestnetClient, str, dict[str, Any], BinanceUSDMTestnetSettings], bool],
+    client: BinanceUSDMTestnetClient | None = None,
+) -> int:
+    """Shared restart-resume skeleton for the position-lifecycle managers.
+
+    Owns the common sequence - environment resolution, global kill gates,
+    guard-record snapshot, client construction - so each manager only declares
+    its kind gate and per-record spawn predicate.
+    """
+    configure_binance_environment(settings)
+    config = binance_env.active_cfg(settings)
+    if not config.enabled or config.dry_run or config.emergency_stop:
+        return 0
+    if not kind_enabled(config):
+        return 0
+    records = {
+        symbol: dict(record)
+        for symbol, record in _STATE_STORE.guards_all().items()
+        if isinstance(record, dict)
+    }
+    if not records:
+        return 0
+    try:
+        active = client or BinanceUSDMTestnetClient(config.api_key, config.api_secret)
+    except ValueError as exc:
+        logger.error("Cannot resume %s: %s", label, exc)
+        return 0
+    return sum(1 for symbol, record in records.items() if spawn(active, symbol, record, config))
+
+
 def resume_breakeven_guards(
     settings: Settings | None = None,
     *,
@@ -2949,34 +2980,18 @@ def resume_breakeven_guards(
     Returns the number of guards resumed. Guards that already moved their stop
     (or whose position is gone) exit immediately on their first poll.
     """
-    configure_binance_environment(settings)
-    config = binance_env.active_cfg(settings)
-    if not config.enabled or config.dry_run or config.emergency_stop:
-        return 0
-    if str(config.breakeven_stop_trigger) == "off":
-        return 0
-    with _STATE_LOCK:
-        guards = _STATE_STORE.guards_all()
-        records = (
-            {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
-            if isinstance(guards, dict)
-            else {}
-        )
-    if not records:
-        return 0
-    try:
-        active = client or BinanceUSDMTestnetClient(config.api_key, config.api_secret)
-    except ValueError as exc:
-        logger.error("Cannot resume breakeven guards: %s", exc)
-        return 0
-    resumed = 0
-    for symbol, record in records.items():
+
+    def _spawn(
+        active: BinanceUSDMTestnetClient,
+        symbol: str,
+        record: dict[str, Any],
+        config: BinanceUSDMTestnetSettings,
+    ) -> bool:
         if record.get("moved"):
-            continue
-        conf = record.get("conf")
-        if not _guard_enabled(config, conf):
-            continue
-        watcher = threading.Thread(
+            return False
+        if not _guard_enabled(config, record.get("conf")):
+            return False
+        threading.Thread(
             target=_breakeven_guard_loop,
             kwargs={
                 "client": active,
@@ -2986,10 +3001,16 @@ def resume_breakeven_guards(
                 "floor_pct": float(config.min_stop_distance_pct),
             },
             daemon=True,
-        )
-        watcher.start()
-        resumed += 1
-    return resumed
+        ).start()
+        return True
+
+    return _resume_guards(
+        settings,
+        label="breakeven guards",
+        kind_enabled=lambda c: str(c.breakeven_stop_trigger) != "off",
+        spawn=_spawn,
+        client=client,
+    )
 
 
 def resume_tp_runners(
@@ -3008,30 +3029,15 @@ def resume_tp_runners(
 
     Returns the number of runners resumed.
     """
-    configure_binance_environment(settings)
-    config = binance_env.active_cfg(settings)
-    if not config.enabled or config.dry_run or config.emergency_stop:
-        return 0
-    if float(config.tp_partial_close_pct or 0.0) <= 0:
-        return 0
-    with _STATE_LOCK:
-        guards = _STATE_STORE.guards_all()
-        records = (
-            {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
-            if isinstance(guards, dict)
-            else {}
-        )
-    if not records:
-        return 0
-    try:
-        active = client or BinanceUSDMTestnetClient(config.api_key, config.api_secret)
-    except ValueError as exc:
-        logger.error("Cannot resume TP partial runners: %s", exc)
-        return 0
-    resumed = 0
-    for symbol, record in records.items():
+
+    def _spawn(
+        active: BinanceUSDMTestnetClient,
+        symbol: str,
+        record: dict[str, Any],
+        config: BinanceUSDMTestnetSettings,
+    ) -> bool:
         if record.get("partial_done"):
-            continue
+            return False
         tp_algo_id = str(record.get("tp_algo_id") or "")
         stop_algo_id = str(record.get("stop_algo_id") or "")
         if (
@@ -3041,8 +3047,8 @@ def resume_tp_runners(
             or not tp_algo_id
             or not stop_algo_id
         ):
-            continue  # 旧 guard 记录/残缺记录: 留给 guard resume 处理
-        runner = threading.Thread(
+            return False  # 旧 guard 记录/残缺记录: 留给 guard resume 处理
+        threading.Thread(
             target=_tp_runner_loop,
             kwargs={
                 "client": active,
@@ -3051,11 +3057,19 @@ def resume_tp_runners(
                 "floor_pct": float(config.min_stop_distance_pct),
             },
             daemon=True,
-        )
-        runner.start()
-        resumed += 1
+        ).start()
         logger.info("Resumed TP partial runner for %s", symbol)
-    return resumed
+        return True
+
+    return _resume_guards(
+        settings,
+        label="TP partial runners",
+        kind_enabled=lambda c: float(c.tp_partial_close_pct or 0.0) > 0,
+        spawn=_spawn,
+        client=client,
+    )
+
+
 def resume_time_stops(
     settings: Settings | None = None,
     *,
@@ -3066,47 +3080,83 @@ def resume_time_stops(
     Any record with a side and ts gets a manager (records at or past their
     deadline are closed on the first poll). Returns the resumed count.
     """
-    configure_binance_environment(settings)
-    config = binance_env.active_cfg(settings)
-    if not config.enabled or config.dry_run or config.emergency_stop:
-        return 0
-    minutes = int(config.time_stop_minutes or 0)
-    if minutes <= 0:
-        return 0
-    with _STATE_LOCK:
-        guards = _STATE_STORE.guards_all()
-        records = (
-            {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
-            if isinstance(guards, dict)
-            else {}
-        )
-    if not records:
-        return 0
-    try:
-        active = client or BinanceUSDMTestnetClient(config.api_key, config.api_secret)
-    except ValueError as exc:
-        logger.error("Cannot resume time-stop managers: %s", exc)
-        return 0
-    resumed = 0
-    for symbol, record in records.items():
+
+    def _spawn(
+        active: BinanceUSDMTestnetClient,
+        symbol: str,
+        record: dict[str, Any],
+        config: BinanceUSDMTestnetSettings,
+    ) -> bool:
         ts = record.get("ts")
         side = str(record.get("side") or "")
         if not isinstance(ts, (int, float)) or ts <= 0 or side not in ("BUY", "SELL"):
-            continue
-        thread = threading.Thread(
+            return False
+        threading.Thread(
             target=_timestop_loop,
             kwargs={
                 "client": active,
                 "symbol": symbol,
-                "stop_minutes": float(minutes),
+                "stop_minutes": float(config.time_stop_minutes or 0),
                 "poll_seconds": float(config.breakeven_poll_seconds),
             },
             daemon=True,
-        )
-        thread.start()
-        resumed += 1
+        ).start()
         logger.info("Resumed time-stop manager for %s", symbol)
-    return resumed
+        return True
+
+    return _resume_guards(
+        settings,
+        label="time-stop managers",
+        kind_enabled=lambda c: int(c.time_stop_minutes or 0) > 0,
+        spawn=_spawn,
+        client=client,
+    )
+
+
+def resume_stop_watchdogs(
+    settings: Settings | None = None,
+    *,
+    client: BinanceUSDMTestnetClient | None = None,
+) -> int:
+    """Re-arm protective-stop watchdogs after a restart.
+
+    Runner/guard threads do not survive a restart. Records whose managers had
+    already finished (partial_done / moved) or that sit mid-TP2 previously had
+    NO watcher at all: a stop that died server-side (cancel race / precision
+    bug / manual removal) left the position naked until the next restart.
+    Unmoved records (breakeven / TP1 not reached) are armed too, because their
+    managers only look at the stop once their own trigger fires.
+    Returns the number of watchdogs resumed.
+    """
+
+    def _spawn(
+        active: BinanceUSDMTestnetClient,
+        symbol: str,
+        record: dict[str, Any],
+        config: BinanceUSDMTestnetSettings,
+    ) -> bool:
+        if str(record.get("side") or "") not in ("BUY", "SELL"):
+            return False
+        threading.Thread(
+            target=_stop_watchdog_loop,
+            kwargs={
+                "client": active,
+                "symbol": symbol,
+                "poll_seconds": float(config.breakeven_poll_seconds),
+                "floor_pct": float(config.min_stop_distance_pct),
+            },
+            daemon=True,
+        ).start()
+        logger.info("Resumed stop watchdog for %s", symbol)
+        return True
+
+    return _resume_guards(
+        settings,
+        label="stop watchdogs",
+        kind_enabled=lambda c: True,
+        spawn=_spawn,
+        client=client,
+    )
 
 
 #: 未进入保本/TP2 阶段的持仓: breakeven guard 与 TP runner 只在各自触发点才
@@ -3291,60 +3341,6 @@ def _stop_watchdog_loop(
             )
         consecutive_errors = 0
         time.sleep(poll_seconds)
-
-
-def resume_stop_watchdogs(
-    settings: Settings | None = None,
-    *,
-    client: BinanceUSDMTestnetClient | None = None,
-) -> int:
-    """Re-arm protective-stop watchdogs after a restart.
-
-    Runner/guard threads do not survive a restart. Records whose managers had
-    already finished (partial_done / moved) or that sit mid-TP2 previously had
-    NO watcher at all: a stop that died server-side (cancel race / precision
-    bug / manual removal) left the position naked until the next restart.
-    Unmoved records (breakeven / TP1 not reached) are armed too, because their
-    managers only look at the stop once their own trigger fires.
-    Returns the number of watchdogs resumed.
-    """
-    configure_binance_environment(settings)
-    config = binance_env.active_cfg(settings)
-    if not config.enabled or config.dry_run or config.emergency_stop:
-        return 0
-    with _STATE_LOCK:
-        guards = _STATE_STORE.guards_all()
-        records = (
-            {s: dict(r) for s, r in guards.items() if isinstance(r, dict)}
-            if isinstance(guards, dict)
-            else {}
-        )
-    if not records:
-        return 0
-    try:
-        active = client or BinanceUSDMTestnetClient(config.api_key, config.api_secret)
-    except ValueError as exc:
-        logger.error("Cannot resume stop watchdogs: %s", exc)
-        return 0
-    resumed = 0
-    for symbol, record in records.items():
-        side = str(record.get("side") or "")
-        if side not in ("BUY", "SELL"):
-            continue
-        thread = threading.Thread(
-            target=_stop_watchdog_loop,
-            kwargs={
-                "client": active,
-                "symbol": symbol,
-                "poll_seconds": float(config.breakeven_poll_seconds),
-                "floor_pct": float(config.min_stop_distance_pct),
-            },
-            daemon=True,
-        )
-        thread.start()
-        resumed += 1
-        logger.info("Resumed stop watchdog for %s", symbol)
-    return resumed
 
 
 def _settle_after_entry_gone(
