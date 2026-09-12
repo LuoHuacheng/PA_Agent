@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
-
+from pa_agent.ai.ai_client import AIClient
 from pa_agent.ai.deepseek_client import DeepSeekClient
 from pa_agent.config.settings import AIProviderSettings
 
@@ -12,7 +11,7 @@ from pa_agent.config.settings import AIProviderSettings
 def create_ai_client(
     settings: AIProviderSettings,
     logger_: logging.Logger | None = None,
-) -> Any:
+) -> AIClient:
     """Return the OpenAI-compatible DeepSeekClient for the configured provider.
 
     Every AI request goes through the same OpenAI-compatible client; the

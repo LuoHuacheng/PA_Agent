@@ -77,14 +77,10 @@ def _is_deepseek_model(model: str) -> bool:
 
 
 def supports_kv_prefix_chain(settings: AIProviderSettings | None) -> bool:
-    """Whether Stage 2 may chain after Stage 1 messages for DeepSeek KV prefix cache.
+    """Capability判定归 ai_client(传输层 seam); 保留 re-export 兼容旧引用。"""
+    from pa_agent.ai.ai_client import supports_kv_prefix_chain as _impl
 
-    Only DeepSeek-family endpoints benefit from the prefix-cache chain; all
-    other OpenAI-compatible gateways answer standalone.
-    """
-    if settings is None:
-        return True
-    return _is_deepseek_native(settings.base_url) or _is_deepseek_model(settings.model)
+    return _impl(settings)
 
 
 def _extract_cached_prompt_tokens(usage: Any) -> int:

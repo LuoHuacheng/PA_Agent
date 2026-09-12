@@ -1073,53 +1073,7 @@ class TwoStageOrchestrator:
 
     @staticmethod
     def _is_network_error(exc: Exception) -> bool:
-        """Return True if *exc* is a network/timeout error (SDK, httpx, or OS reset)."""
-        from pa_agent.ai.deepseek_client import CancelledError
+        """传输错误判定归 ai_client seam(厂商知识不再留在编排层)。"""
+        from pa_agent.ai.ai_client import is_transport_error
 
-        if isinstance(exc, CancelledError):
-            return False
-
-        try:
-            import openai  # type: ignore[import]
-
-            if isinstance(
-                exc,
-                (
-                    openai.APITimeoutError,
-                    openai.APIConnectionError,
-                    openai.APIStatusError,
-                ),
-            ):
-                return True
-        except ImportError:
-            pass
-
-        try:
-            import httpx  # type: ignore[import]
-
-            if isinstance(
-                exc,
-                (
-                    httpx.ReadError,
-                    httpx.ConnectError,
-                    httpx.TimeoutException,
-                    httpx.RemoteProtocolError,
-                ),
-            ):
-                return True
-        except ImportError:
-            pass
-
-        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, TimeoutError)):
-            return True
-        if isinstance(exc, OSError) and getattr(exc, "winerror", None) in (
-            10054,  # WSAECONNRESET — remote host closed connection
-            10053,  # WSAECONNABORTED
-            10060,  # WSAETIMEDOUT
-        ):
-            return True
-
-        cause = exc.__cause__
-        if cause is not None and cause is not exc:
-            return TwoStageOrchestrator._is_network_error(cause)
-        return False
+        return is_transport_error(exc)
