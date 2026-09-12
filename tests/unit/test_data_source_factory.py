@@ -11,9 +11,7 @@ from pa_agent.data.factory import (
     default_tradingview_exchange,
     normalize_data_source_kind,
 )
-from pa_agent.data.eastmoney_source import EastMoneySource
 from pa_agent.data.mt5 import MT5Source
-from pa_agent.data.tushare_source import TushareSource
 from pa_agent.data.tradingview import TradingViewSource
 
 
@@ -32,13 +30,6 @@ def test_mt5_is_not_a_ui_choice_on_non_windows():
         assert "mt5" not in {kind for kind, _ in DATA_SOURCE_CHOICES}
 
 
-def test_normalize_data_source_kind_hidden_sources():
-    assert normalize_data_source_kind("akshare") == "akshare"
-    assert normalize_data_source_kind("eastmoney") == "eastmoney"
-    assert normalize_data_source_kind("tushare") == "tushare"
-    assert normalize_data_source_kind("yfinance") == "yfinance"
-
-
 def test_mt5_in_ui_choices():
     """MT5 仅 Windows 时在 UI 可选列表中且排首位；非 Windows 时不可选。"""
     ui_kinds = {k for k, _ in DATA_SOURCE_CHOICES}
@@ -47,22 +38,12 @@ def test_mt5_in_ui_choices():
         assert DATA_SOURCE_CHOICES[0][0] == "mt5"
     else:
         assert "mt5" not in ui_kinds
-    # eastmoney / AkShare 仍是隐藏源
-    assert "eastmoney" not in ui_kinds
-    assert "akshare" not in ui_kinds
-
-
-def test_tushare_not_in_ui_choices():
-    ui_kinds = {k for k, _ in DATA_SOURCE_CHOICES}
-    assert "tushare" not in ui_kinds
 
 
 def test_create_data_source_returns_expected_types():
     expected_mt5_type = MT5Source if factory.sys.platform == "win32" else TradingViewSource
     assert isinstance(create_data_source("mt5"), expected_mt5_type)
     assert isinstance(create_data_source("tradingview"), TradingViewSource)
-    assert isinstance(create_data_source("eastmoney"), EastMoneySource)
-    assert isinstance(create_data_source("tushare"), TushareSource)
 
 
 def test_default_symbols_per_kind():
@@ -104,8 +85,6 @@ def test_tradingview_credentials_settings_beat_env(monkeypatch):
     )
     assert (src._username, src._password) == ("cfguser", "cfgpass")
     assert default_symbol_for_kind("tradingview") == "XAUUSD"
-    assert default_symbol_for_kind("eastmoney") == "000001"
-    assert default_symbol_for_kind("tushare") == "000001"
 
 
 def test_default_tradingview_exchange_is_auto():

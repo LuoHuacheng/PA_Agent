@@ -98,14 +98,7 @@ def is_likely_crypto_symbol(symbol: str) -> bool:
 
 def normalize_gold_symbol_for_kind(kind: str, symbol: str) -> str:
     """Normalize persisted symbols while preserving native TradingView crypto pairs."""
-    from pa_agent.data.ashare_common import normalize_ashare_symbol
-
     sym = (symbol or "").strip()
-    if kind in ("akshare", "eastmoney", "tushare"):
-        code = normalize_ashare_symbol(sym)
-        if not code or not _looks_like_ashare_code(code):
-            return A_SHARE_DEFAULT_SYMBOL
-        return code
     if kind == "tradingview":
         if is_likely_crypto_symbol(sym):
             return sym.upper()
@@ -134,9 +127,7 @@ def normalize_gold_tv_exchange(exchange: str) -> str:
 
 def normalize_ashare_tv_code(symbol: str) -> str:
     """Normalize user input to 6-digit A-share code for TradingView."""
-    from pa_agent.data.akshare_source import normalize_ashare_symbol
-
-    raw = normalize_ashare_symbol(symbol)
+    raw = (symbol or "").strip().lower()
     if raw.startswith(("sh", "sz")) and len(raw) >= 8:
         return raw[2:8]
     digits = re.sub(r"\D", "", raw)

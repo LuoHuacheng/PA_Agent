@@ -12,9 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DecisionStance = Literal["conservative", "balanced", "aggressive", "extreme_aggressive"]
-DataSourceKind = Literal[
-    "mt5", "tradingview", "akshare", "eastmoney", "eastmoney_futures", "tushare"
-]
+DataSourceKind = Literal["mt5", "tradingview"]
 NormalizationMode = Literal["strict", "lenient"]
 
 
@@ -120,14 +118,9 @@ class GeneralSettings(BaseModel):
     @field_validator("last_data_source", mode="before")
     @classmethod
     def _coerce_legacy_data_source(cls, v: object) -> object:
-        if v == "yfinance":
-            return "eastmoney"
-        if v in ("adata", "a_share"):
-            return "akshare"
-        if v == "eastmoney":
-            return "eastmoney"
-        if v == "tushare":
-            return "tushare"
+        # 已下线的 A 股/多源适配器(akshare/eastmoney/tushare/yfinance)一律回落 tradingview
+        if v not in ("mt5", "tradingview", None, ""):
+            return "tradingview"
         return v
 
     @field_validator("decision_flow_default_zoom_pct", mode="before")
@@ -161,13 +154,6 @@ class FeishuSettings(BaseModel):
     #: True = only push when there is an order opportunity.
     notify_on_order_only: bool = True
 
-
-class TushareSettings(BaseModel):
-    """Tushare Pro data source settings (persisted in ignored settings.json)."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    token: str = ""
 
 
 class PushPlusSettings(BaseModel):
@@ -443,7 +429,6 @@ class Settings(BaseModel):
     feishu: FeishuSettings = Field(default_factory=FeishuSettings)
     pushplus: PushPlusSettings = Field(default_factory=PushPlusSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
-    tushare: TushareSettings = Field(default_factory=TushareSettings)
     #: 自动执行环境: "testnet" = 测试网(默认, 兼容既有配置), "live" = 实盘.
     #: 切换后 REST/WS 网关、运行时状态文件与通知标签均随环境解析,
     #: 但绝不代表实盘许可: live 节本身仍须显式 enabled + dry_run=false。

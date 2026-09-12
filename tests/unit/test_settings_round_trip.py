@@ -130,16 +130,6 @@ def test_monitoring_round_trip(tmp_path):
     ]
 
 
-def test_tushare_round_trip(tmp_path):
-    """save → load preserves tushare token."""
-    p = tmp_path / "settings.json"
-    original = Settings()
-    original.tushare.token = "ts-test-token"
-    save_settings(original, p)
-    loaded = load_settings(p)
-    assert loaded.tushare.token == "ts-test-token"
-
-
 def test_pushplus_auto_disabled_when_enabled_without_token(tmp_path):
     """load_settings disables pushplus when enabled but token empty."""
     p = tmp_path / "settings.json"
