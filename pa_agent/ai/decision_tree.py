@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from pa_agent.ai.llm_contract import gate_trace_sort_key as _gate_trace_sort_key
 from pa_agent.ai.llm_contract import trace_node_ids as _trace_node_ids
 from pa_agent.config.paths import PROMPT_DIR
 
@@ -31,26 +32,6 @@ TERMINAL_OUTCOMES = frozenset({"wait", "reject", "trade", "proceed"})
 # 阶段一禁止当作闸门的节点（原则/执行层，非诊断闸门）
 STAGE1_FORBIDDEN_GATE_NODES = frozenset({"0.3"})
 
-
-def _gate_trace_sort_key(node_id: str) -> tuple[int, int, str]:
-    """Numeric sort key for gate_trace node_id values used by the ordering validator.
-
-    Converts '1.1' -> (1, 1, '1.1'), '2.3' -> (2, 3, '2.3') so that chapter-
-    section pairs sort in natural document order.  Non-numeric suffixes fall
-    back to string comparison in the third component.
-    """
-    parts = str(node_id or "").split(".", 1)
-    try:
-        major = int(parts[0])
-    except (ValueError, IndexError):
-        return (999, 999, node_id)
-    if len(parts) == 1:
-        return (major, 0, node_id)
-    sub = parts[1]
-    try:
-        return (major, int(sub), node_id)
-    except ValueError:
-        return (major, 999, node_id)
 
 def _node_sort_key(node_id: str) -> tuple[int, str]:
     """Sort key for decision_trace ordering checks."""

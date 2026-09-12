@@ -108,3 +108,23 @@ def max_bar_seq_from_frame(kline_frame: Any) -> int | None:
         return None
     seqs = [int(getattr(b, "seq", 0)) for b in bars if getattr(b, "seq", None)]
     return max(seqs) if seqs else None
+
+
+def gate_trace_sort_key(node_id: str) -> tuple[int, int, str]:
+    """Numeric sort key for trace node_ids: '1.1' -> (1, 1, '1.1').
+
+    Chapter-section pairs sort in natural document order; non-numeric
+    suffixes fall back to string comparison in the third component.
+    """
+    parts = str(node_id or "").split(".", 1)
+    try:
+        major = int(parts[0])
+    except (ValueError, IndexError):
+        return (999, 999, node_id)
+    if len(parts) == 1:
+        return (major, 0, node_id)
+    sub = parts[1]
+    try:
+        return (major, int(sub), node_id)
+    except ValueError:
+        return (major, 999, node_id)
