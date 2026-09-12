@@ -368,9 +368,9 @@ def run_monitor() -> int:
     # A previous run may have died while a limit entry rested on the exchange:
     # re-arm its fill watcher so a later fill still gets SL/TP attached.
     try:
-        from pa_agent.trading.binance_usdm_testnet import (
+        from pa_agent.trading.binance_usdm_testnet import resume_pending_limit_watchers
+        from pa_agent.trading.position_manager import (
             resume_breakeven_guards,
-            resume_pending_limit_watchers,
             resume_stop_watchdogs,
             resume_time_stops,
             resume_tp_runners,

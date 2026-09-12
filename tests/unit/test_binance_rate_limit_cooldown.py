@@ -10,6 +10,7 @@ from urllib.error import HTTPError
 import pytest
 
 from pa_agent.trading import binance_usdm_testnet as bn
+from pa_agent.trading import position_manager as pm
 from pa_agent.trading.binance_usdm_testnet import BinanceAPIError, BinanceUSDMTestnetClient
 from pa_agent.trading.rate_limit import RateLimitBreaker
 
@@ -62,7 +63,7 @@ def test_breakeven_guard_does_not_give_up_while_banned(monkeypatch) -> None:
     def _read_guard(_symbol: str) -> dict | None:
         return records.pop(0)
 
-    monkeypatch.setattr(bn, "_read_guard", _read_guard)
+    monkeypatch.setattr(pm, "_read_guard", _read_guard)
     bn._breakeven_guard_loop(client=client, symbol="BTCUSDT", trigger="1r", poll_seconds=1.0)
 
     assert client.polls == 0, "ban 期间不得直连 position_info"
