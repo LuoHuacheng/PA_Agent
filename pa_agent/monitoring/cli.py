@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -339,6 +340,12 @@ def run_monitor() -> int:
     # 流在线 -> 对账放宽到 300s, 流断开 -> 自动回落基础周期(60s)兜底.
     ws_stream_health = {"connected": False}
     _WS_HEALTHY_POLL_SECONDS = 300.0
+    # 断线告警降噪阈值: 抖动窗口内累计掉线次数 / 持续断线告警门槛(秒)。
+    # 单次抖动(实测每 ~17 分钟一次)不再推 Telegram: 先记日志, 只有链路真的
+    # 反复掉或长时间起不来才打扰用户。
+    _STREAM_FLAP_DROPS = 3
+    _STREAM_FLAP_WINDOW_SECONDS = 600.0
+    _STREAM_DOWN_ALERT_SECONDS = 300.0
 
     try:
         from pa_agent.trading.binance_usdm_testnet import start_account_snapshot_poller
@@ -385,10 +392,17 @@ def run_monitor() -> int:
         logger.exception("恢复 Binance 测试网挂单 watcher 失败")
     # user-data websocket: 订单/账户事件推送替代常驻轮询. REST 快照轮询保留
     # 作为低频对账兜底, 且周期随 WS 健康状态自适应(在线 300s / 断开回落 60s).
-    # 事件处理器跑在 WS 线程, 只做"节流后触发快照刷新 + 唤醒 fill watcher",
-    # 不碰下单路径; 断开/重连通过 Telegram 通知(10 分钟冷却防刷屏).
+    # 事件处理器跑在 WS 接收线程上, 因此回调里绝不发 REST: 回调只做节流 + 投递,
+    # 快照刷新交给下面独立的 worker 线程。一次 12s x (1+2 次重试) 的 REST 就足以
+    # 把 WS 的 ping/pong 拖过看门狗阈值, 变成自伤式断线。
     user_stream: Any | None = None
     mark_stream: Any | None = None
+    #: 事件触发的快照刷新队列(maxsize=1: 排队即合并, 事件风暴不堆积)
+    stream_refresh_queue: queue.Queue[bool] = queue.Queue(maxsize=1)
+    refresh_worker_stop = threading.Event()
+    refresh_worker: threading.Thread | None = None
+    health_watchdog_stop = threading.Event()
+    health_watchdog: threading.Thread | None = None
     try:
         if binance_cfg.enabled and binance_cfg.user_data_stream_enabled:
             from pa_agent.trading.binance_usdm_testnet import (
@@ -416,18 +430,50 @@ def run_monitor() -> int:
             last_event_ts = [0.0]
             reconnect_count = [0]
             notice_cooldown_ts = [0.0]
+            # 断线降噪状态: 窗口内掉线时刻 / 本轮断线起点 / 本轮是否已告警
+            drop_times: list[float] = []
+            down_since: list[float | None] = [None]
+            down_alerted = [False]
+
+            def _stream_refresh_worker() -> None:
+                """执行事件触发的快照刷新(独立线程, 不阻塞 WS 接收循环)."""
+                while not refresh_worker_stop.is_set():
+                    try:
+                        stream_refresh_queue.get(timeout=1.0)
+                    except queue.Empty:
+                        continue
+                    poller = account_snapshot_poller()
+                    if poller is None:
+                        continue
+                    try:
+                        poller.refresh()
+                    except Exception:
+                        logger.exception("WS 事件触发的快照刷新失败")
+
+            def _stream_health_watchdog() -> None:
+                """持续断线超阈值时补告警(重连失败本身不会触发断线回调)."""
+                while not health_watchdog_stop.wait(15.0):
+                    started = down_since[0]
+                    if started is None or down_alerted[0]:
+                        continue
+                    downtime = time.time() - started
+                    if downtime < _STREAM_DOWN_ALERT_SECONDS:
+                        continue
+                    down_alerted[0] = True
+                    _send_stream_notice(
+                        f"user-data 流已断开 {int(downtime)}s 仍未恢复, "
+                        "REST 轮询兜底中"
+                    )
 
             def _refresh_snapshot_after_event() -> None:
                 now = time.time()
                 if now - last_event_ts[0] < event_refresh_gap:
                     return
                 last_event_ts[0] = now
-                poller = account_snapshot_poller()
-                if poller is not None:
-                    try:
-                        poller.refresh()
-                    except Exception:
-                        logger.exception("WS 事件触发的快照刷新失败")
+                try:
+                    stream_refresh_queue.put_nowait(True)
+                except queue.Full:
+                    logger.debug("快照刷新已排队, 合并本轮事件")
 
             def _on_order_update(msg: dict) -> None:
                 notify_user_order_update(msg)
@@ -448,16 +494,42 @@ def run_monitor() -> int:
             def _on_connected() -> None:
                 ws_stream_health["connected"] = True
                 reconnect_count[0] += 1
+                down_at = down_since[0]
+                down_since[0] = None
+                if down_at is not None:
+                    downtime = max(0.0, time.time() - down_at)
+                    # 只对"打扰过用户"的那轮断线补一条恢复通知
+                    if down_alerted[0] or downtime >= _STREAM_DOWN_ALERT_SECONDS:
+                        _send_stream_notice(
+                            f"user-data 流已恢复(断开 {int(downtime)}s)"
+                        )
+                down_alerted[0] = False
                 if reconnect_count[0] > 1:
-                    _send_stream_notice(
-                        f"user-data 流已重连(第 {reconnect_count[0]} 次)"
-                    )
+                    logger.info("user-data 流已重连(第 %d 次)", reconnect_count[0])
                 _refresh_snapshot_after_event()
 
             def _on_disconnected() -> None:
                 ws_stream_health["connected"] = False
-                if not stop_event.is_set():  # 正常停止不告警
-                    _send_stream_notice("user-data 流断开, 已切回 REST 轮询兜底")
+                if stop_event.is_set():  # 正常停止不告警
+                    return
+                now = time.time()
+                if down_since[0] is None:
+                    down_since[0] = now
+                drop_times.append(now)
+                drop_times[:] = [
+                    t for t in drop_times if now - t <= _STREAM_FLAP_WINDOW_SECONDS
+                ]
+                logger.warning(
+                    "user-data 流断开(近 %.0f 分钟内第 %d 次), 已切回 REST 轮询兜底",
+                    _STREAM_FLAP_WINDOW_SECONDS / 60.0,
+                    len(drop_times),
+                )
+                if len(drop_times) >= _STREAM_FLAP_DROPS:
+                    down_alerted[0] = True
+                    _send_stream_notice(
+                        f"user-data 流 {int(_STREAM_FLAP_WINDOW_SECONDS // 60)} 分钟内"
+                        f"断开 {len(drop_times)} 次, 链路不稳"
+                    )
 
             handlers = UserDataEventHandlers(
                 on_order_update=_on_order_update,
@@ -474,6 +546,19 @@ def run_monitor() -> int:
             )
             user_stream.start()
             logger.info("User-data websocket stream started (event push)")
+            # 事件后的 REST 刷新与断线看门狗都跑在自己的线程上, 与 WS 接收解耦
+            refresh_worker = threading.Thread(
+                target=_stream_refresh_worker,
+                name="binance-snapshot-worker",
+                daemon=True,
+            )
+            refresh_worker.start()
+            health_watchdog = threading.Thread(
+                target=_stream_health_watchdog,
+                name="binance-stream-watchdog",
+                daemon=True,
+            )
+            health_watchdog.start()
 
             # 公共 mark-price 流: 订阅监控品种, 推送到快照 poller 的 mark 槽,
             # 让守护线程的 mark 读取不再依赖 REST(断线时 poller REST 兜底).
@@ -528,6 +613,12 @@ def run_monitor() -> int:
                 logger.info("Mark-price stream stopped")
             except Exception:
                 logger.exception("停止 mark-price 流失败")
+        refresh_worker_stop.set()
+        if refresh_worker is not None:
+            refresh_worker.join(timeout=2.0)
+        health_watchdog_stop.set()
+        if health_watchdog is not None:
+            health_watchdog.join(timeout=2.0)
         if monitor is not None:
             _shutdown_monitor_process(
                 monitor,

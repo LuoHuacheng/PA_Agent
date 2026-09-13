@@ -20,6 +20,7 @@ from pa_agent.data.market_defaults import (
 )
 from pa_agent.data.tv_symbol_lookup import TvSymbolNotFoundError
 from pa_agent.data.tradingview_errors import format_tradingview_fetch_error
+from pa_agent.util.net_proxy import websocket_proxy_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,42 @@ def _silence_tvdatafeed_nologin() -> None:
     tv_logger = logging.getLogger("tvDatafeed.main")
     if not any(isinstance(f, _TvNoLoginFilter) for f in tv_logger.filters):
         tv_logger.addFilter(_TvNoLoginFilter())
+
+
+def _enable_tvdatafeed_proxy() -> None:
+    """Route tvDatafeed's socket through the configured proxy.
+
+    tvDatafeed imports ``create_connection`` from websocket-client at module
+    level, and websocket-client only honours the ``http_proxy``/``https_proxy``
+    environment variables — never the macOS network settings. Without this the
+    data-source socket dials directly while every REST call follows the browser
+    proxy. The wrapper is installed once and stays a no-op when no proxy is
+    configured (see ``pa_agent.util.net_proxy``).
+    """
+    try:
+        import tvDatafeed.main as tv_main  # type: ignore[import]
+    except Exception:  # optional dependency, must never block connect
+        logger.debug("tvDatafeed unavailable; proxy patch skipped")
+        return
+    if getattr(tv_main, "_pa_proxy_patched", False):
+        return
+    original = getattr(tv_main, "create_connection", None)
+    if original is None:  # pragma: no cover - defensive against upstream changes
+        logger.debug("tvDatafeed has no module-level create_connection to wrap")
+        return
+
+    def _create_connection(url: str, *args: Any, **kwargs: Any) -> Any:
+        for key, value in websocket_proxy_kwargs(url).items():
+            kwargs.setdefault(key, value)
+        return original(url, *args, **kwargs)
+
+    try:
+        tv_main.create_connection = _create_connection  # type: ignore[attr-defined]
+        tv_main._pa_proxy_patched = True  # type: ignore[attr-defined]
+    except Exception:  # frozen/read-only module: dial direct, as before
+        logger.debug("tvDatafeed proxy patch failed", exc_info=True)
+        return
+    logger.debug("tvDatafeed create_connection wrapped for proxy resolution")
 
 
 def _tv_probe_signin(username: str, password: str) -> str:
@@ -217,6 +254,10 @@ class TradingViewSource(DataSource):
             from tvDatafeed import TvDatafeed  # type: ignore[import]
 
             _silence_tvdatafeed_nologin()
+            # The socket is opened by tvDatafeed on every get_hist(): wrap its
+            # create_connection so the data source follows the same proxy route
+            # as every REST call (no-op without a configured proxy).
+            _enable_tvdatafeed_proxy()
             if self._username and self._password:
                 token = _tv_auth_token(self._username, self._password)
                 if token:

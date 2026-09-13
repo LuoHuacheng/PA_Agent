@@ -27,6 +27,8 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
+from pa_agent.util.net_proxy import websocket_proxy_kwargs
+
 logger = logging.getLogger("pa_agent.trading.binance_user_data")
 
 #: Default WS gateway for USDⓈ-M user data. Testnet listenKeys are issued by
@@ -39,11 +41,47 @@ _DEFAULT_WS_BASE = "wss://fstream.binancefuture.com"
 _KEEPALIVE_INTERVAL_SECONDS = 25 * 60
 
 #: websocket ping cadence (keeps NAT/proxies from idling the socket out).
-_PING_INTERVAL_SECONDS = 20.0
-_PING_TIMEOUT_SECONDS = 10.0
+#: Deliberately far looser than Binance needs: the exchange sends its own ping
+#: every ~3 minutes and only drops a silent peer after ~10 minutes of no pong,
+#: so a 20s/10s client watchdog only converted an ordinary 10s network stall
+#: (proxy node switch, TUN interface change, Wi-Fi roam) into a false
+#: "ping/pong timed out" disconnect plus a user-facing alert — observed every
+#: ~17 minutes in the 2026-09-13 logs while REST traffic on the same path and
+#: process kept succeeding.
+_PING_INTERVAL_SECONDS = 180.0
+_PING_TIMEOUT_SECONDS = 60.0
 
 #: Reconnect backoff ladder (seconds); repeats the last value while stopped.
 _RECONNECT_DELAYS_SECONDS = (1.0, 3.0, 10.0, 30.0, 60.0)
+
+#: Binance error markers that mean *the listenKey itself* is unusable and must
+#: be re-issued. Anything else raised by the keepalive call is a transport
+#: hiccup (timeout, TLS reset, 5xx): the socket is still healthy, so killing it
+#: would turn a recoverable REST blip into a self-inflicted disconnect.
+_LISTEN_KEY_GONE_MARKERS = (
+    "-1125",
+    "listenkey does not exist",
+    "listen key does not exist",
+)
+
+
+def _listen_key_gone(exc: BaseException) -> bool:
+    """True when *exc* says the listenKey no longer exists server-side."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _LISTEN_KEY_GONE_MARKERS)
+
+
+def _run_forever(app: Any, url: str) -> None:
+    """Block on the socket with our ping policy and the resolved proxy.
+
+    The proxy is resolved per connection, so a network-settings change is
+    picked up on the next reconnect instead of only at process start.
+    """
+    app.run_forever(
+        ping_interval=_PING_INTERVAL_SECONDS,
+        ping_timeout=_PING_TIMEOUT_SECONDS,
+        **websocket_proxy_kwargs(url),
+    )
 
 
 class UserDataEventHandlers:
@@ -190,10 +228,7 @@ class BinanceUserDataStream:
             with self._lock:
                 self._app = app
             try:
-                app.run_forever(
-                    ping_interval=_PING_INTERVAL_SECONDS,
-                    ping_timeout=_PING_TIMEOUT_SECONDS,
-                )
+                _run_forever(app, url)
             finally:
                 with self._lock:
                     if self._app is app:
@@ -273,9 +308,21 @@ class BinanceUserDataStream:
                 continue
             try:
                 self._keepalive(key)
-            except Exception:
+            except Exception as exc:  # classify, never propagate
+                if not _listen_key_gone(exc):
+                    # Transport hiccup (timeout, TLS reset, 5xx): the socket is
+                    # still delivering events, so keep it and retry the
+                    # keepalive on the next tick. Forcing a reconnect here is
+                    # how a transient REST blip became a self-inflicted
+                    # disconnect every 25 minutes.
+                    logger.warning(
+                        "listenKey keepalive failed (transport; keeping the "
+                        "stream, retrying next cycle): %s",
+                        exc,
+                    )
+                    continue
                 logger.warning(
-                    "listenKey keepalive failed; forcing reconnect with a fresh key",
+                    "listenKey expired server-side; re-issuing with a fresh key",
                     exc_info=True,
                 )
                 with self._lock:
@@ -284,6 +331,7 @@ class BinanceUserDataStream:
                 if app is not None:
                     with contextlib.suppress(Exception):  # pragma: no cover
                         app.close()
+
 
 class BinanceMarkPriceStream:
     """Combined public mark-price stream for a fixed symbol set.
@@ -354,8 +402,9 @@ class BinanceMarkPriceStream:
         import websocket  # lazy, same as user-data stream
 
         while not self._stop.is_set():
+            url = self._stream_url()
             app = websocket.WebSocketApp(
-                self._stream_url(),
+                url,
                 on_open=self._on_open,
                 on_message=self._on_message,
                 on_error=self._on_error,
@@ -363,10 +412,7 @@ class BinanceMarkPriceStream:
             )
             self._app = app
             try:
-                app.run_forever(
-                    ping_interval=_PING_INTERVAL_SECONDS,
-                    ping_timeout=_PING_TIMEOUT_SECONDS,
-                )
+                _run_forever(app, url)
             finally:
                 self._app = None
             if self._stop.is_set():

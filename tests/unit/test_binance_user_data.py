@@ -42,9 +42,12 @@ class _FakeApp:
         self.on_close = on_close
         self.closed = threading.Event()
         self.drop_immediately = False
+        #: kwargs the stream handed to run_forever (ping policy, proxy, ...)
+        self.kwargs: dict = {}
         _FakeApp.instances.append(self)
 
-    def run_forever(self, ping_interval=None, ping_timeout=None) -> None:
+    def run_forever(self, **kwargs) -> None:
+        self.kwargs = dict(kwargs)
         self.on_open(self)
         if len(_FakeApp.instances) <= _FakeApp.auto_drop_first_n:
             return  # simulate an instant disconnect
@@ -209,14 +212,18 @@ def test_stop_closes_socket_and_listen_key() -> None:
         s.stop()
 
 
-def test_keepalive_runs_periodically_and_forces_rekey_on_failure() -> None:
+def test_keepalive_transport_error_keeps_stream_alive() -> None:
+    """keepalive 传输层抖动(非 -1125)不得拆掉健康的 WS: 下一轮重试即可.
+
+    回归: 任何异常都清 key + close() 时, 25 分钟一次的 keepalive 撞上 REST 抖动
+    就变成一次自伤式断线。
+    """
     kept: list[str] = []
     created: list[str] = []
 
     def _keep(k: str) -> None:
         kept.append(k)
-        if len(kept) >= 2:
-            raise RuntimeError("keepalive network error")
+        raise OSError("connection reset by peer")
 
     s = BinanceUserDataStream(
         create_listen_key=lambda: (created.append("new") or "K-N" + str(len(created))),
@@ -228,13 +235,61 @@ def test_keepalive_runs_periodically_and_forces_rekey_on_failure() -> None:
     s.start()
     try:
         deadline = time.time() + 3
-        # keepalive #1 ok; #2 fails -> key cleared -> reconnect path re-creates
-        while time.time() < deadline and not (len(kept) >= 3 and len(created) >= 2):
+        while time.time() < deadline and len(kept) < 3:
             time.sleep(0.01)
-        assert len(kept) >= 2
-        assert len(created) >= 2, "failed keepalive must force a fresh listenKey"
+        assert len(kept) >= 3, "keepalive must be retried on the next tick"
+        assert created == ["new"], "transport error must keep the same listenKey"
+        assert s.listen_key() == "K-N1"
+        assert not _FakeApp.instances[0].closed.is_set(), "socket must stay open"
     finally:
         s.stop()
+
+
+def test_keepalive_key_gone_issues_fresh_key() -> None:
+    """-1125(listenKey 不存在)才是重发 key 的信号."""
+    created: list[str] = []
+
+    def _keep(_k: str) -> None:
+        raise RuntimeError(
+            'Binance HTTP 400: {"code":-1125,"msg":"This listenKey does not exist."}'
+        )
+
+    s = BinanceUserDataStream(
+        create_listen_key=lambda: (created.append("new") or "K-N" + str(len(created))),
+        keepalive_listen_key=_keep,
+        close_listen_key=lambda k: None,
+        keepalive_interval_seconds=0.02,
+        sleep=lambda d: None,
+    )
+    s.start()
+    try:
+        deadline = time.time() + 3
+        while time.time() < deadline and len(created) < 2:
+            time.sleep(0.01)
+        assert len(created) >= 2, "expired listenKey must be re-issued"
+    finally:
+        s.stop()
+
+
+def test_listen_key_gone_markers() -> None:
+    assert bud._listen_key_gone(RuntimeError('{"code":-1125}'))
+    assert bud._listen_key_gone(ValueError("This listenKey does not exist."))
+    assert not bud._listen_key_gone(OSError("connection reset by peer"))
+
+
+def test_run_forever_uses_tolerant_ping_policy() -> None:
+    """心跳阈值必须宽松于币安自身容忍度(服务端 3 分钟 ping / 10 分钟 pong)."""
+    app = _FakeApp(
+        "wss://fake.example/ws/K",
+        lambda *a: None,
+        lambda *a: None,
+        lambda *a: None,
+        lambda *a: None,
+    )
+    bud._run_forever(app, "wss://fake.example/ws/K")
+    assert app.kwargs["ping_interval"] == bud._PING_INTERVAL_SECONDS == 180.0
+    assert app.kwargs["ping_timeout"] == bud._PING_TIMEOUT_SECONDS == 60.0
+    assert app.kwargs["ping_interval"] > app.kwargs["ping_timeout"]
 
 
 def test_listen_key_property_reflects_created_key(stream) -> None:
