@@ -1,0 +1,188 @@
+{
+  "generated_at": "2026-09-14T01:19:00.720744+08:00",
+  "source": "records",
+  "days": 45,
+  "segments": 5,
+  "oos_rows": [
+    {
+      "rule": "ema_pullback",
+      "seg": 3,
+      "combo": {
+        "ema_period": 30,
+        "stop_atr_mult": 1.0,
+        "target_rr": 1.5
+      },
+      "n": 6,
+      "r_sum": 0.8934119137376866,
+      "wr": 0.3333333333333333
+    },
+    {
+      "rule": "ema_pullback",
+      "seg": 4,
+      "combo": {
+        "ema_period": 20,
+        "stop_atr_mult": 1.5,
+        "target_rr": 3.0
+      },
+      "n": 16,
+      "r_sum": 3.3885823945637004,
+      "wr": 0.25
+    },
+    {
+      "rule": "donchian_break",
+      "seg": 3,
+      "combo": {
+        "donchian_n": 40,
+        "stop_atr_mult": 1.5,
+        "target_rr": 2.0
+      },
+      "n": 44,
+      "r_sum": -7.842406883658025,
+      "wr": 0.20454545454545456
+    },
+    {
+      "rule": "donchian_break",
+      "seg": 4,
+      "combo": {
+        "donchian_n": 10,
+        "stop_atr_mult": 1.0,
+        "target_rr": 2.0
+      },
+      "n": 45,
+      "r_sum": -15.543313779886097,
+      "wr": 0.13333333333333333
+    },
+    {
+      "rule": "momo_break",
+      "seg": 3,
+      "combo": {
+        "momo_atr": 2.0,
+        "momo_n": 10,
+        "stop_atr_mult": 1.0,
+        "target_rr": 2.0
+      },
+      "n": 86,
+      "r_sum": -40.40346902851962,
+      "wr": 0.19767441860465115
+    },
+    {
+      "rule": "momo_break",
+      "seg": 4,
+      "combo": {
+        "momo_atr": 1.0,
+        "momo_n": 10,
+        "stop_atr_mult": 1.5,
+        "target_rr": 1.5
+      },
+      "n": 82,
+      "r_sum": -33.17454442709717,
+      "wr": 0.1951219512195122
+    },
+    {
+      "rule": "dual_supertrend",
+      "seg": 3,
+      "combo": {
+        "st_mult": 2.0,
+        "st_period": 20,
+        "target_rr": 2.0
+      },
+      "n": 71,
+      "r_sum": -20.698527409376187,
+      "wr": 0.1267605633802817
+    },
+    {
+      "rule": "dual_supertrend",
+      "seg": 4,
+      "combo": {
+        "st_mult": 4.0,
+        "st_period": 10,
+        "target_rr": 1.5
+      },
+      "n": 42,
+      "r_sum": -9.543272844482352,
+      "wr": 0.21428571428571427
+    },
+    {
+      "rule": "trend_pullback",
+      "seg": 3,
+      "combo": {
+        "ema_fast": 10,
+        "ema_slow": 200,
+        "target_rr": 1.5
+      },
+      "n": 28,
+      "r_sum": -5.350647731730291,
+      "wr": 0.21428571428571427
+    },
+    {
+      "rule": "trend_pullback",
+      "seg": 4,
+      "combo": {
+        "ema_fast": 10,
+        "ema_slow": 200,
+        "target_rr": 1.5
+      },
+      "n": 22,
+      "r_sum": -4.591896312178012,
+      "wr": 0.22727272727272727
+    }
+  ],
+  "full_best": {
+    "ema_pullback": {
+      "combo": {
+        "ema_period": 30,
+        "stop_atr_mult": 1.0,
+        "target_rr": 3.0
+      },
+      "n": 22,
+      "wr": 0.4090909090909091,
+      "r_sum": 8.895634692997504,
+      "avg_r": 0.40434703149988654
+    },
+    "donchian_break": {
+      "combo": {
+        "donchian_n": 10,
+        "stop_atr_mult": 1.5,
+        "target_rr": 1.5
+      },
+      "n": 115,
+      "wr": 0.3130434782608696,
+      "r_sum": -14.311320537252392,
+      "avg_r": -0.12444626554132515
+    },
+    "momo_break": {
+      "combo": {
+        "momo_atr": 1.0,
+        "momo_n": 10,
+        "stop_atr_mult": 1.5,
+        "target_rr": 1.5
+      },
+      "n": 205,
+      "wr": 0.2780487804878049,
+      "r_sum": -53.253844793374505,
+      "avg_r": -0.25977485265060735
+    },
+    "dual_supertrend": {
+      "combo": {
+        "st_mult": 4.0,
+        "st_period": 20,
+        "target_rr": 2.0
+      },
+      "n": 105,
+      "wr": 0.3619047619047619,
+      "r_sum": 0.7084270903446714,
+      "avg_r": 0.006746924669949252
+    },
+    "trend_pullback": {
+      "combo": {
+        "ema_fast": 10,
+        "ema_slow": 200,
+        "target_rr": 3.0
+      },
+      "n": 50,
+      "wr": 0.12,
+      "r_sum": -9.68313171017649,
+      "avg_r": -0.1936626342035298
+    }
+  }
+}

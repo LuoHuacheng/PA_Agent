@@ -2,6 +2,8 @@
 
 用法:
     uv run python tools/audit/baseline_lab.py [--days 45] [--segments 5]
+        [--source records|binance] [--symbols BTCUSDT,...] [--kline-cache DIR]
+        [--interval 15m] [--json-out FILE]
 
 复用 tools/shadow_replay 的引擎与数据管线。回答三个问题:
   1. 机械对照流的参数在全样本上"最优"后, 滚动样本外是否仍接近/为正
@@ -12,13 +14,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, ".")
 
-from tools.shadow_replay import (  # noqa: E402
+from tools.shadow_replay import (
     OUTCOMES_CSV,
     TZ8,
     Plan,
@@ -28,6 +32,11 @@ from tools.shadow_replay import (  # noqa: E402
     load_plans,
     merge_timelines,
     simulate_plan,
+)
+from tools.vergex_gens import (
+    gen_dual_supertrend,
+    gen_momo_breakout,
+    gen_trend_pullback,
 )
 
 
@@ -50,7 +59,7 @@ def gen_donchian(timeline, symbol, timeframe, *, days, ema_period=20,
     cooldown_until = -1
     trs: list[float] = []
     for i in range(1, len(timeline)):
-        _ts, o, h, low, c = timeline[i]
+        _ts, _o, h, low, c = timeline[i]
         prev_c = timeline[i - 1][4]
         trs.append(max(h - low, abs(h - prev_c), abs(low - prev_c)))
     for i in range(donchian_n + 1, len(timeline) - 5):
@@ -60,7 +69,7 @@ def gen_donchian(timeline, symbol, timeframe, *, days, ema_period=20,
         window = timeline[i - donchian_n:i]
         hi = max(b[2] for b in window)
         lo = min(b[3] for b in window)
-        _ts, o, h, low, c = timeline[i]
+        _ts, _o, h, low, c = timeline[i]
         atr = sum(trs[max(0, i - 14):i]) / 14 if i >= 14 else 0.0
         if atr <= 0:
             continue
@@ -92,19 +101,36 @@ def gen_donchian(timeline, symbol, timeframe, *, days, ema_period=20,
     return plans
 
 
-RULES = {"ema_pullback": generate_baseline_plans, "donchian_break": gen_donchian}
-PARAM_GRID = [
-    (ema, rr, atr)
-    for ema in (20, 30, 50)
-    for rr in (1.5, 2.0, 3.0)
-    for atr in (1.0, 1.5)
-]
+def build_timeline_from_klines(cache_dir, symbol, interval="15m") -> list:
+    """从 klines.json 缓存读单品种 K 线, 转成 (ts,o,h,l,c) 5 元组时间线, ts 升序."""
+    data = json.loads((Path(cache_dir) / "klines.json").read_text())
+    tl = [[int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4])]
+          for row in data[symbol]]
+    tl.sort(key=lambda row: row[0])
+    return tl
+
+
+RULES = {
+    "ema_pullback": (generate_baseline_plans, [{"ema_period": e, "target_rr": rr,
+                     "stop_atr_mult": a} for e in (20, 30, 50)
+                     for rr in (1.5, 2.0, 3.0) for a in (1.0, 1.5)]),
+    "donchian_break": (gen_donchian, [{"donchian_n": n, "target_rr": rr,
+                       "stop_atr_mult": a} for n in (10, 20, 40)
+                       for rr in (1.5, 2.0) for a in (1.0, 1.5)]),
+    "momo_break": (gen_momo_breakout, [{"momo_n": n, "momo_atr": m, "target_rr": rr,
+                   "stop_atr_mult": a} for n in (10, 14, 20) for m in (1.0, 1.5, 2.0)
+                   for rr in (1.5, 2.0) for a in (1.0, 1.5)]),
+    "dual_supertrend": (gen_dual_supertrend, [{"st_period": p, "st_mult": m,
+                        "target_rr": rr} for p in (10, 20) for m in (2.0, 3.0, 4.0)
+                        for rr in (1.5, 2.0, 3.0)]),
+    "trend_pullback": (gen_trend_pullback, [{"ema_fast": f, "ema_slow": s,
+                       "target_rr": rr} for f in (10, 20) for s in (50, 100, 200)
+                       for rr in (1.5, 2.0, 3.0)]),
+}
 
 
 def run_rule(rule_name, gen, combo, tl, *, args, maker_fee, taker_fee, be_tr):
-    ema, rr, atr_mult = combo
-    plans = gen(tl, "", "", days=args.days, ema_period=ema,
-                target_rr=rr, stop_atr_mult=atr_mult)
+    plans = gen(tl, "", "", days=args.days, **combo)
     rows = []
     for p in plans:
         p.symbol, p.timeframe = tl_symbol_tf(tl)
@@ -131,6 +157,26 @@ def tl_symbol_tf(tl) -> tuple[str, str]:
     return _TF_CACHE[id(tl)]
 
 
+def _write_json_out(args, oos_rows, full_best_all) -> None:
+    if not args.json_out:
+        return
+    payload = {
+        "generated_at": datetime.now(TZ8).isoformat(),
+        "source": args.source,
+        "days": args.days,
+        "segments": args.segments,
+        "oos_rows": [
+            {**r, "combo": dict(r["combo"])} if isinstance(r.get("combo"), tuple) else r
+            for r in oos_rows
+        ],
+        "full_best": full_best_all,
+    }
+    args.json_out.parent.mkdir(parents=True, exist_ok=True)
+    args.json_out.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+    print(f"\nJSON 产物已写入: {args.json_out}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=45)
@@ -144,6 +190,14 @@ def main() -> None:
     ap.add_argument("--min-stop-pct", type=float, default=0.2)
     ap.add_argument("--min-stop-atr", type=float, default=0.0)
     ap.add_argument("--fee-rate", type=float, default=None)
+    ap.add_argument("--source", choices=("records", "binance"), default="records",
+                    help="时间线来源: records=决策记录合并, binance=Binance K 线缓存")
+    ap.add_argument("--symbols", type=str, default="",
+                    help="binance 源品种, 逗号分隔, 如 BTCUSDT,ETHUSDT,ZECUSDT")
+    ap.add_argument("--kline-cache", type=Path, default=Path("research/vergex/data/_klines"))
+    ap.add_argument("--interval", type=str, default="15m")
+    ap.add_argument("--json-out", type=Path, default=None,
+                    help="运行结束写入 JSON 产物路径")
     args = ap.parse_args()
 
     fee_rate = args.fee_rate if args.fee_rate is not None else fee_rate_from_outcomes(OUTCOMES_CSV)
@@ -151,12 +205,47 @@ def main() -> None:
 
     from tools.shadow_replay import PENDING_DIR
 
-    plans = load_plans(PENDING_DIR, days=args.days)
     pending_dir = PENDING_DIR
-    timelines = merge_timelines(plans)
-    # 给每个时间线挂 symbol/tf
-    for key, tl in timelines.items():
-        _TF_CACHE[id(tl)] = key
+    if args.source == "binance":
+        if args.interval not in {"5m", "15m", "30m", "1h"}:
+            print(f"[错误] --interval 仅支持 5m/15m/30m/1h, 收到: {args.interval}")
+            sys.exit(1)
+        symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+        if not symbols:
+            print("[错误] --source binance 需通过 --symbols 指定品种, "
+                  "如 BTCUSDT,ETHUSDT,ZECUSDT")
+            sys.exit(1)
+        if not (args.kline_cache / "klines.json").exists():
+            # 缓存缺失才惰性拉取; 已有缓存直接复用, 勿覆盖重拉
+            from tools._pa_sim_common import window_bounds
+            from tools.sim_trailing_stop import fetch_klines
+
+            args.kline_cache.mkdir(parents=True, exist_ok=True)
+            start_ms, end_ms = window_bounds(args.days)
+            print(f"klines.json 缺失, 拉取 {symbols} {args.interval} "
+                  f"({datetime.fromtimestamp(start_ms / 1000):%m-%d} ~ "
+                  f"{datetime.fromtimestamp(end_ms / 1000):%m-%d}) ...")
+            fetch_klines(symbols, start_ms, end_ms, args.interval, args.kline_cache)
+        timelines = {}
+        for sym in symbols:
+            try:
+                tl = build_timeline_from_klines(args.kline_cache, sym, args.interval)
+            except KeyError:
+                print(f"[错误] klines.json 缓存中无品种 {sym} 数据, "
+                      f"缓存目录: {args.kline_cache}")
+                sys.exit(1)
+            if not tl:
+                print(f"[错误] 品种 {sym} 的时间线为空, 无法运行 OOS; "
+                      f"请检查 klines.json 覆盖区间或重新提供缓存")
+                sys.exit(1)
+            timelines[sym] = tl
+            _TF_CACHE[id(tl)] = (sym, args.interval)
+    else:
+        plans = load_plans(PENDING_DIR, days=args.days)
+        timelines = merge_timelines(plans)
+        # 给每个时间线挂 symbol/tf
+        for key, tl in timelines.items():
+            _TF_CACHE[id(tl)] = key
     print(f"时间线: {len(timelines)} 组, fee maker={maker_fee:.4f} taker={taker_fee:.4f}")
 
     seg_bounds = None
@@ -171,10 +260,11 @@ def main() -> None:
 
     print("\n=== 线1a: 滚动样本外 (前段选参 → 下段验证) ===")
     oos_rows: list[dict] = []
-    for rule_name, gen in RULES.items():
-        # 预生成每组合全部成交行(带段号)
+    full_best_all: dict[str, dict] = {}
+    for rule_name, (gen, grid) in RULES.items():
+        # 预生成每组合全部成交行(带段号); combo 为 dict, 键转可哈希元组
         combo_rows: dict[tuple, list[dict]] = {}
-        for combo in PARAM_GRID:
+        for combo in grid:
             rows = []
             for tl in timelines.values():
                 rows += run_rule(rule_name, gen, combo, tl, args=args,
@@ -184,11 +274,10 @@ def main() -> None:
                     (i for i in range(args.segments)
                      if r["record_ms"] >= seg_bounds[i] and r["record_ms"] < seg_bounds[i + 1]),
                     args.segments - 1)
-            combo_rows[combo] = rows
+            combo_rows[tuple(sorted(combo.items()))] = rows
         if not any(combo_rows.values()):
             print(f"  {rule_name}: 无成交")
             continue
-        chosen: tuple | None = None
         for seg in range(1, args.segments):
             # 前段(0..seg-1)选参
             best, best_v = None, -1e18
@@ -203,7 +292,8 @@ def main() -> None:
                 wr = sum(1 for r in oos if r["net"] > 0) / len(oos)
                 oos_rows.append({"rule": rule_name, "seg": seg, "combo": best,
                                  "n": len(oos), "r_sum": rr_sum, "wr": wr})
-                print(f"  {rule_name:14s} 段{seg}: 选参 EMA{best[0]}/RR{best[1]}/ATR{best[2]} "
+                print(f"  {rule_name:14s} 段{seg}: 选参 "
+                      f"{json.dumps(dict(best), sort_keys=True, ensure_ascii=False)} "
                       f"→ OOS {len(oos):3d}笔 R合计{rr_sum:+7.2f} 胜率{wr*100:3.0f}%")
         # 全样本最优参考(非样本外, 仅透明度)
         full_best = max(combo_rows.items(), key=lambda kv: sum(
@@ -212,7 +302,11 @@ def main() -> None:
         if fb_rows:
             fb_r = sum(r["net"] / r["risk"] for r in fb_rows)
             fb_wr = sum(1 for r in fb_rows if r["net"] > 0) / len(fb_rows)
-            print(f"  {rule_name:14s} 全样本最优 EMA{full_best[0][0]}/RR{full_best[0][1]}/ATR{full_best[0][2]}: "
+            full_best_all[rule_name] = {"combo": dict(full_best[0]), "n": len(fb_rows),
+                                        "wr": fb_wr, "r_sum": fb_r,
+                                        "avg_r": fb_r / len(fb_rows)}
+            print(f"  {rule_name:14s} 全样本最优 "
+                  f"{json.dumps(dict(full_best[0]), sort_keys=True, ensure_ascii=False)}: "
                   f"{len(fb_rows)}笔 R合计{fb_r:+.2f} 均R{fb_r/len(fb_rows):+.3f} 胜率{fb_wr*100:.0f}%")
     if oos_rows:
         tot_r = sum(r["r_sum"] for r in oos_rows)
@@ -223,20 +317,25 @@ def main() -> None:
     print("\n=== 线1b: 切片 (全样本最优组合, EMA20/RR2/ATR1 固定参数) ===")
     rows0 = []
     for tl in timelines.values():
-        rows0 += run_rule("ema_pullback", generate_baseline_plans, (20, 2.0, 1.0),
+        rows0 += run_rule("ema_pullback", generate_baseline_plans,
+                          {"ema_period": 20, "target_rr": 2.0, "stop_atr_mult": 1.0},
                           tl, args=args, maker_fee=maker_fee, taker_fee=taker_fee, be_tr=0.5)
     if not rows0:
         print("  无成交")
+        _write_json_out(args, oos_rows, full_best_all)
         return
     by_sym = defaultdict(lambda: [0, 0.0])
     by_tf = defaultdict(lambda: [0, 0.0])
     by_sess = defaultdict(lambda: [0, 0.0])
     for r in rows0:
-        by_sym[r["symbol"]][0] += 1; by_sym[r["symbol"]][1] += r["net"] / r["risk"]
-        by_tf[r["timeframe"]][0] += 1; by_tf[r["timeframe"]][1] += r["net"] / r["risk"]
+        by_sym[r["symbol"]][0] += 1
+        by_sym[r["symbol"]][1] += r["net"] / r["risk"]
+        by_tf[r["timeframe"]][0] += 1
+        by_tf[r["timeframe"]][1] += r["net"] / r["risk"]
         hour = datetime.fromtimestamp(r["record_ms"] / 1000, TZ8).hour
         sess = "04-12时" if 4 <= hour < 12 else "其余"
-        by_sess[sess][0] += 1; by_sess[sess][1] += r["net"] / r["risk"]
+        by_sess[sess][0] += 1
+        by_sess[sess][1] += r["net"] / r["risk"]
     for title, by in (("品种", by_sym), ("周期", by_tf), ("时段", by_sess)):
         print(f"  -- {title}")
         for k, (n, rs) in sorted(by.items(), key=lambda kv: -kv[1][0]):
@@ -271,12 +370,14 @@ def main() -> None:
         cands = qidx.get((r["symbol"], r["timeframe"]), [])
         best = min(cands, key=lambda x: abs(x[0] - r["record_ms"])) if cands else None
         if best and abs(best[0] - r["record_ms"]) < 3600_000:
-            r.update(best[1]); tagged += 1
+            r.update(best[1])
+            tagged += 1
     print(f"  可标注 {tagged}/{len(rows0)} 笔 (最近1小时决策)")
     def _show(name, pred):
         sub = [r for r in rows0 if pred(r)]
         if not sub:
-            print(f"    {name:34s} 0"); return
+            print(f"    {name:34s} 0")
+            return
         rs = sum(r["net"] / r["risk"] for r in sub)
         wr = sum(1 for r in sub if r["net"] > 0) / len(sub)
         print(f"    {name:34s} {len(sub):3d}笔 均R{rs/len(sub):+.3f} 胜率{wr*100:3.0f}%")
@@ -287,6 +388,7 @@ def main() -> None:
     _show("模型 always_in=long 才留", lambda r: r.get("always_in") == "long")
     _show("模型 cycle∈{normal,broad,range}", lambda r: r.get("cycle") in ("normal_channel", "broad_channel", "trading_range"))
     print("  判读: 过滤后均R显著高于基线 → 模型作过滤器有正贡献; 反之模型退出链路")
+    _write_json_out(args, oos_rows, full_best_all)
 
 
 if __name__ == "__main__":

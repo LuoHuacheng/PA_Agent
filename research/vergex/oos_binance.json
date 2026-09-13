@@ -1,0 +1,188 @@
+{
+  "generated_at": "2026-09-14T01:21:21.339679+08:00",
+  "source": "binance",
+  "days": 120,
+  "segments": 6,
+  "oos_rows": [
+    {
+      "rule": "ema_pullback",
+      "seg": 4,
+      "combo": {
+        "ema_period": 20,
+        "stop_atr_mult": 1.0,
+        "target_rr": 1.5
+      },
+      "n": 50,
+      "r_sum": -13.693473625851627,
+      "wr": 0.16
+    },
+    {
+      "rule": "ema_pullback",
+      "seg": 5,
+      "combo": {
+        "ema_period": 50,
+        "stop_atr_mult": 1.5,
+        "target_rr": 1.5
+      },
+      "n": 58,
+      "r_sum": -4.867740188533424,
+      "wr": 0.2413793103448276
+    },
+    {
+      "rule": "donchian_break",
+      "seg": 4,
+      "combo": {
+        "donchian_n": 10,
+        "stop_atr_mult": 1.0,
+        "target_rr": 1.5
+      },
+      "n": 111,
+      "r_sum": -50.14771627995532,
+      "wr": 0.1981981981981982
+    },
+    {
+      "rule": "donchian_break",
+      "seg": 5,
+      "combo": {
+        "donchian_n": 20,
+        "stop_atr_mult": 1.0,
+        "target_rr": 1.5
+      },
+      "n": 248,
+      "r_sum": -86.77909483249934,
+      "wr": 0.3024193548387097
+    },
+    {
+      "rule": "momo_break",
+      "seg": 4,
+      "combo": {
+        "momo_atr": 1.0,
+        "momo_n": 10,
+        "stop_atr_mult": 1.0,
+        "target_rr": 1.5
+      },
+      "n": 222,
+      "r_sum": -85.88437724959599,
+      "wr": 0.24324324324324326
+    },
+    {
+      "rule": "momo_break",
+      "seg": 5,
+      "combo": {
+        "momo_atr": 2.0,
+        "momo_n": 20,
+        "stop_atr_mult": 1.5,
+        "target_rr": 1.5
+      },
+      "n": 478,
+      "r_sum": -133.46763299488023,
+      "wr": 0.24686192468619247
+    },
+    {
+      "rule": "dual_supertrend",
+      "seg": 4,
+      "combo": {
+        "st_mult": 2.0,
+        "st_period": 10,
+        "target_rr": 1.5
+      },
+      "n": 210,
+      "r_sum": -24.667936710381785,
+      "wr": 0.2523809523809524
+    },
+    {
+      "rule": "dual_supertrend",
+      "seg": 5,
+      "combo": {
+        "st_mult": 4.0,
+        "st_period": 20,
+        "target_rr": 3.0
+      },
+      "n": 315,
+      "r_sum": -22.274742327538824,
+      "wr": 0.24126984126984127
+    },
+    {
+      "rule": "trend_pullback",
+      "seg": 4,
+      "combo": {
+        "ema_fast": 10,
+        "ema_slow": 50,
+        "target_rr": 1.5
+      },
+      "n": 111,
+      "r_sum": -31.66279642254175,
+      "wr": 0.23423423423423423
+    },
+    {
+      "rule": "trend_pullback",
+      "seg": 5,
+      "combo": {
+        "ema_fast": 10,
+        "ema_slow": 200,
+        "target_rr": 1.5
+      },
+      "n": 247,
+      "r_sum": -92.63493723070731,
+      "wr": 0.2145748987854251
+    }
+  ],
+  "full_best": {
+    "ema_pullback": {
+      "combo": {
+        "ema_period": 50,
+        "stop_atr_mult": 1.5,
+        "target_rr": 1.5
+      },
+      "n": 100,
+      "wr": 0.24,
+      "r_sum": 0.49391129770847314,
+      "avg_r": 0.0049391129770847315
+    },
+    "donchian_break": {
+      "combo": {
+        "donchian_n": 10,
+        "stop_atr_mult": 1.5,
+        "target_rr": 1.5
+      },
+      "n": 359,
+      "wr": 0.2562674094707521,
+      "r_sum": -73.08646557657933,
+      "avg_r": -0.20358346957264437
+    },
+    "momo_break": {
+      "combo": {
+        "momo_atr": 2.0,
+        "momo_n": 20,
+        "stop_atr_mult": 1.5,
+        "target_rr": 1.5
+      },
+      "n": 691,
+      "wr": 0.24312590448625182,
+      "r_sum": -178.0371324172371,
+      "avg_r": -0.2576514217326152
+    },
+    "dual_supertrend": {
+      "combo": {
+        "st_mult": 4.0,
+        "st_period": 20,
+        "target_rr": 3.0
+      },
+      "n": 438,
+      "wr": 0.24429223744292236,
+      "r_sum": -24.38384705666558,
+      "avg_r": -0.0556708836910173
+    },
+    "trend_pullback": {
+      "combo": {
+        "ema_fast": 10,
+        "ema_slow": 50,
+        "target_rr": 1.5
+      },
+      "n": 357,
+      "wr": 0.22969187675070027,
+      "r_sum": -113.90448257576284,
+      "avg_r": -0.31906017528224884
+    }
+  }
+}
