@@ -19,6 +19,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from pa_agent.records.execution_marker import mark_execution
+
 logger = logging.getLogger(__name__)
 
 #: 视为"下单机会"的 order_type 集合（与 stage2 输出契约一致）。
@@ -266,16 +268,34 @@ class SignalPipeline:
         )
         if not evaluation.opportunity:
             return DispatchResult(opportunity=False)
+        self._prepare_execution_prices(signal)
         if evaluation.gate_mode == "on":
+            # 门控只拦"下单"：记录与推送照发。否则被拦的信号对操作者完全不可见
+            # （2026-09-13 现场：short_block 连拦 6 条限价单，CSV 无行、无推送，
+            # 事后无法区分"没机会"和"被门控拦下"），而且连续性守卫会把一个从未
+            # 提交的方案当成在场挂单，一路压掉后续入场。
+            mark_execution(
+                signal.decision,
+                status="gate_blocked",
+                gate_reasons=evaluation.gate_reasons,
+            )
+            notified = self._notify_gate_blocked(signal, evaluation.gate_reasons)
+            # 注意：不写 trade_records CSV —— 那是"已执行决策行"的账本，被回放与
+            # outcome 统计直接消费，混入未提交的信号会污染胜率口径。被拦方案的
+            # 记录位置是 records/pending（带 execution 标记）与通知。
             return DispatchResult(
                 opportunity=True,
                 gate_blocked=True,
                 gate_reasons=evaluation.gate_reasons,
+                notified=notified,
             )
 
-        self._prepare_execution_prices(signal)
         self._save_record(signal)
         result = self._execute(signal)
+        # 执行结果写回记录：被拒/跳过/失败同样没有在场挂单, 连续性守卫不该等它。
+        mark_execution(
+            signal.decision, status=str(getattr(result, "status", "") or "unknown")
+        )
         notified = self._notify_signal(signal, result)
         return DispatchResult(
             opportunity=True,
@@ -412,6 +432,27 @@ class SignalPipeline:
             except Exception:
                 logger.exception("Execution-failure notification failed")
         return result
+
+    def _notify_gate_blocked(
+        self, signal: OrderSignal, gate_reasons: tuple[str, ...]
+    ) -> bool:
+        """门控拦截也推送：这张单没下，但操作者必须看得见它被拦了。"""
+        try:
+            from pa_agent.notify.telegram_notifier import send_gate_blocked_signal
+
+            return bool(
+                send_gate_blocked_signal(
+                    decision_inner=signal.inner,
+                    stage2_full=signal.decision,
+                    symbol=signal.symbol,
+                    timeframe=signal.timeframe,
+                    gate_reasons=gate_reasons,
+                    settings=self._settings,
+                )
+            )
+        except Exception:  # 通知绝不影响分析/执行主流程
+            logger.exception("Gate-blocked notification failed")
+            return False
 
     def _notify_signal(self, signal: OrderSignal, exec_result: Any) -> bool:
         """推送下单信号；被拒执行静默（避免"像有单在跑"的误导）。"""

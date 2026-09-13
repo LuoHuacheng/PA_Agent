@@ -354,3 +354,70 @@ def test_build_continuity_context_does_not_auto_cancel_when_limit_already_trigge
     assert ctx["limit_triggered"] is True
     # Triggered means we should not auto-cancel under the "unfilled" rule.
     assert ctx["invalidated"] is False
+
+
+# ── 执行标记: 幽灵挂单回归 (2026-09-13 short_block) ─────────────────────────
+
+
+def _prev_record(execution: dict | None) -> dict:
+    stage2: dict = {
+        "decision": {
+            "order_direction": "做空",
+            "order_type": "限价单",
+            "entry_price": 4200.0,  # above frame high(4194): 未触发
+            "stop_loss_price": 4210.0,
+            "take_profit_price": 4180.0,
+        }
+    }
+    if execution is not None:
+        stage2["execution"] = execution
+    return {
+        "meta": {"timestamp_local_iso": "2026-06-30 14:20:00"},
+        "stage1_diagnosis": {"direction": "bearish", "cycle_position": "broad_channel"},
+        "stage2_decision": stage2,
+    }
+
+
+def test_unsubmitted_plan_is_not_a_resting_order():
+    """被门控拦下的方案: 不得让模型继续等它, 也不适用反手冷却."""
+    ctx = build_continuity_context(
+        frame=_frame(),
+        stage1_json={"direction": "bearish", "cycle_position": "broad_channel"},
+        previous_record=_prev_record(
+            {"status": "gate_blocked", "gate_reasons": ["short_block: 回放 45 天"]}
+        ),
+    )
+    assert ctx["has_previous_plan"] is False
+    assert ctx["previous_plan_unsubmitted"] is True
+    assert ctx["previous_execution_status"] == "gate_blocked"
+
+    block = render_continuity_prompt_block(ctx)
+    assert "未提交" in block
+    assert "交易所上不存在这张挂单" in block
+    assert "short_block: 回放 45 天" in block
+    # 必须明确禁止"继续等那张单", 否则模型照旧观望
+    assert "禁止" in block and "那张单不存在" in block
+
+
+def test_submitted_plan_still_governs_continuity():
+    """真提交过的方案照旧: 未触发 + 未失效 -> 默认等待 (原行为不变)."""
+    ctx = build_continuity_context(
+        frame=_frame(),
+        stage1_json={"direction": "bearish", "cycle_position": "broad_channel"},
+        previous_record=_prev_record({"status": "submitted"}),
+    )
+    assert ctx["has_previous_plan"] is True
+    assert ctx["previous_plan_unsubmitted"] is False
+    block = render_continuity_prompt_block(ctx)
+    assert "限价未触发" in block
+
+
+def test_unmarked_record_keeps_legacy_behaviour():
+    """没有标记的历史记录/其它路径按旧行为处理, 不能突然全部失效."""
+    ctx = build_continuity_context(
+        frame=_frame(),
+        stage1_json={"direction": "bearish", "cycle_position": "broad_channel"},
+        previous_record=_prev_record(None),
+    )
+    assert ctx["has_previous_plan"] is True
+    assert ctx["previous_plan_unsubmitted"] is False

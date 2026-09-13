@@ -81,6 +81,10 @@ def _patch_io(monkeypatch, exec_status: str = "submitted") -> tuple[list, list]:
             f"pa_agent.notify.{mod}.send_order_signal",
             lambda _m=mod, **_kw: notified.append(_m) or True,
         )
+    monkeypatch.setattr(
+        "pa_agent.notify.telegram_notifier.send_gate_blocked_signal",
+        lambda **_kw: notified.append("gate_blocked") or True,
+    )
     return exec_calls, notified
 
 
@@ -125,10 +129,16 @@ def test_gate_on_mode_blocks_execution_and_counts(monkeypatch) -> None:
         lambda **_kw: ["G1: 逆势", "G2: 中性带"],
     )
     pipeline = SignalPipeline(settings, on_gate_hit=hits.append)
-    result = pipeline.dispatch(_signal(_decision(), frame=_frame()))
+    decision = _decision()
+    result = pipeline.dispatch(_signal(decision, frame=_frame()))
     assert result.gate_blocked is True
-    assert exec_calls == [] and notified == []
+    # 不下单, 但必须通知(否则操作者分不清"没机会"与"被拦下")
+    assert exec_calls == [] and notified == ["gate_blocked"]
     assert hits and "G1" in hits[0] and "G2" in hits[0]
+    # 记录里留下"未提交"印记, 供连续性守卫与事后复盘
+    marker = decision["execution"]
+    assert marker["status"] == "gate_blocked"
+    assert marker["gate_reasons"] == ["G1: 逆势", "G2: 中性带"]
 
 
 def test_gate_dry_run_logs_but_passes(monkeypatch) -> None:
@@ -283,3 +293,40 @@ def test_block_session_entry(monkeypatch) -> None:
         assert exec_calls == []
     else:
         assert not result.gate_blocked
+
+
+def test_entry_gate_block_notifies_and_marks(monkeypatch) -> None:
+    """入口门控命中: 不下单, 但通知 + 记录标记必须都在。
+
+    回归 2026-09-13: short_block 连拦 6 条限价单, 无推送无痕迹, 事后无法解释
+    "为什么没下单"; 记录也没标记, 连续性守卫一直等那张不存在的挂单。
+    """
+    exec_calls, notified = _patch_io(monkeypatch)
+    signal = _env_signal("做空", "normal_channel", "bearish")
+    pipeline = SignalPipeline(_env_settings(block_short_entry=True))
+    result = pipeline.dispatch(signal)
+
+    assert result.gate_blocked is True
+    assert result.notified is True
+    assert exec_calls == []
+    assert notified == ["gate_blocked"]
+    assert signal.decision["execution"]["status"] == "gate_blocked"
+    assert "short_block" in signal.decision["execution"]["gate_reasons"][0]
+
+
+def test_executed_signal_marks_submitted(monkeypatch) -> None:
+    _patch_io(monkeypatch, exec_status="submitted")
+    signal = _signal(_decision())
+    SignalPipeline(Settings()).dispatch(signal)
+    assert signal.decision["execution"]["status"] == "submitted"
+
+
+def test_rejected_signal_marks_not_working(monkeypatch) -> None:
+    """被拒执行同样没有在场挂单, 标记必须能被连续性守卫读出来。"""
+    from pa_agent.records.execution_marker import plan_is_working
+
+    _patch_io(monkeypatch, exec_status="rejected")
+    signal = _signal(_decision())
+    SignalPipeline(Settings()).dispatch(signal)
+    assert signal.decision["execution"]["status"] == "rejected"
+    assert plan_is_working({"stage2_decision": signal.decision}) is False

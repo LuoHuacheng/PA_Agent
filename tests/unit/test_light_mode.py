@@ -67,6 +67,26 @@ def test_stage1_of_record_and_active_plan():
     assert stage1_of_record({"stage1_diagnosis": STAGE1}) is STAGE1
 
 
+def test_blocked_plan_is_not_an_active_plan():
+    """执行层没提交的方案在交易所上什么都没有, 不能当成有单在场。"""
+    blocked = SimpleNamespace(
+        stage1_diagnosis=STAGE1,
+        stage2_decision={
+            "decision": {"order_type": "限价单", "entry_price": 1.0},
+            "execution": {"status": "gate_blocked", "gate_reasons": ["short_block: x"]},
+        },
+    )
+    assert record_has_active_plan(blocked) is False
+    submitted = SimpleNamespace(
+        stage1_diagnosis=STAGE1,
+        stage2_decision={
+            "decision": {"order_type": "限价单", "entry_price": 1.0},
+            "execution": {"status": "submitted"},
+        },
+    )
+    assert record_has_active_plan(submitted) is True
+
+
 def test_light_mode_settings_defaults_and_example():
     cfg = Settings().monitoring
     assert cfg.light_mode_enabled is False

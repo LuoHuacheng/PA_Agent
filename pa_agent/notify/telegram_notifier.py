@@ -193,6 +193,48 @@ def send_execution_failure(
     return send_telegram_message("\n".join(lines), settings=settings)
 
 
+def send_gate_blocked_signal(
+    *,
+    decision_inner: dict,
+    stage2_full: dict,
+    symbol: str,
+    timeframe: str,
+    gate_reasons: tuple[str, ...] | list[str] = (),
+    settings: Settings | None = None,
+) -> bool:
+    """Push a Telegram notice when an entry gate blocks an order opportunity.
+
+    The signal never reached the exchange, so this is deliberately *not* shaped
+    like an order signal: without it the operator cannot tell "no opportunity"
+    from "opportunity blocked by a gate" (2026-09-13: ``short_block`` blocked six
+    limit orders with no push and no trace in the trade ledger).
+    """
+    if not telegram_is_active(settings):
+        return False
+    dec = decision_inner or {}
+    reasons = "；".join(str(r) for r in gate_reasons if str(r)) or "未提供原因"
+    env_label = "Testnet"
+    if settings is not None:
+        from pa_agent.trading.binance_env import resolve_env
+
+        env_label = resolve_env(settings).label_en
+    suffix = f"  周期：{timeframe}" if timeframe else ""
+    lines = [
+        f"🚧 PA Agent {env_label} 信号被入口门控拦截（未下单）",
+        "",
+        f"品种：{_fmt(symbol)}{suffix}",
+        f"下单类型：{_fmt(dec.get('order_type'))}  方向：{_fmt(dec.get('order_direction'))}",
+        f"入场价：{_fmt(dec.get('entry_price'))}  止损：{_fmt(dec.get('stop_loss_price'))}",
+        f"置信度：{_fmt(dec.get('trade_confidence'))}",
+        "",
+        f"拦截原因：{_truncate(reasons, 600)}",
+        "",
+        "提示：该信号未提交交易所，交易所上没有挂单；门控开关在 "
+        "config/settings.json 的 binance_usdm_testnet.block_*_entry。",
+    ]
+    return send_telegram_message("\n".join(lines), settings=settings)
+
+
 def send_structure_exit_notice(
     *,
     symbol: str,

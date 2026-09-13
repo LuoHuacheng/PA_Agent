@@ -253,7 +253,9 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # 逆大趋势且通过门槛的单, 杠杆 (名义仓位随杠杆同比例) 乘以此系数, 最小 1x.
     counter_trend_size_scale: float = Field(default=0.5, ge=0.1, le=1.0)
     # --- 入口环境门控 (2026-09-13 shadow_replay 45 天变体验证后新增) ---
-    # 三项只拦自动执行入口(signal_pipeline.evaluate), 不影响信号记录与推送。
+    # 只拦"自动下单"这一步: 命中的方案不下单, 但照常推送(Telegram)并在记录里写
+    # execution.status="gate_blocked" —— 否则被拦的信号对操作者完全不可见, 且
+    # 连续性守卫会把一个从未提交的方案当成在场挂单一直等下去。
     # 依据: 回放 45 天, 空单 87 笔胜率 16% 净/风险 -0.77; trending_tr 118 笔
     # 胜率 25% 净/风险 -0.55; 实盘 73 笔中 neutral 诊断单 20 笔胜率 25%。
     block_short_entry: bool = False

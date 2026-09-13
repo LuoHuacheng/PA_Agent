@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pa_agent.records.execution_marker import plan_is_working
+
 #: program_features keys that indicate structure changes between bars
 STRUCTURE_KEYS = (
     "breakout_quality",
@@ -54,7 +56,12 @@ def stage1_of_record(record: Any) -> dict | None:
 
 
 def record_has_active_plan(record: Any) -> bool:
-    """True when the previous decision still works an entry order."""
+    """True when the previous decision still works an entry order.
+
+    A plan the execution layer never submitted (entry gate / rejection /
+    dry-run) leaves nothing on the exchange, so it must not keep the light-mode
+    gate thinking an order is working.
+    """
     s2 = getattr(record, "stage2_decision", None)
     if not isinstance(s2, dict):
         s2 = record.get("stage2_decision") if isinstance(record, dict) else None
@@ -63,4 +70,6 @@ def record_has_active_plan(record: Any) -> bool:
     inner = s2.get("decision")
     if not isinstance(inner, dict):
         return False
-    return str(inner.get("order_type") or "") in _ACTIVE_ORDER_TYPES
+    if str(inner.get("order_type") or "") not in _ACTIVE_ORDER_TYPES:
+        return False
+    return plan_is_working(record)

@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003 - Chinese product copy
 """Previous-decision continuity: invalidation checks, flip cooldown, Stage-2 prompt block."""
 from __future__ import annotations
 
@@ -5,6 +6,11 @@ import re
 from datetime import datetime
 from typing import Any
 
+from pa_agent.records.execution_marker import (
+    execution_status,
+    gate_reasons,
+    plan_is_working,
+)
 from pa_agent.util.price_tick import infer_price_tick_from_frame
 
 # Default: no opposite-direction plan at the same structure within N closed bars.
@@ -379,6 +385,11 @@ def build_continuity_context(
     prev_time = previous_record_time_iso(previous_record)
     prev_source = "analysis_record"
     prev_stage1 = stage1_from_previous_record(previous_record)
+    # 执行标记：被入口门控 / 执行拒绝 / dry-run 拦下的方案在交易所上没有任何挂单，
+    # 不能当作"在场方案"，否则模型会一直等待一个不存在的限价触发（2026-09-13
+    # short_block 连拦 6 条做空限价单后，后续每轮都按这条规则观望）。
+    prev_status = execution_status(previous_record)
+    prev_submitted = plan_is_working(previous_record)
 
     if prev_decision is None:
         csv_row = load_last_trade_csv_row(symbol, timeframe)
@@ -415,7 +426,12 @@ def build_continuity_context(
     always_in = extract_always_in_branch(stage1_json)
 
     return {
-        "has_previous_plan": is_order_plan(prev_decision),
+        # 只有"真提交过"的下单方案才算在场方案；未提交的在下面单独渲染，
+        # 明确告诉模型"交易所上没有这张单，不要等它"。
+        "has_previous_plan": is_order_plan(prev_decision) and prev_submitted,
+        "previous_plan_unsubmitted": is_order_plan(prev_decision) and not prev_submitted,
+        "previous_execution_status": prev_status,
+        "previous_gate_reasons": gate_reasons(previous_record),
         "previous_decision": prev_decision or {},
         "previous_time": prev_time,
         "previous_source": prev_source,
@@ -436,7 +452,43 @@ def build_continuity_context(
     }
 
 
+def _render_unsubmitted_plan_block(ctx: dict[str, Any]) -> str:
+    """上一轮方案被拦在执行层之前：交易所上没有这张单, 不得等它。
+
+    2026-09-13 现场：``short_block`` 拦下 6 条做空限价单后，模型连续多轮按"等待上一轮
+    限价触价"观望，把一个从未提交的方案当成在场挂单。这段提示把事实说清楚。
+    """
+    prev = ctx.get("previous_decision") or {}
+    prev_dir = str(prev.get("order_direction") or "—")
+    prev_type = str(prev.get("order_type") or "—")
+    prev_entry = prev.get("entry_price", "—")
+    status = str(ctx.get("previous_execution_status") or "未提交")
+    reasons = "；".join(str(r) for r in (ctx.get("previous_gate_reasons") or []))
+    lines = [
+        "## 上一轮交易方案连续性（程序评估，阶段二必须遵守）",
+        "",
+        f"### 上一轮方案**未提交**到交易所（execution.status={status}）",
+        f"- 上一轮（{ctx.get('previous_time') or '—'}，约 {ctx.get('bars_since', 1)} 根 "
+        f"{ctx.get('timeframe', '')} K 线前）曾给出 **{prev_dir} {prev_type} @ {prev_entry}**，",
+        "  但执行层没有下单：**交易所上不存在这张挂单**。",
+    ]
+    if reasons:
+        lines.append(f"- 拦截原因：{reasons}")
+    lines.extend(
+        [
+            "",
+            "### 裁定（按优先级）",
+            "1. **禁止**以「等待上一轮限价/setup 触价」「延续上一轮方案」为由观望——那张单不存在；",
+            "2. 本轮须**独立**按当前结构重新评估：可以给新方案，也可以明确观望，但观望理由必须来自本轮结构；",
+            "3. 上一轮的失效判定与同结构位反手冷却**均不适用**（没有在场挂单）。",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def render_continuity_prompt_block(ctx: dict[str, Any]) -> str:
+    if ctx.get("previous_plan_unsubmitted"):
+        return _render_unsubmitted_plan_block(ctx)
     if not ctx.get("has_previous_plan"):
         direction = ctx.get("direction", "neutral")
         always_in = ctx.get("always_in_branch")

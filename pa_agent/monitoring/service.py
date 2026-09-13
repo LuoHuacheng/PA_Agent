@@ -675,7 +675,7 @@ class MultiSymbolMonitor:
             ),
         )
         try:
-            self._signal_pipeline.dispatch(pipeline_signal)
+            dispatch_result = self._signal_pipeline.dispatch(pipeline_signal)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Monitor trade-record/execution failed for %s %s: %s",
@@ -683,7 +683,27 @@ class MultiSymbolMonitor:
                 frame.timeframe,
                 exc,
             )
+            return decision
+        if (
+            record is not None
+            and dispatch_result is not None
+            and dispatch_result.gate_blocked
+        ):
+            # 门控拦截：内存里的 previous_record 已带 execution 标记（与记录共享
+            # 同一个 stage2_decision dict），重写一次是为了让磁盘上的 pending 记录
+            # 也能回答"这一轮为什么没下单"。
+            self._rewrite_pending_record(record)
         return decision
+
+    def _rewrite_pending_record(self, record: Any) -> None:
+        """Rewrite an analysis record after the pipeline marked its execution."""
+        writer = getattr(self._ctx, "pending_writer", None)
+        if writer is None:
+            return
+        try:
+            writer.save_full(record)
+        except Exception:  # 记录重写是尽力而为
+            logger.debug("Pending record rewrite failed", exc_info=True)
 
     def _bump_direction_gate_stats(self, gates_key: str) -> None:
         self._direction_gate_stats[gates_key] = (
