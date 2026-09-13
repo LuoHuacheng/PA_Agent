@@ -84,3 +84,4 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 config/monitoring.pid
+research/vergex/*.log
