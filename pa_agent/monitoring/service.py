@@ -687,11 +687,12 @@ class MultiSymbolMonitor:
         if (
             record is not None
             and dispatch_result is not None
-            and dispatch_result.gate_blocked
+            and (dispatch_result.gate_blocked or dispatch_result.exec_result is not None)
         ):
-            # 门控拦截：内存里的 previous_record 已带 execution 标记（与记录共享
-            # 同一个 stage2_decision dict），重写一次是为了让磁盘上的 pending 记录
-            # 也能回答"这一轮为什么没下单"。
+            # 管线给记录打了 execution 标记（门控拦截 / 已提交 / 被拒 / 失败）。
+            # 内存里的 previous_record 已经带着它（与记录共享同一个 stage2_decision
+            # dict），重写一次是为了让磁盘上的 pending 记录也能回答"这一轮下了没下、
+            # 为什么没下"，与 trade_records CSV 的口径对齐。
             self._rewrite_pending_record(record)
         return decision
 
