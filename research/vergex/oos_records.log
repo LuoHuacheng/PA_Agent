@@ -1,0 +1,52 @@
+时间线: 23 组, fee maker=0.0002 taker=0.0005
+窗口: 08-05 ~ 09-14, 5 段, 每段 7.8 天
+
+=== 线1a: 滚动样本外 (前段选参 → 下段验证) ===
+  ema_pullback   段3: 选参 {"ema_period": 30, "stop_atr_mult": 1.0, "target_rr": 1.5} → OOS   6笔 R合计  +0.89 胜率 33%
+  ema_pullback   段4: 选参 {"ema_period": 20, "stop_atr_mult": 1.5, "target_rr": 3.0} → OOS  16笔 R合计  +3.39 胜率 25%
+  ema_pullback   全样本最优 {"ema_period": 30, "stop_atr_mult": 1.0, "target_rr": 3.0}: 22笔 R合计+8.90 均R+0.404 胜率41%
+  donchian_break 段3: 选参 {"donchian_n": 40, "stop_atr_mult": 1.5, "target_rr": 2.0} → OOS  44笔 R合计  -7.84 胜率 20%
+  donchian_break 段4: 选参 {"donchian_n": 10, "stop_atr_mult": 1.0, "target_rr": 2.0} → OOS  45笔 R合计 -15.54 胜率 13%
+  donchian_break 全样本最优 {"donchian_n": 10, "stop_atr_mult": 1.5, "target_rr": 1.5}: 115笔 R合计-14.31 均R-0.124 胜率31%
+  momo_break     段3: 选参 {"momo_atr": 2.0, "momo_n": 10, "stop_atr_mult": 1.0, "target_rr": 2.0} → OOS  86笔 R合计 -40.40 胜率 20%
+  momo_break     段4: 选参 {"momo_atr": 1.0, "momo_n": 10, "stop_atr_mult": 1.5, "target_rr": 1.5} → OOS  82笔 R合计 -33.17 胜率 20%
+  momo_break     全样本最优 {"momo_atr": 1.0, "momo_n": 10, "stop_atr_mult": 1.5, "target_rr": 1.5}: 205笔 R合计-53.25 均R-0.260 胜率28%
+  dual_supertrend 段3: 选参 {"st_mult": 2.0, "st_period": 20, "target_rr": 2.0} → OOS  71笔 R合计 -20.70 胜率 13%
+  dual_supertrend 段4: 选参 {"st_mult": 4.0, "st_period": 10, "target_rr": 1.5} → OOS  42笔 R合计  -9.54 胜率 21%
+  dual_supertrend 全样本最优 {"st_mult": 4.0, "st_period": 20, "target_rr": 2.0}: 105笔 R合计+0.71 均R+0.007 胜率36%
+  trend_pullback 段3: 选参 {"ema_fast": 10, "ema_slow": 200, "target_rr": 1.5} → OOS  28笔 R合计  -5.35 胜率 21%
+  trend_pullback 段4: 选参 {"ema_fast": 10, "ema_slow": 200, "target_rr": 1.5} → OOS  22笔 R合计  -4.59 胜率 23%
+  trend_pullback 全样本最优 {"ema_fast": 10, "ema_slow": 200, "target_rr": 3.0}: 50笔 R合计-9.68 均R-0.194 胜率12%
+  OOS 合计: 442 笔, R合计 -132.87, 均R -0.301 → 仍为负或不足
+
+=== 线1b: 切片 (全样本最优组合, EMA20/RR2/ATR1 固定参数) ===
+  -- 品种
+    ETHUSDT      9笔 均R-0.473 R合计-4.26
+    BTCUSDT      6笔 均R-0.410 R合计-2.46
+    SOLUSDT      6笔 均R+0.351 R合计+2.11
+    XRPUSDT      6笔 均R+0.347 R合计+2.08
+    DOGEUSDT     2笔 均R-0.707 R合计-1.41
+    LINKUSDT     2笔 均R+0.340 R合计+0.68
+    ADAUSDT      2笔 均R-0.167 R合计-0.33
+    BNBUSDT      2笔 均R+0.163 R合计+0.33
+    ZECUSDT      1笔 均R+1.950 R合计+1.95
+    TRXUSDT      1笔 均R-0.361 R合计-0.36
+  -- 周期
+    15m         23笔 均R+0.024 R合计+0.56
+    30m          9笔 均R-0.169 R合计-1.52
+    1h           4笔 均R-0.150 R合计-0.60
+    5m           1笔 均R-0.116 R合计-0.12
+  -- 时段
+    其余          32笔 均R+0.045 R合计+1.44
+    04-12时       5笔 均R-0.623 R合计-3.12
+
+=== 线2: 模型标签能否过滤对照流 (固定参数 EMA20/RR2/ATR1) ===
+  可标注 16/37 笔 (最近1小时决策)
+    不过滤(基线)                             37笔 均R-0.045 胜率 24%
+    模型 diag=bullish 才留                 0
+    模型 diag∈{bullish}且cycle≠trending_tr 0
+    模型 always_in=long 才留                 2笔 均R+0.881 胜率 50%
+    模型 cycle∈{normal,broad,range}       10笔 均R+0.748 胜率 50%
+  判读: 过滤后均R显著高于基线 → 模型作过滤器有正贡献; 反之模型退出链路
+
+JSON 产物已写入: research/vergex/oos_records.json
