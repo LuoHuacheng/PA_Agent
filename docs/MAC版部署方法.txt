@@ -251,15 +251,19 @@ config/settings.json 若不存在，程序首次启动会自动创建，可忽�
   cd PROJECT_ROOT
   python3 -m pa_agent.main
 
-启动无头监控（按 K 线收盘自动分析/推送，Ctrl+C 优雅停止）：
+启动无头监控（按 K 线收盘自动分析/推送，默认后台运行，关掉终端/断开 SSH 都不会中断）：
 
   cd PROJECT_ROOT
-  python3 run.py --monitor   # 等价于 python3 -m pa_agent.monitoring.cli start
+  python3 run.py --monitor   # 等价于 python3 -m pa_agent.monitoring.cli start，默认后台
 
 若执行过 pip install -e .，也可直接使用安装的命令入口（效果相同）：
 
   pa-agent           # GUI
-  pa-monitor start   # 监控；另有 pa-monitor status / stop / pnl 子命令
+  pa-monitor start   # 后台启动监控；另有 pa-monitor status / stop / pnl 子命令
+  pa-monitor start --foreground   # 前台运行看实时输出，Ctrl+C 优雅停止
+
+后台启动成功会打印 "[已后台启动] PID=xxx"；若子进程启动即失败，失败原因会直接回显在终端，
+完整输出见 logs/monitor.out。停止用 pa-monitor stop。
 
 给用户交付时可建议把常用命令存成 shell 别名（可选，不做也可）：
 

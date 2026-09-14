@@ -237,9 +237,17 @@ def stop_monitor(pid_path: Path) -> int:
     return 0
 
 
-def monitor_status(pid_path: Path) -> int:
+def _live_monitor_pid(pid_path: Path) -> int | None:
+    """PID 文件里那个进程确实是我们自己的监控时返回其 PID, 否则 None."""
     pid = _read_pid(pid_path)
-    if pid is not None and _pid_exists(pid) and _is_monitor_process(_process_command(pid), pid=pid):
+    if pid is None or not _pid_exists(pid):
+        return None
+    return pid if _is_monitor_process(_process_command(pid), pid=pid) else None
+
+
+def monitor_status(pid_path: Path) -> int:
+    pid = _live_monitor_pid(pid_path)
+    if pid is not None:
         print(f"[监控运行中] PID={pid}")
         return 0
     print("[监控未运行]")
@@ -630,20 +638,48 @@ def run_monitor() -> int:
         signal.signal(signal.SIGTERM, previous_sigterm)
 
 
+_FOREGROUND_FLAG = "--foreground"
+_USAGE = "用法: pa-monitor [start [--foreground]|stop|status|pnl]"
+
+
+def _start_command(args: list[str]) -> int:
+    """start 默认后台运行; --foreground 保留前台 (后台子进程也走这个入口)."""
+    from pa_agent.config.paths import MONITORING_LOG_PATH, MONITORING_PID_PATH
+    from pa_agent.monitoring import daemon
+
+    unknown = [arg for arg in args if arg != _FOREGROUND_FLAG]
+    if unknown:
+        print(f"未知参数: {unknown[0]}", file=sys.stderr)
+        print(_USAGE, file=sys.stderr)
+        return 2
+    if _FOREGROUND_FLAG in args:
+        return run_monitor()
+    live_pid = _live_monitor_pid(MONITORING_PID_PATH)
+    if live_pid is not None:
+        # 预检只是省一次白拉起的 spawn; 真正的并发保护仍是子进程里的 PID 文件锁.
+        print(f"[监控已在运行] PID={live_pid}", file=sys.stderr)
+        return 1
+    return daemon.spawn_background(
+        [sys.executable, "-m", "pa_agent.monitoring.cli", "start", _FOREGROUND_FLAG],
+        log_path=MONITORING_LOG_PATH,
+        pid_path=MONITORING_PID_PATH,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     from pa_agent.config.paths import MONITORING_PID_PATH
 
     command = args[0] if args else "start"
     if command == "start":
-        return run_monitor()
+        return _start_command(args[1:])
     if command == "stop":
         return stop_monitor(MONITORING_PID_PATH)
     if command == "status":
         return monitor_status(MONITORING_PID_PATH)
     if command == "pnl":
         return _pnl_command(args[1:])
-    print("用法: pa-monitor [start|stop|status|pnl]", file=sys.stderr)
+    print(_USAGE, file=sys.stderr)
     return 2
 
 

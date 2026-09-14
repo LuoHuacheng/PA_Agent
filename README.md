@@ -94,15 +94,18 @@ make uv-run
 
 ### 无头监控（headless monitor，`pa-monitor`）
 
-不打开图形界面、按 K 线收盘自动运行的监控模式，直接执行 `pa-monitor start`。此模式不依赖 Qt，安装时用基础 `pip install -e .`（不带 `gui` extra）即可：
+不打开图形界面、按 K 线收盘自动运行的监控模式，直接执行 `pa-monitor start`。**默认后台运行**：命令确认进程就绪后即返回并打印 PID，关掉终端或断开 SSH 都不会中断。此模式不依赖 Qt，安装时用基础 `pip install -e .`（不带 `gui` extra）即可：
 
 ```cmd
-pa-monitor start      # 启动监控
+pa-monitor start      # 后台启动监控（就绪后返回，打印 PID）
 pa-monitor status     # 查看运行状态
 pa-monitor stop       # 停止（优雅关停，超时兜底强退）
+pa-monitor start --foreground   # 前台运行：实时输出、Ctrl+C 停止，排障用
 pa-monitor pnl        # 每日实现盈亏只读统计
 pa-monitor pnl --days 30 --csv pnl.csv   # 自定义天数 / 导出 CSV
 ```
+
+后台进程的 stdout/stderr 追加写入 `logs/monitor.out`（启动失败时其新增输出会直接回显到终端）；结构化日志仍在 `logs/pa_agent.log`。`python run.py --monitor` 与 `pa-monitor start` 等价，同样默认后台。
 
 监控品种来自 `config/settings.json` → `monitoring.targets`（静态）或 `auto_discover`（按成交额自动选 Binance U 本位 Top N）。每个 K 线收盘时点自动拉取数据并做两阶段分析：信号达标（类型为市价/限价/突破单且置信度 ≥ `decision_confidence_threshold`）时推送 Telegram 通知，并在启用时于 Binance U 本位 Testnet 自动下单（限价单含止损止盈保护）。日志见 `logs/pa_agent.log`，数据源为 TradingView（可在 `general` 配置登录凭据缓解匿名限流）。
 

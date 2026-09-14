@@ -31,5 +31,7 @@ FEISHU_JSON_LEGACY_PATH: Path = CONFIG_DIR / "feishu.json"
 SETTINGS_JSON_PATH: Path = CONFIG_DIR / "settings.json"
 MONITORING_STATE_PATH: Path = CONFIG_DIR / "monitoring_state.json"
 MONITORING_PID_PATH: Path = CONFIG_DIR / "monitoring.pid"
+#: 后台监控的 stdout/stderr 落点 (控制台 handler / 裸 print / 未捕获 traceback).
+MONITORING_LOG_PATH: Path = LOGS_DIR / "monitor.out"
 LOG_FILE_PATH: Path = LOGS_DIR / "pa_agent.log"
 CRASH_LOG_PATH: Path = LOGS_DIR / "crash.log"
