@@ -106,7 +106,13 @@ PY
 
 验收判据对照(计划"验收判据"1–4):
 
-1. Task 2 两个新测试 PASS;全量单测无回归 —— 见提交后 `uv run pytest tests/unit` 结果。
+1. Task 2 两个新测试 PASS;全量单测无回归 —— **实测 `tests/unit`:1101 passed, 1 skipped**
+   (基线 1099 passed + 本次新增 2 例);`tests/integration`:22 passed(含新增 1 例);
+   `tests/property`:PASS。`tests/e2e` 4 例失败与本次改动无关(基线 worktree 同栈复现:
+   `ctx.settings` 为 None 的 GUI 夹具问题)。
+   **lint 说明**:仓库 ruff 基线本身不干净(`extend-select = E,F,I,UP,B,SIM,RUF`)——
+   同一组文件改动前 1483 条、改动后 1482 条(`two_stage.py` 61→60),`prompt_assembler.py`
+   持平 1421,新增测试文件 0 条:**本次改动零新增 lint 问题**;存量清理不在本计划范围。
 2. 重启后任取 `records/pending/*.json`,其 stage2 调试信息(或 `_prompt_files_panel` 调试 tab)
    的文件列表含 29/30 —— 代码路径已保证(`strategy_files_used` + `stage2_prompt_txt_files`),
    需重启后人工抽检。
