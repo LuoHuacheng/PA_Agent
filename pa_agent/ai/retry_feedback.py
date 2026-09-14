@@ -95,6 +95,20 @@ def build_retry_feedback(
     for item in forbidden:
         lines.append(f"- {item}")
 
+    if stage == "stage2" and any(
+        "diagnosis_summary.direction" in inv and "neutral" in inv for inv in invalid
+    ):
+        # 本条豁免上面的禁改清单：诊断 neutral + 方向单 是自相矛盾，必须让模型
+        # 二选一（json_validator._check_neutral_diag_order 与入口门控同口径）。
+        lines.append("")
+        lines.append("**neutral 诊断冲突的修正方式（本条豁免上面的禁改）：**")
+        lines.append(
+            "- 二选一：(a) 补 decision_trace node 2.3 重判方向，并同步 "
+            "diagnosis_summary.direction=bullish/bearish；"
+            "(b) 放弃本方案，order_type=不下单。"
+            "只改下单方向、不改诊断方向 —— 下一轮仍会被拒绝，且被入口门控拦下不提交。"
+        )
+
     geo = _geometry_excerpt(frame) if stage == "stage1" and frame is not None else ""
     if geo:
         lines.append("")

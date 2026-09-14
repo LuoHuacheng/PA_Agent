@@ -680,6 +680,11 @@ class JsonValidator:
                 invalid.extend(no_order_err["fields"])
                 allowed.update(no_order_err["allowed"])
 
+            neutral_diag_err = self._check_neutral_diag_order(obj)
+            if neutral_diag_err:
+                invalid.extend(neutral_diag_err["fields"])
+                allowed.update(neutral_diag_err["allowed"])
+
             breakout_err = self._check_breakout_order_basis(obj)
             if breakout_err:
                 invalid.extend(breakout_err["fields"])
@@ -798,6 +803,43 @@ class JsonValidator:
                     },
                 }
         return None
+
+    @staticmethod
+    def _check_neutral_diag_order(obj: dict) -> dict | None:
+        """诊断方向 neutral 时不得提交方向单。
+
+        与入口门控 neutral_diag_block（signal_pipeline._entry_block_reasons）
+        同口径：那一层只负责"不提交"，被拦信号对模型完全不可见，也无从自纠。
+        这里把同一类矛盾推到校验期，模型重试时必须二选一 —— 用 decision_trace
+        node 2.3 重判方向并同步 diagnosis_summary.direction，或放弃方案
+        （order_type=不下单）。程序产物（_auto_stub / gate_shortcircuited）不算
+        模型违约，直接放行。
+        """
+        if obj.get("_auto_stub") or obj.get("gate_shortcircuited"):
+            return None
+        decision = obj.get("decision")
+        summary = obj.get("diagnosis_summary")
+        if not isinstance(decision, dict) or not isinstance(summary, dict):
+            return None
+        order_type = decision.get("order_type")
+        order_dir = str(decision.get("order_direction") or "").strip()
+        if order_type not in ("限价单", "突破单", "市价单"):
+            return None
+        if order_dir not in ("做多", "做空"):
+            # 方向字段本身缺失/非法时由不变量检查先报，避免重复定罪。
+            return None
+        diag_dir = str(summary.get("direction") or "").strip().lower()
+        if diag_dir != "neutral":
+            return None
+        return {
+            "fields": [
+                f"diagnosis_summary.direction=neutral 与 {order_type}/{order_dir} 冲突："
+                "诊断无方向时不得提交方向单"
+            ],
+            "allowed": {
+                "diagnosis_summary.direction": ["bullish", "bearish", "不下单(放弃方案)"]
+            },
+        }
 
     @staticmethod
     def _check_breakout_order_basis(obj: dict) -> dict | None:

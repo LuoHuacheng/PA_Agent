@@ -443,6 +443,12 @@ JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
   做空方向则 `"branch": "bearish"`。**`branch` 字段必须填写且值必须与 `diagnosis_summary.direction` 完全一致**（`bullish` 或 `bearish`）。
 - 其他情况若未加 2.3 节点而 direction 不同，校验器**必定报错**。最稳妥的做法：**让 diagnosis_summary.direction 直接沿用阶段一的 direction 值**，只在有充分依据时才覆盖。
 
+**⚠️ 诊断方向 neutral 时不得提交方向单（限价单/突破单/市价单）：**
+`diagnosis_summary.direction` 为 `neutral` 时，只允许观望（`order_type=不下单`）。
+若你判断确有可交易方向，必须用 `decision_trace` node 2.3 明确重判，**并同步**把
+`diagnosis_summary.direction` 改成 `bullish` 或 `bearish` —— 只改下单方向、不改诊断方向，
+校验器会直接拒绝，且即使侥幸通过也会被入口门控拦下不提交。
+
 ## 阶段二决策路径（二元决策树 §3–§11、§14）
 
 阶段一 gate_result=proceed 时，decision_trace 必须遵守**执行顺序**（可跳过不适用分支，但不可乱序）：
