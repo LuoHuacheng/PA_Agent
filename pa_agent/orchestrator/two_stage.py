@@ -612,9 +612,21 @@ class TwoStageOrchestrator:
 
         # ── Step 10: Route strategy files ─────────────────────────────────────
         if callable(self._router) and not hasattr(self._router, "route"):
-            strategy_files: list[str] = self._router(stage1_json)
+            routed_files: list[str] = self._router(stage1_json)
         else:
-            strategy_files = self._router.route(stage1_json)
+            routed_files = self._router.route(stage1_json)
+        # Stage 2 每轮都常驻注入 STAGE2_BASE_PROMPT_TXT_FILES
+        # (见 prompt_assembler.stage2_user_task_txt_files), 故一并记入
+        # strategy_files_used —— 否则 outcomes.csv 的 strategy_files 分桶看不到
+        # 常驻文件(如移植策略 文件29/30), 48h shadow 无法按桶观察。
+        # 注: 传入 assembler 的文件顺序/集合不变(内部按 dict.fromkeys 去重,
+        # BASE 仍排在末尾)。
+        from pa_agent.ai.prompt_assembler import STAGE2_BASE_PROMPT_TXT_FILES
+
+        strategy_files: list[str] = [*routed_files]
+        for _base_file in STAGE2_BASE_PROMPT_TXT_FILES:
+            if _base_file not in strategy_files:
+                strategy_files.append(_base_file)
 
         # ── Step 11: Load experience entries ──────────────────────────────────
         cycle_position: str = stage1_json.get("cycle_position", "unknown")
