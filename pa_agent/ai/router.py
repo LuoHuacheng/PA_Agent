@@ -79,6 +79,8 @@ _ALL_VALID_FILES: frozenset[str] = frozenset([
     "文件25-主要趋势反转MTR.txt",
     "文件27-三角形与收敛形态.txt",
     "文件28-双重顶底与微型结构.txt",
+    "文件29-利弗莫尔趋势跟随移植.txt",
+    "文件30-三层评分趋势移植.txt",
 ])
 
 _CHANNEL_STATES = frozenset(["micro_channel", "tight_channel", "normal_channel", "broad_channel"])
