@@ -795,6 +795,8 @@ STAGE2_BASE_PROMPT_TXT_FILES: tuple[str, ...] = (
     "文件16-K线信号识别.txt",
     "文件17-止损和止盈与仓位管理.txt",
     "文件23-MeasuredMove与结构目标.txt",
+    "文件29-利弗莫尔趋势跟随移植.txt",
+    "文件30-三层评分趋势移植.txt",
 )
 
 STAGE2_FULL_STRATEGY_PROMPT_TXT_FILES: tuple[str, ...] = (

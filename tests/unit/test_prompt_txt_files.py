@@ -44,6 +44,26 @@ def test_stage2_full_library_flag() -> None:
     for name in STAGE2_FULL_STRATEGY_PROMPT_TXT_FILES:
         assert name in files
 
+    # 全库模式下 BASE 常驻文件(含移植策略)同样在场且排在最后
+    assert files[-len(STAGE2_BASE_PROMPT_TXT_FILES):] == list(STAGE2_BASE_PROMPT_TXT_FILES)
+
+
+def test_stage2_base_contains_transplanted_strategies() -> None:
+    from pathlib import Path
+
+    base = STAGE2_BASE_PROMPT_TXT_FILES
+    assert "文件29-利弗莫尔趋势跟随移植.txt" in base
+    assert "文件30-三层评分趋势移植.txt" in base
+    for name in ("文件29-利弗莫尔趋势跟随移植.txt", "文件30-三层评分趋势移植.txt"):
+        assert (Path("prompt_engineering") / name).exists(), f"磁盘缺文件: {name}"
+
+
+def test_stage2_routed_includes_base_transplants() -> None:
+    # 路由模式下(默认 false 全库), 移植文件仍应随 BASE 常驻注入
+    files = stage2_user_task_txt_files([], direction="bullish")
+    assert "文件29-利弗莫尔趋势跟随移植.txt" in files
+    assert "文件30-三层评分趋势移植.txt" in files
+
 
 def test_stage2_txt_files_order() -> None:
     routed = ["震荡区间交易策略.txt", "震荡区间分析识别.txt"]
@@ -51,5 +71,5 @@ def test_stage2_txt_files_order() -> None:
     expected_user = stage2_user_task_txt_files(routed, direction="neutral")
     assert files == [*COMMON_SYSTEM_STAGE2_TXT_FILES, *expected_user]
     assert files[:2] == list(COMMON_SYSTEM_STAGE2_TXT_FILES)
-    assert files[-4:] == list(STAGE2_BASE_PROMPT_TXT_FILES)
+    assert files[-len(STAGE2_BASE_PROMPT_TXT_FILES):] == list(STAGE2_BASE_PROMPT_TXT_FILES)
     assert routed[0] in files
