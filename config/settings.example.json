@@ -168,7 +168,7 @@
     "min_stop_mode": "fixed",
     "min_stop_distance_pct": 0.45,
     "min_stop_atr_multiple": 0.8,
-    "counter_trend_block": true,
+    "counter_trend_block": false,
     "counter_trend_min_confidence": 55,
     "counter_trend_size_scale": 0.5,
     "breakeven_stop_trigger": "1r",
@@ -182,7 +182,7 @@
     "user_data_stream_enabled": false,
     "user_data_stream_ws_url": "",
     "trend_lookback_days": 7,
-    "trend_neutral_band_pct": 1.0,
+    "trend_neutral_band_pct": 1.5,
     "daily_loss_limit_usdt": 30.0
   },
   "binance_usdm_testnet": {
@@ -216,7 +216,7 @@
     "min_stop_mode": "fixed",
     "min_stop_distance_pct": 0.45,
     "min_stop_atr_multiple": 0.8,
-    "counter_trend_block": true,
+    "counter_trend_block": false,
     "counter_trend_min_confidence": 55,
     "counter_trend_size_scale": 0.5,
     "breakeven_stop_trigger": "1r",
@@ -228,7 +228,7 @@
     "structure_exit_confirm_bars": 2,
     "direction_gates_mode": "dry_run",
     "trend_lookback_days": 7,
-    "trend_neutral_band_pct": 1.0,
+    "trend_neutral_band_pct": 1.5,
     "daily_loss_limit_usdt": 30.0
   },
   "telegram": {
