@@ -1132,7 +1132,8 @@ def execute_market_signal(
                 ):
                     return ExecutionResult(
                         "rejected",
-                        f"Counter-trend vs 30d trend ({trend_pct:+.1f}%) rejected: "
+                        f"Counter-trend vs {config.trend_lookback_days}d trend "
+                        f"({trend_pct:+.1f}%) rejected: "
                         f"trade_confidence {conf} < {config.counter_trend_min_confidence}",
                         symbol,
                     )
@@ -1140,7 +1141,8 @@ def execute_market_signal(
                     size_scale = float(config.counter_trend_size_scale)
                     leverage = max(1, round(config.leverage * size_scale))
                     trend_note = (
-                        f"; counter-trend 30d ({trend_pct:+.1f}%) scaled leverage to {leverage}x "
+                        f"; counter-trend {config.trend_lookback_days}d ({trend_pct:+.1f}%) "
+                        f"scaled leverage to {leverage}x "
                         f"and size to {size_scale:.2f}x"
                     )
         # 保证金恒定：名义价值 = 保证金(margin_usdt) × 杠杆，杠杆变化不影响保证金。

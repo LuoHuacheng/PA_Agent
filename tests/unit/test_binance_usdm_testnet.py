@@ -1790,7 +1790,7 @@ def test_guard_short_bridge_uses_abs_quantity(monkeypatch) -> None:
     assert record["stop_algo_id"] != "pa-sl-old0001"
 
 
-# ---- 30d 日线大趋势护栏 ------------------------------------------------
+# ---- 日线大趋势护栏 (trend_lookback_days) -------------------------------
 
 def _trend_settings() -> Settings:
     settings = _settings()
@@ -1799,7 +1799,7 @@ def _trend_settings() -> Settings:
 
 
 def test_counter_trend_below_confidence_rejected() -> None:
-    """Long vs a 30d bear trend with conf<55: rejected before any order flow."""
+    """Long vs a bear trend with conf<55: rejected before any order flow."""
     settings = _trend_settings()
     client = FakeClient()
     decision = _long_decision() | {"trade_confidence": 50}
@@ -1808,13 +1808,13 @@ def test_counter_trend_below_confidence_rejected() -> None:
         prefetched_trend_pct=-20.0,
     )
     assert result.status == "rejected"
-    assert "Counter-trend vs 30d trend" in result.reason
+    assert "Counter-trend vs 7d trend" in result.reason
     assert "50.0 < 55" in result.reason
     assert "entry" not in [call[0] for call in client.calls]
 
 
 def test_counter_trend_high_confidence_scales_leverage() -> None:
-    """Counter-30d-trend but conf>=55: allowed with leverage 20x -> 10x (half notional)."""
+    """Counter-trend but conf>=55: allowed with leverage 20x -> 10x (half notional)."""
     settings = _trend_settings()
     client = FakeClient()
     decision = _long_decision() | {"trade_confidence": 65}
@@ -1831,7 +1831,7 @@ def test_counter_trend_high_confidence_scales_leverage() -> None:
 
 
 def test_counter_trend_short_against_bull_scaled() -> None:
-    """Short vs a 30d bull trend at conf=55 (boundary): allowed with halved leverage."""
+    """Short vs a bull trend at conf=55 (boundary): allowed with halved leverage."""
     settings = _trend_settings()
     client = FakeClient()
     decision = _long_decision() | {
@@ -1848,8 +1848,8 @@ def test_counter_trend_short_against_bull_scaled() -> None:
     assert ("set_leverage", "BTCUSDT", 10) in client.calls
 
 
-def test_neutral_30d_trend_not_restricted() -> None:
-    """30d change inside the +/-5% neutral band: no restriction (even low conf)."""
+def test_same_direction_trend_not_restricted() -> None:
+    """Trend aligned with the signal direction: no counter-trend restriction."""
     settings = _trend_settings()
     client = FakeClient()
     decision = _long_decision() | {"trade_confidence": 30}
