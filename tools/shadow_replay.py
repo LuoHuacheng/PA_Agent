@@ -203,6 +203,35 @@ class Outcome:
     bars_held: int
 
 
+#: 生产侧 lift_stop_to_min_distance_floor 只在"抬完止损后仍满足最小盈亏比与交易者
+#: 方程"时才抬, 否则把方案原样留给执行层 -> 执行层按 "Stop loss too close" 直接拒单。
+#: 回放若无条件抬止损, 会把一批生产上根本不存在的单算成成交, 高倍数变体的收益被系统性
+#: 高估(2026-09-17 复核)。--no-stop-rr-guard 可关掉守卫以复现旧口径。
+_STOP_RR_GUARD = True
+
+
+def _stop_lift_allowed(entry, target, new_stop, direction, est_win_rate) -> bool:
+    """复刻 lift_stop_to_min_distance_floor 的抬升前提(见 binance_usdm_testnet)."""
+    from pa_agent.util.trade_metrics import (
+        compute_risk_reward,
+        min_risk_reward_ratio,
+        passes_trader_equation,
+    )
+
+    rr = compute_risk_reward(entry, target, new_stop, direction)
+    if rr is None:
+        return False
+    risk = float(rr["risk"])
+    reward = float(rr["reward"])
+    if risk <= 0 or reward <= 0 or float(rr["ratio"]) + 1e-9 < min_risk_reward_ratio():
+        return False
+    try:
+        win_rate = max(0.0, min(100.0, float(str(est_win_rate).strip())))
+    except (TypeError, ValueError):
+        return False
+    return passes_trader_equation(win_rate, risk, reward)
+
+
 def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
                   partial_pct, timeout_min, time_stop_min,
                   min_stop_pct=0.0, min_stop_atr=0.0,
@@ -230,7 +259,17 @@ def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
     if floor_pct > 0:
         gap_pct = abs(entry - stop) / entry * 100
         if gap_pct < floor_pct:
-            stop = entry * (1 - floor_pct / 100) if side == 1 else entry * (1 + floor_pct / 100)
+            widened = entry * (1 - floor_pct / 100) if side == 1 else entry * (1 + floor_pct / 100)
+            if _STOP_RR_GUARD and not _stop_lift_allowed(
+                entry, target, widened, plan.direction, plan.est_win_rate
+            ):
+                # 生产侧不会抬这张止损: 执行层随后按 "Stop loss too close" 拒单,
+                # 所以这笔计划根本不存在, 不能算作成交。
+                return Outcome(
+                    False, "rejected_stop_floor", entry, None, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0,
+                )
+            stop = widened
     if side == 1 and not (stop < entry < target):
         return zero
     if side == -1 and not (target < entry < stop):
@@ -897,9 +936,13 @@ def main():
                     help="taker 费率(单边); 默认 fee_rate*0.8")
     ap.add_argument("--min-stop-pct", type=float, default=0.2,
                     help="止损距离下限(%%), 与 min_stop_distance_pct 同步")
+    ap.add_argument("--no-stop-rr-guard", action="store_true",
+                    help="关闭止损抬升的盈亏比守卫(复现 2026-09-17 前的旧口径)")
     ap.add_argument("--min-stop-atr", type=float, default=0.7,
                     help="止损距离的 ATR 倍数下限, 与 min_stop_atr_multiple 同步")
     args = ap.parse_args()
+    global _STOP_RR_GUARD
+    _STOP_RR_GUARD = not args.no_stop_rr_guard
     if args.calibrate:
         return run_calibrate(args)
     if args.baseline:
