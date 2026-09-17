@@ -68,6 +68,13 @@ _STATE_STORE: "_RuntimeStateStore" = _RuntimeStateStore(
 _runtime_env_lock = threading.Lock()
 _runtime_env: BinanceTradeEnv = binance_env.TESTNET_ENV
 
+#: 防护单触发基准 (workingType), 由 configure_binance_environment 按配置刷新。
+#: 实测 2026-09-16 20:28 ZEC: 标记价戳到 1207.33 而最新价最低只到 1208.63, 一张
+#: 按计划挂在 1208.15 的止损被点掉, 随后价格反转直奔原计划止盈 —— priceProtect
+#: =TRUE 并没有挡住"标记价单方面背离"引发的触发。文档在本机不可达, 语义未向厂商
+#: 确认, 故把基准做成显式配置项(默认不变)。
+_stop_working_type: str = "MARK_PRICE"
+
 
 def configure_binance_environment(settings: Settings | None) -> BinanceTradeEnv:
     """Adopt the settings-declared execution environment (idempotent).
@@ -75,7 +82,10 @@ def configure_binance_environment(settings: Settings | None) -> BinanceTradeEnv:
     Public entry points call this automatically; the monitor also calls it at
     startup so poller/WS wiring is consistent before any thread starts.
     """
-    global _runtime_env
+    global _runtime_env, _stop_working_type
+    wt = str(getattr(binance_env.active_cfg(settings), "stop_working_type", "") or "").upper()
+    if wt in ("MARK_PRICE", "CONTRACT_PRICE"):
+        _stop_working_type = wt
     env = binance_env.resolve_env(settings)
     with _runtime_env_lock:
         if env.key != _runtime_env.key:
@@ -882,7 +892,7 @@ class BinanceUSDMTestnetClient:
             "side": side,
             "type": order_type,
             "triggerPrice": _decimal_text(stop_price),
-            "workingType": "MARK_PRICE",
+            "workingType": _stop_working_type,
             "priceProtect": "TRUE",
             "clientAlgoId": client_algo_id,
         }
@@ -898,7 +908,7 @@ class BinanceUSDMTestnetClient:
         # 止损 1208.15, 最新价最低 1208.63 从未触及, 标记价最低 1207.33 触发,
         # 成交 1209.40), 缺这条日志事后只能靠猜。
         logger.info(
-            "[防护单审计] %s %s %s trigger=%s workingType=MARK_PRICE "
+            "[防护单审计] %s %s %s trigger=%s workingType=%s "
             "priceProtect=TRUE closePosition=%s qty=%s algo=%s src=%s",
             symbol,
             side,

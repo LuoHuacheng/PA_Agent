@@ -271,6 +271,12 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # 却砍掉 85% 的净亏 (-138.40U -> -20.74U), 比置信度门槛有效得多
     # (trade_conf>=55 反而 -22U)。价格缺失/方向矛盾一律按不合格处理。
     min_plan_reward_risk: float = Field(default=0.0, ge=0.0, le=20.0)
+    # 防护单触发基准(workingType)。默认 MARK_PRICE 保持既有行为; 实测 2026-09-16
+    # 20:28 ZEC 标记价一度戳到 1207.33(最新价最低只到 1208.63), 把按计划挂在
+    # 1208.15 的止损点掉, 随后价格反转直奔原计划止盈 —— priceProtect=TRUE 并未
+    # 挡住"标记价单方面背离"引发的触发。官方文档在本机不可达(非公网 IP), 语义
+    # 未经厂商确认, 所以把基准显式化: 要用最新价触发就设 CONTRACT_PRICE。
+    stop_working_type: Literal["MARK_PRICE", "CONTRACT_PRICE"] = "MARK_PRICE"
     # --- 日度亏损熔断 ---
     # 当日已实现净亏损(REALIZED_PNL + COMMISSION, 不含资金费)达到该值时停止自动
     # 开新仓, 次日(本地日)自动解除。0 = 关闭。账本查询 weight 30, 所以当天一旦

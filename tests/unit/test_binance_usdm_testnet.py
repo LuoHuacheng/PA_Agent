@@ -3734,4 +3734,51 @@ def test_daily_loss_guard_fails_open_when_ledger_unavailable() -> None:
     assert "risk_halt" not in _state()
 
 
+# ---- 防护单触发基准 (workingType) ------------------------------------
+
+def _capture_algo_params(monkeypatch) -> dict:
+    """真 client + 假 _request: 抓 place_close_algo_order 发出的参数."""
+    client = binance_usdm_testnet.BinanceUSDMTestnetClient("k", "s")
+    monkeypatch.setattr(
+        client,
+        "exchange_info",
+        lambda _symbol: {"filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.01"}]},
+    )
+    captured: dict = {}
+
+    def _fake_request(_method: str, _path: str, params: dict, signed: bool = False) -> dict:
+        captured.update(params)
+        return {}
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    client.place_close_algo_order(
+        symbol="ZECUSDT",
+        side="SELL",
+        order_type="STOP_MARKET",
+        stop_price=Decimal("1208.15"),
+        client_algo_id="pa-sl-" + "0" * 24,
+        audit_source="entry",
+    )
+    return captured
+
+
+def test_stop_working_type_defaults_to_mark_price(monkeypatch) -> None:
+    """默认按标记价触发(既有行为不变)."""
+    monkeypatch.setattr(binance_usdm_testnet, "_stop_working_type", "MARK_PRICE")
+    params = _capture_algo_params(monkeypatch)
+    assert params["workingType"] == "MARK_PRICE"
+    assert params["priceProtect"] == "TRUE"
+
+
+def test_stop_working_type_configurable_to_contract_price(monkeypatch) -> None:
+    """可切到最新价触发: 2026-09-16 ZEC 标记价戳破计划止损而最新价没到.
+
+    标记价单方面背离把止损点掉、随后价格反转直奔原计划止盈(成交 -3.83U 而非
+    +7.8U), 所以触发基准必须是显式可配的, 且审计日志要如实打印实际基准。
+    """
+    monkeypatch.setattr(binance_usdm_testnet, "_stop_working_type", "CONTRACT_PRICE")
+    params = _capture_algo_params(monkeypatch)
+    assert params["workingType"] == "CONTRACT_PRICE"
+
+
 
