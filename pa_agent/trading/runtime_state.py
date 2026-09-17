@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 from collections.abc import Callable
 from typing import Any
@@ -41,7 +42,13 @@ class RuntimeStateStore:
         return self._path_provider()
 
     def load(self) -> dict[str, Any]:
-        """Load the runtime execution state file (empty dict when absent)."""
+        """Load the runtime execution state file (empty dict when absent).
+
+        主文件缺失/损坏时回退到上一次落盘的 .bak: 2026-09-17 事故中 state 文件
+        被重写成空, 04:56 SSL 事故里 "record kept for restart resume" 的持仓
+        记录随之蒸发, 重启恢复彻底失效。备份缺失时仍按原语义处理(缺失=空态,
+        损坏=抛错 fail-closed)。
+        """
         from pa_agent.trading.binance_usdm_testnet import BinanceAPIError
 
         path = self._path()
@@ -49,12 +56,52 @@ class RuntimeStateStore:
             with open(path, encoding="utf-8") as file:
                 state = json.load(file)
         except FileNotFoundError:
-            return {}
-        except (OSError, json.JSONDecodeError) as exc:
+            return self._load_backup(path, missing=True)
+        except (OSError, json.JSONDecodeError):
+            return self._load_backup(path, missing=False)
+        return state if isinstance(state, dict) else {}
+
+    def _load_backup(self, path: str, *, missing: bool) -> dict[str, Any]:
+        """Recover the last persisted state from the .bak copy when possible."""
+        from pa_agent.trading.binance_usdm_testnet import BinanceAPIError
+
+        backup = path + ".bak"
+        try:
+            with open(backup, encoding="utf-8") as file:
+                state = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            if missing:
+                logger.warning(
+                    "State file %s missing and backup %s unreadable; starting empty",
+                    os.path.basename(path),
+                    os.path.basename(backup),
+                )
+                return {}
             raise BinanceAPIError(
                 f"Cannot read execution state file {os.path.basename(path)}"
-            ) from exc
-        return state if isinstance(state, dict) else {}
+            ) from None
+        if not isinstance(state, dict):
+            if missing:
+                return {}
+            raise BinanceAPIError(
+                f"Cannot read execution state file {os.path.basename(path)}"
+            )
+        logger.warning(
+            "State file %s unusable; recovered from backup %s",
+            os.path.basename(path),
+            os.path.basename(backup),
+        )
+        return state
+
+    def _backup_current(self, path: str) -> None:
+        """Best-effort copy of the current file before it gets replaced."""
+        try:
+            if os.path.exists(path):
+                shutil.copy2(path, path + ".bak")
+        except OSError:
+            logger.warning(
+                "Cannot refresh state backup for %s", os.path.basename(path)
+            )
 
     def save(self, state: dict[str, Any]) -> None:
         """Atomically persist the runtime execution state file."""
@@ -62,6 +109,7 @@ class RuntimeStateStore:
 
         path = self._path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._backup_current(path)
         temp = f"{path}.tmp"
         try:
             with open(temp, "w", encoding="utf-8") as file:

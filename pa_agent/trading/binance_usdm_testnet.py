@@ -128,6 +128,8 @@ _POSITION_MANAGER_NAMES = frozenset({
     "_resume_guards", "resume_breakeven_guards", "resume_tp_runners",
     "resume_time_stops", "resume_stop_watchdogs",
     "_UNMOVED_STOP_VERIFY_TICKS", "_stop_watchdog_loop",
+    "reconcile_positions", "_adopt_position", "_recover_plan",
+    "_TRADE_RECORDS_DIR", "_arm_adopted_managers",
 })
 
 
@@ -914,6 +916,7 @@ class BinanceUSDMTestnetClient:
             side,
             order_type,
             _decimal_text(stop_price),
+            _stop_working_type,
             "true" if close_position else "false",
             _decimal_text(quantity) if quantity is not None else "-",
             client_algo_id,
@@ -937,6 +940,20 @@ class BinanceUSDMTestnetClient:
             {"clientAlgoId": client_algo_id},
             signed=True,
         )
+
+    def open_algo_orders(self, symbol: str) -> list[Any]:
+        """List resting conditional orders for *symbol*.
+
+        对账兜底(2026-09-17 ZEC): 记录里的 algo id 丢了以后, 只有列全量挂单才能
+        判断这笔仓还有没有止损/止盈腿, 而不是凭记录猜。
+        """
+        payload = self._request(
+            "GET",
+            "/fapi/v1/openAlgoOrders",
+            {"symbol": symbol},
+            signed=True,
+        )
+        return payload if isinstance(payload, list) else []
 
     def close_market_position(self, *, symbol: str, side: str, quantity: Decimal) -> None:
         self._request(

@@ -7,12 +7,15 @@ getattr 兜底访问, 不产生模块级循环。
 """
 from __future__ import annotations
 
+import csv
 import logging
 import threading
 import time
 import uuid
 from collections.abc import Callable
+from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
@@ -37,7 +40,7 @@ from pa_agent.trading.binance_usdm_testnet import (
     current_mark_price,
     current_position,
 )
-from pa_agent.trading.guard_loop import ErrorBudget
+from pa_agent.trading.guard_loop import ErrorBudget, is_transient_error
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,31 @@ def _manager_lock(symbol: str) -> threading.Lock:
             lock = threading.Lock()
             _MANAGER_LOCKS[symbol] = lock
         return lock
+
+
+def _sleep_after_transient(
+    budget: ErrorBudget,
+    *,
+    symbol: str,
+    scope: str,
+    exc: object,
+    poll_seconds: float,
+) -> None:
+    """Back off after a transient transport error instead of giving up.
+
+    2026-09-17 ZEC 事故: SSL UNEXPECTED_EOF 连打 5 次就把 TP runner 与
+    stop watchdog 打死, 半平后的剩余仓位再没人挂 TP2。瞬时错误只退避重试,
+    不消耗弃守预算, 线程也不许退出。
+    """
+    delay = budget.record_transient(poll_seconds)
+    logger.warning(
+        "%s transient error for %s (retry in %.0fs): %s",
+        scope,
+        symbol,
+        delay,
+        exc,
+    )
+    time.sleep(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +423,15 @@ def _breakeven_guard_loop(
                 # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
                 _guard_rate_limit_wait(poll_seconds)
                 continue
+            if is_transient_error(exc):
+                _sleep_after_transient(
+                    budget,
+                    symbol=symbol,
+                    scope="Breakeven guard poll",
+                    exc=exc,
+                    poll_seconds=poll_seconds,
+                )
+                continue
             _exhausted = budget.record()
             logger.warning(
                 "Breakeven guard poll failed for %s (attempt %d): %s",
@@ -470,6 +507,15 @@ def _breakeven_guard_loop(
                     floor_pct=floor_pct,
                 )
                 if guard_status == "error":
+                    if is_transient_error(guard_note):
+                        _sleep_after_transient(
+                            budget,
+                            symbol=symbol,
+                            scope="Breakeven guard stop verification",
+                            exc=guard_note,
+                            poll_seconds=poll_seconds,
+                        )
+                        continue
                     _exhausted = budget.record()
                     logger.error(
                         "Breakeven stop placement failed for %s (%s) and "
@@ -496,6 +542,15 @@ def _breakeven_guard_loop(
                     )
                     _patch_guard(symbol, moved=True, stop_algo_id=guard_stop)
                     return
+                if is_transient_error(exc):
+                    _sleep_after_transient(
+                        budget,
+                        symbol=symbol,
+                        scope="Breakeven stop placement",
+                        exc=exc,
+                        poll_seconds=poll_seconds,
+                    )
+                    continue
                 _exhausted = budget.record()
                 logger.error(
                     "Breakeven stop placement failed for %s (%s), original stop "
@@ -572,6 +627,15 @@ def _tp_runner_loop(
                 # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
                 _guard_rate_limit_wait(poll_seconds)
                 continue
+            if is_transient_error(exc):
+                _sleep_after_transient(
+                    budget,
+                    symbol=symbol,
+                    scope="TP runner poll",
+                    exc=exc,
+                    poll_seconds=poll_seconds,
+                )
+                continue
             _exhausted = budget.record()
             logger.warning(
                 "TP runner poll failed for %s (attempt %d): %s",
@@ -603,6 +667,15 @@ def _tp_runner_loop(
                         exc,
                     )
                 else:
+                    if is_transient_error(exc):
+                        _sleep_after_transient(
+                            budget,
+                            symbol=symbol,
+                            scope="TP runner cleanup",
+                            exc=exc,
+                            poll_seconds=poll_seconds,
+                        )
+                        continue
                     _exhausted = budget.record()
                     logger.error(
                         "TP runner cleanup failed for %s (partial TP1 %s): %s",
@@ -661,6 +734,15 @@ def _tp_runner_loop(
                         exc,
                     )
                 else:
+                    if is_transient_error(exc):
+                        _sleep_after_transient(
+                            budget,
+                            symbol=symbol,
+                            scope="TP runner partial TP1 cancel",
+                            exc=exc,
+                            poll_seconds=poll_seconds,
+                        )
+                        continue
                     _exhausted = budget.record()
                     logger.error(
                         "TP runner partial TP1 cancel failed for %s (%s): %s",
@@ -703,6 +785,15 @@ def _tp_runner_loop(
                     floor_pct=floor_pct,
                 )
                 if runner_status == "error":
+                    if is_transient_error(runner_note):
+                        _sleep_after_transient(
+                            budget,
+                            symbol=symbol,
+                            scope="TP runner stop verification",
+                            exc=runner_note,
+                            poll_seconds=poll_seconds,
+                        )
+                        continue
                     _exhausted = budget.record()
                     logger.error(
                         "TP runner: protective-stop verification failed for %s "
@@ -742,6 +833,15 @@ def _tp_runner_loop(
                     floor_pct=floor_pct,
                 )
                 if runner_status == "error":
+                    if is_transient_error(runner_note):
+                        _sleep_after_transient(
+                            budget,
+                            symbol=symbol,
+                            scope="TP runner stop verification",
+                            exc=runner_note,
+                            poll_seconds=poll_seconds,
+                        )
+                        continue
                     _exhausted = budget.record()
                     logger.error(
                         "TP runner: protective-stop verification failed for %s "
@@ -779,6 +879,15 @@ def _tp_runner_loop(
                             bridge_qty=abs(amount),
                         )
                     except BinanceAPIError as exc:
+                        if is_transient_error(exc):
+                            _sleep_after_transient(
+                                budget,
+                                symbol=symbol,
+                                scope="TP runner breakeven stop",
+                                exc=exc,
+                                poll_seconds=poll_seconds,
+                            )
+                            continue
                         _exhausted = budget.record()
                         logger.error(
                             "TP runner breakeven stop placement failed for %s "
@@ -812,6 +921,15 @@ def _tp_runner_loop(
                     audit_source="tp2",
                 )
             except BinanceAPIError as exc:
+                if is_transient_error(exc):
+                    _sleep_after_transient(
+                        budget,
+                        symbol=symbol,
+                        scope="TP runner TP2 placement",
+                        exc=exc,
+                        poll_seconds=poll_seconds,
+                    )
+                    continue
                 _exhausted = budget.record()
                 logger.error(
                     "TP runner TP2 placement failed for %s: %s",
@@ -870,10 +988,22 @@ def _timestop_loop(
     runner still owns that lifecycle (it then observes the flat position on
     its next poll and cleans up itself).
     """
-    errors = 0
+    budget = ErrorBudget()
+    misses = 0
     while True:
         record = _read_guard(symbol)
-        if record is None or not _timestop_deadline_hit(record, stop_minutes):
+        if record is None:
+            if misses == 0:
+                logger.warning(
+                    "Time-stop has no guard record for %s; waiting for "
+                    "position reconciliation to adopt it",
+                    symbol,
+                )
+            misses += 1
+            time.sleep(poll_seconds)
+            continue
+        misses = 0
+        if not _timestop_deadline_hit(record, stop_minutes):
             time.sleep(poll_seconds)
             continue
         side = str(record.get("side") or "")
@@ -893,12 +1023,21 @@ def _timestop_loop(
                     # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数。
                     _guard_rate_limit_wait(poll_seconds)
                     continue
-                errors += 1
+                if is_transient_error(exc):
+                    _sleep_after_transient(
+                        budget,
+                        symbol=symbol,
+                        scope="Time-stop poll",
+                        exc=exc,
+                        poll_seconds=poll_seconds,
+                    )
+                    continue
+                _exhausted = budget.record()
                 logger.warning(
                     "Time-stop poll failed for %s (attempt %d): %s",
-                    symbol, errors, exc,
+                    symbol, budget.count, exc,
                 )
-                if errors >= 5:
+                if _exhausted:
                     logger.error(
                         "Time-stop gave up for %s after repeated API errors; "
                         "static stop/TP stays in place",
@@ -922,12 +1061,21 @@ def _timestop_loop(
                         quantity=abs(amount),
                     )
                 except BinanceAPIError as exc:
-                    errors += 1
+                    if is_transient_error(exc):
+                        _sleep_after_transient(
+                            budget,
+                            symbol=symbol,
+                            scope="Time-stop close",
+                            exc=exc,
+                            poll_seconds=poll_seconds,
+                        )
+                        continue
+                    _exhausted = budget.record()
                     logger.error(
                         "Time-stop close failed for %s (%s): %s",
                         symbol, _decimal_text(abs(amount)), exc,
                     )
-                    if errors >= 5:
+                    if _exhausted:
                         logger.error(
                             "Time-stop gave up closing %s after repeated errors; "
                             "static stop/TP stays in place",
@@ -1357,6 +1505,15 @@ def _stop_watchdog_loop(
                 # Testnet 共享 IP 封禁: 冷却等待解禁, 不撞墙也不计入弃守计数.
                 _guard_rate_limit_wait(poll_seconds)
                 continue
+            if is_transient_error(exc):
+                _sleep_after_transient(
+                    budget,
+                    symbol=symbol,
+                    scope="Stop watchdog poll",
+                    exc=exc,
+                    poll_seconds=poll_seconds,
+                )
+                continue
             _exhausted = budget.record()
             logger.warning(
                 "Stop watchdog poll failed for %s (attempt %d): %s",
@@ -1383,6 +1540,15 @@ def _stop_watchdog_loop(
                     client.cancel_algo_order(client_algo_id=tp_algo_id)
                 except BinanceAPIError as exc:
                     if not _is_missing_algo_order_error(exc):
+                        if is_transient_error(exc):
+                            _sleep_after_transient(
+                                budget,
+                                symbol=symbol,
+                                scope="Stop watchdog residual TP cancel",
+                                exc=exc,
+                                poll_seconds=poll_seconds,
+                            )
+                            continue
                         _exhausted = budget.record()
                         logger.error(
                             "Stop watchdog residual TP cancel failed for %s (%s): %s",
@@ -1426,6 +1592,15 @@ def _stop_watchdog_loop(
                             floor_pct=floor_pct,
                         )
                     if status == "error":
+                        if is_transient_error(note):
+                            _sleep_after_transient(
+                                budget,
+                                symbol=symbol,
+                                scope="Stop watchdog pre-move verify",
+                                exc=note,
+                                poll_seconds=poll_seconds,
+                            )
+                            continue
                         _exhausted = budget.record()
                         logger.error(
                             "Stop watchdog pre-move verify/re-hang failed for %s (%s): %s",
@@ -1469,6 +1644,15 @@ def _stop_watchdog_loop(
                 floor_pct=floor_pct,
             )
         if status == "error":
+            if is_transient_error(note):
+                _sleep_after_transient(
+                    budget,
+                    symbol=symbol,
+                    scope="Stop watchdog verify",
+                    exc=note,
+                    poll_seconds=poll_seconds,
+                )
+                continue
             _exhausted = budget.record()
             logger.error(
                 "Stop watchdog verify/re-hang failed for %s (%s): %s",
@@ -1494,3 +1678,378 @@ def _stop_watchdog_loop(
             )
         budget.reset()
         time.sleep(poll_seconds)
+
+
+# ---------------------------------------------------------------------------
+# 孤儿持仓对账收养 (position reconciliation)
+# ---------------------------------------------------------------------------
+# 背景(2026-09-17 ZEC 事故): 04:56-05:01 的 SSL 风暴把 TP runner / watchdog
+# 打死; 11:46 前后 state 文件被重写为空, guards 里的持仓记录蒸发; 11:25 TP1
+# 半平成交时已无人看护, 剩余仓位再没挂上 TP2, 只靠一张 1275 保本止损兜底。
+# 恢复流程(resume_*)全部以 guards 快照为输入 —— 没有记录, 就没有任何线程会看
+# 这笔仓。对账把"交易所持仓"与"本地记录"对齐: 孤儿收养(重建记录+补挂),
+# 残留清理(仓位已平却留着记录)。
+
+#: 交易记录目录(模块常量, 便于测试替换)
+_TRADE_RECORDS_DIR = Path("trade_records")
+#: 计划回溯窗口: 超过该天数的历史计划不再用于收养, 避免匹配到早已作废的旧计划。
+_ADOPTION_PLAN_LOOKBACK_DAYS = 3.0
+_RECORD_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")
+
+
+def _position_side_of(amount: Decimal) -> str:
+    return "BUY" if amount > 0 else "SELL"
+
+
+def _parse_record_time(value: object) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in _RECORD_TIME_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _recover_plan(
+    symbol: str, side: str, entry: Decimal | None
+) -> dict[str, Any] | None:
+    """Recover the executed plan behind an open position from the trade records.
+
+    以入场价精确匹配交易记录里同向的计划行(限价单成交价与计划价一致), 取回溯
+    窗口内最近的一条, 拿到 stop/target/target2 用于补挂缺失的保护腿。
+    """
+    if entry is None:
+        return None
+    directory = Path(_TRADE_RECORDS_DIR)
+    if not directory.is_dir():
+        return None
+    wanted = "做多" if side == "BUY" else "做空"
+    cutoff = time.time() - _ADOPTION_PLAN_LOOKBACK_DAYS * 86400.0
+    best: dict[str, Any] | None = None
+    for path in sorted(directory.glob(f"{symbol}_*.csv")):
+        try:
+            handle = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for row in csv.DictReader(handle):
+                if str(row.get("order_direction") or "").strip() != wanted:
+                    continue
+                plan_entry = _positive_decimal(row.get("entry_price"))
+                if plan_entry is None or plan_entry != entry:
+                    continue
+                stamp = _parse_record_time(row.get("record_time"))
+                if stamp is not None and stamp < cutoff:
+                    continue
+                if best is not None and (stamp or 0.0) < float(best.get("stamp") or 0.0):
+                    continue
+                best = {
+                    "entry": plan_entry,
+                    "stop": _positive_decimal(row.get("stop_loss_price")),
+                    "target": _positive_decimal(row.get("take_profit_price")),
+                    "target2": _positive_decimal(row.get("take_profit_price_2")),
+                    "stamp": stamp or 0.0,
+                }
+    return best
+
+
+def _resting_algo_orders(
+    client: BinanceUSDMTestnetClient, symbol: str
+) -> list[dict[str, Any]]:
+    """Resting conditional orders for *symbol* (empty when unqueryable)."""
+    try:
+        orders = client.open_algo_orders(symbol)
+    except BinanceAPIError as exc:
+        logger.warning(
+            "Reconcile: cannot list resting algo orders for %s: %s", symbol, exc
+        )
+        return []
+    if not isinstance(orders, list):
+        return []
+    return [order for order in orders if isinstance(order, dict)]
+
+
+def _live_order_of_type(
+    orders: list[dict[str, Any]], order_type: str
+) -> dict[str, Any] | None:
+    for order in orders:
+        if str(order.get("orderType") or "").upper() != order_type:
+            continue
+        status = str(order.get("algoStatus") or "").strip()
+        if status and not _algo_status_live(status):
+            continue
+        return order
+    return None
+
+
+def _take_profit_would_immediately_trigger(
+    exit_side: str, trigger_price: Decimal, mark: Decimal
+) -> bool:
+    """True when a TAKE_PROFIT at *trigger_price* is already satisfied.
+
+    与 _stop_would_immediately_trigger 方向相反: 多单止盈是价格**涨破** trigger,
+    mark 已在 trigger 之上时不能再挂(挂上也只会立刻成交/被拒)。
+    """
+    if exit_side == "SELL":
+        return mark > trigger_price
+    if exit_side == "BUY":
+        return mark < trigger_price
+    return False
+
+
+def _arm_adopted_managers(
+    client: BinanceUSDMTestnetClient, *, symbol: str, config: BinanceUSDMTestnetSettings, runner: bool
+) -> None:
+    """Arm watchdog + time-stop (and the TP runner when a partial leg rests)."""
+    poll_seconds = float(config.breakeven_poll_seconds)
+    floor_pct = float(config.min_stop_distance_pct)
+    threading.Thread(
+        target=_stop_watchdog_loop,
+        kwargs={
+            "client": client,
+            "symbol": symbol,
+            "poll_seconds": poll_seconds,
+            "floor_pct": floor_pct,
+        },
+        daemon=True,
+    ).start()
+    logger.info("Reconcile: stop watchdog armed for %s", symbol)
+    if int(config.time_stop_minutes or 0) > 0:
+        threading.Thread(
+            target=_timestop_loop,
+            kwargs={
+                "client": client,
+                "symbol": symbol,
+                "stop_minutes": float(config.time_stop_minutes),
+                "poll_seconds": poll_seconds,
+            },
+            daemon=True,
+        ).start()
+        logger.info("Reconcile: time-stop armed for %s", symbol)
+    if runner:
+        threading.Thread(
+            target=_tp_runner_loop,
+            kwargs={
+                "client": client,
+                "symbol": symbol,
+                "poll_seconds": poll_seconds,
+                "floor_pct": floor_pct,
+            },
+            daemon=True,
+        ).start()
+        logger.info("Reconcile: TP partial runner armed for %s", symbol)
+
+
+def _adopt_position(
+    client: BinanceUSDMTestnetClient,
+    *,
+    symbol: str,
+    side: str,
+    amount: Decimal,
+    entry: Decimal | None,
+    config: BinanceUSDMTestnetSettings,
+) -> dict[str, Any]:
+    """Rebuild a guard record for an unmanaged exchange position."""
+    exit_side = "SELL" if side == "BUY" else "BUY"
+    entry_price = _positive_decimal(entry)
+    plan = _recover_plan(symbol, side, entry_price)
+    orders = _resting_algo_orders(client, symbol)
+    stop_order = _live_order_of_type(orders, "STOP_MARKET")
+    tp_order = _live_order_of_type(orders, "TAKE_PROFIT_MARKET")
+    stop_algo_id = str((stop_order or {}).get("clientAlgoId") or "")
+    stop_price = _positive_decimal((stop_order or {}).get("triggerPrice"))
+    if entry_price is None:
+        entry_price = stop_price or _positive_decimal((plan or {}).get("entry"))
+    if entry_price is None:
+        raise BinanceAPIError(
+            f"reconcile {symbol}: neither position entry nor resting stop price"
+        )
+    if not stop_algo_id:
+        ok, placed_id, note = _rehang_protective_stop(
+            client,
+            symbol=symbol,
+            side=side,
+            entry=entry_price,
+            stop0=entry_price,
+            stage_tp2=False,
+            floor_pct=float(config.min_stop_distance_pct or 0.0),
+        )
+        if not ok:
+            raise BinanceAPIError(
+                f"reconcile {symbol}: cannot place protective stop ({note})"
+            )
+        stop_algo_id = placed_id
+        stop_price = entry_price
+        logger.warning("Reconcile: %s had no resting stop; %s", symbol, note)
+    record: dict[str, Any] = {
+        "stop_algo_id": stop_algo_id,
+        "stop0": _decimal_text(stop_price or entry_price),
+        "target": _decimal_text((plan or {}).get("target") or stop_price or entry_price),
+        "side": side,
+        "conf": None,
+        "ts": time.time(),
+        "moved": True,
+        "qty": _decimal_text(abs(amount)),
+        "adopted": True,
+    }
+    runner = False
+    partial_qty = _positive_decimal((tp_order or {}).get("quantity"))
+    close_all_tp = bool((tp_order or {}).get("closePosition")) if tp_order else False
+    if tp_order is not None and close_all_tp:
+        # 已经是 closePosition 止盈腿(TP2): 沿用, 只补记录。
+        record["tp_algo_id"] = str(tp_order.get("clientAlgoId") or "")
+        record["target2"] = _decimal_text(
+            _positive_decimal(tp_order.get("triggerPrice"))
+            or (plan or {}).get("target2")
+            or (plan or {}).get("target")
+            or entry_price
+        )
+        record["partial_done"] = True
+    elif tp_order is not None and partial_qty is not None:
+        # TP1 半平单还 resting: 半平尚未发生, 交给 runner 走 swap 到 TP2。
+        target2 = (plan or {}).get("target2")
+        if target2 is not None:
+            record.update(
+                {
+                    "tp_algo_id": str(tp_order.get("clientAlgoId") or ""),
+                    "target2": _decimal_text(target2),
+                    "qty": _decimal_text(abs(amount) + partial_qty),
+                    "partial_qty": _decimal_text(partial_qty),
+                    "partial_done": False,
+                }
+            )
+            runner = True
+        else:
+            logger.warning(
+                "Reconcile: %s rests a partial TP but no recoverable TP2 plan; "
+                "the TP runner cannot be re-armed",
+                symbol,
+            )
+    else:
+        # 半平状态未知(记录已丢): 直接给剩余仓位补一张 closePosition 止盈 ——
+        # 半平已经发生过时, 这正是缺的那张; 没有计划价可依据时只告警不臆造。
+        target2 = (plan or {}).get("target2")
+        mark: Decimal | None = None
+        try:
+            mark = current_mark_price(client, symbol)
+        except BinanceAPIError:
+            mark = None
+        if target2 is not None and (
+            mark is None
+            or not _take_profit_would_immediately_trigger(exit_side, target2, mark)
+        ):
+            new_tp_id = f"pa-tp-{uuid.uuid4().hex[:24]}"
+            client.place_close_algo_order(
+                symbol=symbol,
+                side=exit_side,
+                order_type="TAKE_PROFIT_MARKET",
+                stop_price=target2,
+                client_algo_id=new_tp_id,
+                audit_source="adopt",
+            )
+            record["tp_algo_id"] = new_tp_id
+            record["target2"] = _decimal_text(target2)
+            record["partial_done"] = True
+            logger.warning(
+                "Reconcile: adopted %s with a fresh close-all TP2 at %s",
+                symbol,
+                _decimal_text(target2),
+            )
+        else:
+            logger.warning(
+                "Reconcile: adopted %s without a recoverable take-profit plan; "
+                "only the protective stop will close it (no take-profit leg)",
+                symbol,
+            )
+    _register_guard(symbol, record)
+    _arm_adopted_managers(client, symbol=symbol, config=config, runner=runner)
+    return record
+
+
+def reconcile_positions(
+    settings: Settings | None = None,
+    *,
+    client: BinanceUSDMTestnetClient | None = None,
+    symbols: list[str] | None = None,
+) -> dict[str, int]:
+    """Align exchange positions with the guard registry on startup/periodically.
+
+    - 交易所有仓 + 本地无记录(记录被清空/线程弃守后丢失): 收养并重新武装看护;
+    - 交易所有仓但方向与记录相反: 丢弃旧记录并按新方向收养;
+    - 本地有记录 + 交易所已平: 丢弃残留记录(否则 runner/watchdog 永远空转);
+    - 挂单 watcher 仍在等成交的 symbol 不抢管, 由它在成交后挂保护。
+    """
+    configure_binance_environment(settings)
+    config = binance_env.active_cfg(settings)
+    summary = {"checked": 0, "adopted": 0, "dropped": 0}
+    if not config.enabled or config.dry_run or config.emergency_stop:
+        return summary
+    watch: list[str] = []
+    for raw in list(symbols or config.symbol_whitelist or [config.symbol]):
+        name = str(raw or "").strip().upper()
+        if name and name not in watch:
+            watch.append(name)
+    if not watch:
+        return summary
+    active = client
+    if active is None:
+        try:
+            active = BinanceUSDMTestnetClient(config.api_key, config.api_secret)
+        except ValueError as exc:
+            logger.error("Reconcile disabled: %s", exc)
+            return summary
+    for symbol in watch:
+        summary["checked"] += 1
+        record = _read_guard(symbol)
+        try:
+            info = current_position(active, symbol)
+        except BinanceAPIError as exc:
+            if is_transient_error(exc) or _is_rate_limit_reason(str(exc)):
+                logger.warning("Reconcile skipped %s (transient): %s", symbol, exc)
+            else:
+                logger.error("Reconcile position query failed for %s: %s", symbol, exc)
+            continue
+        amount = info.get("amount") or Decimal("0")
+        if amount == 0:
+            if record is not None:
+                _drop_guard(symbol)
+                summary["dropped"] += 1
+                logger.warning(
+                    "Reconcile: dropped stale guard record for %s (position flat)",
+                    symbol,
+                )
+            continue
+        side = _position_side_of(Decimal(amount))
+        if record is not None:
+            if str(record.get("side") or "") == side:
+                continue
+            _drop_guard(symbol)
+            summary["dropped"] += 1
+            logger.warning(
+                "Reconcile: guard record for %s was %s but exchange holds %s; "
+                "re-adopting",
+                symbol,
+                record.get("side"),
+                side,
+            )
+        if _STATE_STORE.pending_get(symbol) is not None:
+            continue  # 挂单 watcher 还在等成交
+        try:
+            _adopt_position(
+                active,
+                symbol=symbol,
+                side=side,
+                amount=Decimal(amount),
+                entry=info.get("entry"),
+                config=config,
+            )
+        except BinanceAPIError as exc:
+            logger.error("Reconcile cannot adopt %s: %s", symbol, exc)
+            continue
+        summary["adopted"] += 1
+    if summary["adopted"] or summary["dropped"]:
+        logger.warning("Position reconciliation: %s", summary)
+    return summary

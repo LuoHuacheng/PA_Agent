@@ -3781,4 +3781,266 @@ def test_stop_working_type_configurable_to_contract_price(monkeypatch) -> None:
     assert params["workingType"] == "CONTRACT_PRICE"
 
 
+# ── 孤儿持仓对账收养 (reconcile, 2026-09-17 ZEC 半平后无人接管事故) ──────────
+
+from pa_agent.trading import position_manager  # noqa: E402
+
+
+def _reconcile_settings(symbols: list[str]) -> Settings:
+    settings = _partial_settings()
+    settings.binance_usdm_testnet.symbol = symbols[0]
+    settings.binance_usdm_testnet.symbol_whitelist = list(symbols)
+    settings.binance_usdm_testnet.time_stop_minutes = 720
+    return settings
+
+
+class OrphanPositionClient(FakeClient):
+    """交易所有仓、本地无 guard 记录(半平后的 ZEC 现场)。"""
+
+    def __init__(
+        self,
+        *,
+        amount: str = "0.036",
+        entry: str = "1275",
+        mark: str = "1390",
+        algo_orders: list[dict] | None = None,
+    ) -> None:
+        super().__init__()
+        self.amount = Decimal(amount)
+        self.entry = Decimal(entry)
+        self.mark = Decimal(mark)
+        self.algo_orders = list(algo_orders or [])
+
+    def position_info(self, symbol: str) -> dict:
+        self.calls.append(("position_info", symbol))
+        return {"amount": self.amount, "entry": self.entry}
+
+    def mark_price(self, symbol: str) -> Decimal:
+        self.calls.append(("mark_price", symbol))
+        return self.mark
+
+    def open_algo_orders(self, symbol: str) -> list[dict]:
+        self.calls.append(("open_algo_orders", symbol))
+        return list(self.algo_orders)
+
+
+def _write_plan_csv(directory, symbol: str, rows: list[list[str]]) -> None:
+    header = [
+        "record_time", "symbol", "timeframe", "order_direction", "order_type",
+        "entry_price", "stop_loss_price", "take_profit_price", "take_profit_price_2",
+    ]
+    directory.mkdir(parents=True, exist_ok=True)
+    body = "\n".join(
+        [",".join(header)] + [",".join([*row[:2], "30m", *row[2:]]) for row in rows]
+    )
+    (directory / f"{symbol}_30m.csv").write_text(body + "\n", encoding="utf-8")
+
+
+def _protections(client: FakeClient, order_type: str | None = None) -> list[dict]:
+    calls = [call[1] for call in client.calls if call[0] == "protection"]
+    if order_type is None:
+        return calls
+    return [c for c in calls if c["order_type"] == order_type]
+
+
+def test_reconcile_adopts_orphan_position_and_hangs_missing_tp2(
+    tmp_path, monkeypatch
+) -> None:
+    """无 guard 记录的持仓必须被收养: 止损沿用实盘 resting 单, 半平后缺的 TP2
+    按交易记录里的计划补齐, 并重新拉起 watchdog/runner/time-stop。"""
+    captured = _capture_threads(monkeypatch)
+    records = tmp_path / "trade_records"
+    _write_plan_csv(
+        records,
+        "ZECUSDT",
+        [["2026-09-17 02:37:11", "ZECUSDT", "做多", "限价单",
+          "1275.0", "1219.0", "1385.65", "1497.81"]],
+    )
+    monkeypatch.setattr(position_manager, "_TRADE_RECORDS_DIR", records)
+    client = OrphanPositionClient(
+        algo_orders=[{
+            "clientAlgoId": "pa-sl-a72f78d3",
+            "orderType": "STOP_MARKET",
+            "closePosition": True,
+            "triggerPrice": "1275.0",
+            "algoStatus": "NEW",
+        }],
+    )
+    result = binance_usdm_testnet.reconcile_positions(
+        _reconcile_settings(["ZECUSDT"]), client=client
+    )
+    assert result["adopted"] == 1, result
+    assert result["dropped"] == 0, result
+    record = binance_usdm_testnet._read_guard("ZECUSDT")
+    assert record is not None
+    assert record["side"] == "BUY"
+    assert record["stop_algo_id"] == "pa-sl-a72f78d3"
+    assert record["qty"] == "0.036"
+    assert record["target2"] == "1497.81"
+    assert record["partial_done"] is True
+    tps = _protections(client, "TAKE_PROFIT_MARKET")
+    assert [t["stop_price"] for t in tps] == [Decimal("1497.81")], tps
+    # 实盘已有止损单: 不得再挂第二张
+    assert _protections(client, "STOP_MARKET") == []
+    targets = [target for target, _kwargs in captured]
+    assert position_manager._stop_watchdog_loop in targets
+    assert position_manager._timestop_loop in targets
+
+
+def test_reconcile_without_recoverable_plan_warns_and_stays_stop_only(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """没有交易记录可依据时不许凭空编止盈位: 只收养止损看护并显式告警。"""
+    _capture_threads(monkeypatch)
+    monkeypatch.setattr(position_manager, "_TRADE_RECORDS_DIR", tmp_path / "missing")
+    client = OrphanPositionClient(
+        amount="0.5", entry="100", mark="100",
+        algo_orders=[{
+            "clientAlgoId": "pa-sl-only",
+            "orderType": "STOP_MARKET",
+            "closePosition": True,
+            "triggerPrice": "95.0",
+            "algoStatus": "NEW",
+        }],
+    )
+    with caplog.at_level("WARNING"):
+        result = binance_usdm_testnet.reconcile_positions(
+            _reconcile_settings(["BTCUSDT"]), client=client
+        )
+    assert result["adopted"] == 1
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None and record["stop_algo_id"] == "pa-sl-only"
+    assert "target2" not in record
+    assert _protections(client) == []
+    assert "无" in caplog.text or "no take-profit" in caplog.text.lower()
+
+
+def test_reconcile_hangs_breakeven_stop_when_exchange_has_none(
+    tmp_path, monkeypatch
+) -> None:
+    """孤儿持仓连止损都没有时: 立刻按保本价补挂, 绝不留裸奔仓位。"""
+    _capture_threads(monkeypatch)
+    monkeypatch.setattr(position_manager, "_TRADE_RECORDS_DIR", tmp_path / "missing")
+    client = OrphanPositionClient(amount="0.5", entry="100", mark="120")
+    result = binance_usdm_testnet.reconcile_positions(
+        _reconcile_settings(["BTCUSDT"]), client=client
+    )
+    assert result["adopted"] == 1
+    stops = _protections(client, "STOP_MARKET")
+    assert [s["stop_price"] for s in stops] == [Decimal("100")], stops
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert record["stop0"] == "100"
+    assert record["stop_algo_id"].startswith("pa-sl-")
+
+
+def test_reconcile_drops_ghost_guard_when_position_flat(monkeypatch) -> None:
+    """仓位已平的残留记录必须清掉, 否则 runner/watchdog 永远空转。"""
+    _legacy_record(time.time(), "BTCUSDT")
+    result = binance_usdm_testnet.reconcile_positions(_settings(), client=FakeClient())
+    assert result["dropped"] == 1
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+
+
+def test_reconcile_leaves_managed_position_untouched(monkeypatch) -> None:
+    """已有同向 guard 记录的正常持仓不重复收养、不重复挂单。"""
+    _capture_threads(monkeypatch)
+    binance_usdm_testnet._register_guard(
+        "BTCUSDT",
+        {"stop_algo_id": "pa-sl-live", "stop0": "90", "target": "120",
+         "side": "BUY", "conf": 60, "ts": time.time(), "moved": False},
+    )
+    client = OrphanPositionClient(amount="0.5", entry="100", mark="110")
+    result = binance_usdm_testnet.reconcile_positions(_settings(), client=client)
+    assert result == {"checked": 1, "adopted": 0, "dropped": 0}
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None and record["stop_algo_id"] == "pa-sl-live"
+    assert _protections(client) == []
+
+
+def test_reconcile_skips_position_owned_by_pending_limit_entry(monkeypatch) -> None:
+    """挂单 watcher 还在等成交时不许抢管: 双份保护单会互相打架。"""
+    _capture_threads(monkeypatch)
+    binance_usdm_testnet._STATE_STORE.pending_put(
+        "BTCUSDT", {"client_id": "pa-entry-x", "entry": "100"}
+    )
+    client = OrphanPositionClient(amount="0.5", entry="100", mark="110")
+    result = binance_usdm_testnet.reconcile_positions(_settings(), client=client)
+    assert result["adopted"] == 0
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+
+
+# ── 瞬时网络错误不得打死看护线程 (2026-09-17 ZEC runner 弃守事故) ────────────
+
+class FlakyPositionClient(FakeClient):
+    """前 N 次仓位查询抛 SSL 网络错误, 之后视为已平仓。"""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    def position_info(self, symbol: str) -> dict:
+        self.calls.append(("position_info", symbol))
+        if self.failures > 0:
+            self.failures -= 1
+            raise BinanceAPIError(
+                "Binance network error: [SSL: UNEXPECTED_EOF_WHILE_READING] "
+                "EOF occurred in violation of protocol (_ssl.c:1016)"
+            )
+        return {"amount": Decimal("0"), "entry": None}
+
+
+def test_tp_runner_survives_transient_network_errors(monkeypatch, caplog) -> None:
+    """SSL 抖动只退避重试, 不许弃守: 8 次连续失败(>预算 5)后仍能正常收尾。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    _register_tp_record("BTCUSDT")
+    with caplog.at_level("WARNING"):
+        binance_usdm_testnet._tp_runner_loop(
+            client=FlakyPositionClient(failures=8), symbol="BTCUSDT", poll_seconds=1.0
+        )
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0], sleeps
+    assert "gave up" not in caplog.text
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+
+
+def test_stop_watchdog_survives_transient_network_errors(monkeypatch, caplog) -> None:
+    """watchdog 同样只退避, 且在仓位已平时清记录退出。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    binance_usdm_testnet._register_guard(
+        "BTCUSDT",
+        {"stop_algo_id": "pa-sl-live", "stop0": "90", "target": "120",
+         "side": "BUY", "conf": 60, "ts": time.time(), "moved": True},
+    )
+    with caplog.at_level("WARNING"):
+        binance_usdm_testnet._stop_watchdog_loop(
+            client=FlakyPositionClient(failures=6), symbol="BTCUSDT", poll_seconds=1.0
+        )
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+    assert "gave up" not in caplog.text
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+
+
+def test_timestop_warns_when_guard_record_missing(monkeypatch, caplog) -> None:
+    """time-stop 发现记录缺失必须告警(可被对账收养救回), 不许静默空转。"""
+    real_read = position_manager._read_guard
+    calls = {"n": 0}
+
+    def flaky_read(symbol: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return real_read(symbol)
+
+    monkeypatch.setattr(position_manager, "_read_guard", flaky_read)
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", lambda _s: None)
+    _legacy_record(time.time() - 3600, "BTCUSDT")
+    with caplog.at_level("WARNING"):
+        binance_usdm_testnet._timestop_loop(
+            client=FakeClient(), symbol="BTCUSDT", stop_minutes=60, poll_seconds=1.0
+        )
+    assert "没有 guard 记录" in caplog.text or "no guard record" in caplog.text.lower()
+
+
 

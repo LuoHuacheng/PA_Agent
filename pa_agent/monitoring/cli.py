@@ -398,6 +398,32 @@ def run_monitor() -> int:
         resume_stop_watchdogs(settings)
     except Exception:
         logger.exception("恢复 Binance 测试网挂单 watcher 失败")
+    # 对账收养: resume_* 全部以 guards 快照为输入 —— 记录一旦丢失(2026-09-17
+    # ZEC 半平后 state 被清空), 就再没有线程看这笔仓。启动先对一遍, 之后每 10
+    # 分钟再对一遍: 交易所有仓而本地无记录 => 重建记录并补挂止损/止盈腿。
+    _RECONCILE_INTERVAL_SECONDS = 600.0
+
+    def _reconcile_loop() -> None:
+        while True:
+            time.sleep(_RECONCILE_INTERVAL_SECONDS)
+            try:
+                result = reconcile_positions(settings)
+                if result.get("adopted") or result.get("dropped"):
+                    logger.warning("定期持仓对账: %s", result)
+            except Exception:
+                logger.exception("定期持仓对账失败")
+
+    try:
+        from pa_agent.trading.position_manager import reconcile_positions
+
+        startup_summary = reconcile_positions(settings)
+        if startup_summary.get("adopted") or startup_summary.get("dropped"):
+            logger.warning("启动持仓对账: %s", startup_summary)
+        threading.Thread(
+            target=_reconcile_loop, daemon=True, name="position-reconcile"
+        ).start()
+    except Exception:
+        logger.exception("启动持仓对账失败")
     # user-data websocket: 订单/账户事件推送替代常驻轮询. REST 快照轮询保留
     # 作为低频对账兜底, 且周期随 WS 健康状态自适应(在线 300s / 断开回落 60s).
     # 事件处理器跑在 WS 接收线程上, 因此回调里绝不发 REST: 回调只做节流 + 投递,
