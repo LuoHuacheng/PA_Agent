@@ -164,6 +164,7 @@ def _rehang_protective_stop(
                 order_type="STOP_MARKET",
                 stop_price=price,
                 client_algo_id=candidate_id,
+                audit_source="rehang",
             )
         except BinanceAPIError as exc:
             message = str(exc)
@@ -286,6 +287,7 @@ def _swap_stop_to_price(
             order_type="STOP_MARKET",
             stop_price=entry,
             client_algo_id=stop_id,
+            audit_source="breakeven",
         )
         return stop_id
 
@@ -300,6 +302,7 @@ def _swap_stop_to_price(
             client_algo_id=bridge_id,
             quantity=bridge_qty,
             close_position=False,
+            audit_source="breakeven-bridge",
         )
     except BinanceAPIError:
         # Nothing changed: the old closePosition STOP still protects.
@@ -806,6 +809,7 @@ def _tp_runner_loop(
                     order_type="TAKE_PROFIT_MARKET",
                     stop_price=target2,
                     client_algo_id=new_tp_id,
+                    audit_source="tp2",
                 )
             except BinanceAPIError as exc:
                 _exhausted = budget.record()

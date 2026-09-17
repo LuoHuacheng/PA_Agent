@@ -864,6 +864,7 @@ class BinanceUSDMTestnetClient:
         client_algo_id: str,
         quantity: Decimal | None = None,
         close_position: bool = True,
+        audit_source: str = "",
     ) -> None:
         # Binance migrated conditional orders to the Algo Service in December 2025.
         # triggerPrice must respect the symbol's PRICE_FILTER tick size, or the
@@ -892,6 +893,22 @@ class BinanceUSDMTestnetClient:
             # 否则会把剩余仓位也一次性平掉(Testnet 实测接受的参数形态)。
             params["quantity"] = _decimal_text(quantity)
             params["reduceOnly"] = "true"
+        # 审计: 成交价无法还原"止损是按哪个价、按什么依据触发的"。止损用
+        # MARK_PRICE 触发, 标记价与最新价可以背离 (2026-09-16 ZEC 现场: 计划
+        # 止损 1208.15, 最新价最低 1208.63 从未触及, 标记价最低 1207.33 触发,
+        # 成交 1209.40), 缺这条日志事后只能靠猜。
+        logger.info(
+            "[防护单审计] %s %s %s trigger=%s workingType=MARK_PRICE "
+            "priceProtect=TRUE closePosition=%s qty=%s algo=%s src=%s",
+            symbol,
+            side,
+            order_type,
+            _decimal_text(stop_price),
+            "true" if close_position else "false",
+            _decimal_text(quantity) if quantity is not None else "-",
+            client_algo_id,
+            audit_source or "-",
+        )
         self._request("POST", "/fapi/v1/algoOrder", params, signed=True)
 
     def cancel_algo_order(self, *, client_algo_id: str) -> None:
@@ -1520,6 +1537,7 @@ def _attach_protection(
             order_type="STOP_MARKET",
             stop_price=stop,
             client_algo_id=stop_algo_id,
+            audit_source="entry",
         )
         protected_algo_ids.append(stop_algo_id)
         target_algo_id = f"pa-tp-{uuid.uuid4().hex[:24]}"
@@ -1533,6 +1551,7 @@ def _attach_protection(
             order_type="TAKE_PROFIT_MARKET",
             stop_price=target,
             client_algo_id=target_algo_id,
+            audit_source="entry-tp",
             **partial_kwargs,
         )
         protected_algo_ids.append(target_algo_id)
