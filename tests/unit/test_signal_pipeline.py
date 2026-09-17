@@ -295,6 +295,43 @@ def test_block_session_entry(monkeypatch) -> None:
         assert not result.gate_blocked
 
 
+def test_block_low_plan_reward_risk(monkeypatch) -> None:
+    """RR 门槛: 计划盈亏比低于门槛直接拦.
+
+    回放 45 天: RR>=1.5 保留 36% 成交, 净亏 -138.40U -> -20.74U.
+    _env_signal 的价格是 entry=100 / stop=95 / tp=110 -> 盈亏比 2.0.
+    """
+    exec_calls, _ = _patch_io(monkeypatch)
+    pipeline = SignalPipeline(_env_settings(min_plan_reward_risk=2.5))
+    result = pipeline.dispatch(_env_signal("做多", "normal_channel", "bullish"))
+    assert result.gate_blocked and "rr_block" in result.gate_reasons[0]
+    assert exec_calls == []
+    # 门槛低于实际盈亏比 -> 放行
+    pipeline2 = SignalPipeline(_env_settings(min_plan_reward_risk=1.5))
+    result2 = pipeline2.dispatch(_env_signal("做多", "normal_channel", "bullish"))
+    assert not result2.gate_blocked
+    assert len(exec_calls) == 1
+
+
+def test_plan_reward_risk_gate_off_by_default(monkeypatch) -> None:
+    exec_calls, _ = _patch_io(monkeypatch)
+    pipeline = SignalPipeline(_env_settings())
+    result = pipeline.dispatch(_env_signal("做多", "normal_channel", "bullish"))
+    assert not result.gate_blocked
+    assert len(exec_calls) == 1
+
+
+def test_block_uncomputable_reward_risk(monkeypatch) -> None:
+    """算不出盈亏比(价格缺失/方向矛盾)时, 门槛开启即按不合格拦."""
+    exec_calls, _ = _patch_io(monkeypatch)
+    pipeline = SignalPipeline(_env_settings(min_plan_reward_risk=1.5))
+    signal = _env_signal("做多", "normal_channel", "bullish")
+    signal.inner["stop_loss_price"] = None
+    result = pipeline.dispatch(signal)
+    assert result.gate_blocked and "rr_block" in result.gate_reasons[0]
+    assert exec_calls == []
+
+
 def test_entry_gate_block_notifies_and_marks(monkeypatch) -> None:
     """入口门控命中: 不下单, 但通知 + 记录标记必须都在。
 

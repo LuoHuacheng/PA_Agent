@@ -265,6 +265,12 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # 亚盘早段低流动性); 与 trending_tr 仅 51% 交集, 独立有效 — 组合后模型流
     # 从 -0.40R/笔 收到 ≈0.00R (shadow_replay --matrix 2026-09-13)。
     block_session_entry: bool = False
+    # 计划盈亏比下限: 低于该值的方案在入口直接拦(0 = 关闭)。require_trader_equation
+    # 用的是模型自报的 estimated_win_rate, 一个负边际的计划照样能算过, 只能做粗筛;
+    # 45 天回放(2026-09-17, min_stop_atr=1.5 / 超时 30)显示 RR>=1.5 只留 36% 成交
+    # 却砍掉 85% 的净亏 (-138.40U -> -20.74U), 比置信度门槛有效得多
+    # (trade_conf>=55 反而 -22U)。价格缺失/方向矛盾一律按不合格处理。
+    min_plan_reward_risk: float = Field(default=0.0, ge=0.0, le=20.0)
     # --- 日度亏损熔断 ---
     # 当日已实现净亏损(REALIZED_PNL + COMMISSION, 不含资金费)达到该值时停止自动
     # 开新仓, 次日(本地日)自动解除。0 = 关闭。账本查询 weight 30, 所以当天一旦

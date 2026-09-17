@@ -228,6 +228,20 @@ class SignalPipeline:
             reasons.append("neutral_diag_block: 实盘 neutral 单胜率 25%")
         if getattr(cfg, "block_session_entry", False) and _session_blocked_now():
             reasons.append("session_block: 回放 04-12时(UTC+8) 74 笔 -290U")
+        min_rr = float(getattr(cfg, "min_plan_reward_risk", 0.0) or 0.0)
+        if min_rr > 0:
+            from pa_agent.util.trade_metrics import compute_risk_reward
+
+            rr = compute_risk_reward(
+                inner.get("entry_price"),
+                inner.get("take_profit_price"),
+                inner.get("stop_loss_price"),
+                inner.get("order_direction"),
+            )
+            ratio = None if rr is None else float(rr.get("ratio") or 0.0)
+            if ratio is None or ratio < min_rr:
+                shown = "n/a" if ratio is None else f"{ratio:.2f}"
+                reasons.append(f"rr_block: 计划盈亏比 {shown} < {min_rr:g}")
         return tuple(reasons)
 
     def _direction_gate_reasons(
