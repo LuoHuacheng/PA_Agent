@@ -964,11 +964,30 @@ class PromptAssembler:
 
     def _build_stage1_system_prompt(self) -> str:
         """Persona + Stage 1 gate subset (§0–§2) for token savings."""
-        return self._build_system_prompt_for(COMMON_SYSTEM_STAGE1_TXT_FILES)
+        return self._with_stage2_output_contract(
+            self._build_system_prompt_for(COMMON_SYSTEM_STAGE1_TXT_FILES)
+        )
 
     def _build_stage2_system_prompt(self) -> str:
         """Persona + full binary decision tree (Stage 2 strategy routing)."""
-        return self._build_system_prompt_for(COMMON_SYSTEM_STAGE2_TXT_FILES)
+        return self._with_stage2_output_contract(
+            self._build_system_prompt_for(COMMON_SYSTEM_STAGE2_TXT_FILES)
+        )
+
+    @staticmethod
+    def _with_stage2_output_contract(system_prompt: str) -> str:
+        """Append the static Stage-2 output contract to the system turn.
+
+        The contract is pure reference text (JSON schema + field rules) and is
+        byte-identical on every call, so keeping it in the system message instead
+        of the Stage-2 user turn puts it inside the KV-cache prefix shared by both
+        stages: Stage-2 calls then bill it at cache price. The header marks it as
+        Stage-2 reference so Stage 1 does not mistake it for its own contract.
+        """
+        header = "## 阶段二输出契约 (静态参考: 阶段一忽略本节)"
+        if not system_prompt:
+            return f"{header}\n\n{_STAGE2_OUTPUT_CONTRACT}"
+        return f"{system_prompt}\n\n---\n\n{header}\n\n{_STAGE2_OUTPUT_CONTRACT}"
 
     # ── File loading ──────────────────────────────────────────────────────────
 
@@ -1661,12 +1680,17 @@ class PromptAssembler:
         )
 
         if chain_after_s1:
-            assistant_content = self._normalize_stage1_assistant_for_chain(
-                stage1_json,
-                stage1_reply_content,
-            )
             chain = [dict(m) for m in stage1_messages]
-            chain.append({"role": "assistant", "content": assistant_content})
+            # Incremental Stage-1 chains already end with the current diagnosis as
+            # an assistant turn. Appending the normalized copy duplicates ~95%
+            # identical text (5k tokens) and leaves two assistant turns competing
+            # for attention, so only add the turn when the chain lacks one.
+            if not chain or chain[-1].get("role") != "assistant":
+                assistant_content = self._normalize_stage1_assistant_for_chain(
+                    stage1_json,
+                    stage1_reply_content,
+                )
+                chain.append({"role": "assistant", "content": assistant_content})
             chain.append({"role": "user", "content": stage2_user_content})
             return chain
 
@@ -1752,7 +1776,8 @@ class PromptAssembler:
                     max_chars_per_entry=max_chars,
                 )
             )
-        stage2_parts.append(_STAGE2_OUTPUT_CONTRACT)
+        # _STAGE2_OUTPUT_CONTRACT now lives in the system turn (see
+        # _with_stage2_output_contract) so it stays inside the cached prefix.
         if enable_next_bar_prediction:
             stage2_parts.append(_NEXT_BAR_PREDICTION_INSTRUCTION)
         else:

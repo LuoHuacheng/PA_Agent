@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+
 import pytest
 from pathlib import Path
 
@@ -234,20 +236,29 @@ def test_stage1_optimized_mode_keeps_program_prefill_hint(assembler: PromptAssem
 
 
 def test_stage2_output_contract_present(assembler: PromptAssembler):
-    """Stage 2 user turn must contain the output contract with null rule."""
+    """Stage 2 must receive the output contract; it now rides the system turn.
+
+    The contract is static reference text, so it lives in the shared system prefix
+    (cache-priced) rather than the per-call user turn.
+    """
     frame = _make_frame()
     messages = assembler.build_stage2(frame, {}, [], [])
+    system = messages[0]["content"]
     user = messages[1]["content"]
-    assert "不下单" in user
-    assert "order_direction" in user
-    assert "bar_analysis" in user
-    assert "entry_basis_bar" in user
-    assert "突破单 entry_price 硬规则" in user
-    assert "§9 逐K信号链与新鲜度硬规则" in user
+    for marker in (
+        "不下单",
+        "order_direction",
+        "bar_analysis",
+        "entry_basis_bar",
+        "突破单 entry_price 硬规则",
+        "§9 逐K信号链与新鲜度硬规则",
+        "decision_trace",
+        "terminal",
+    ):
+        assert marker in system, marker
+    # K-line specifics are per-cycle data and stay in the user turn.
     assert "K线几何特征" in user
     assert "EMA缺口数" in user
-    assert "decision_trace" in user
-    assert "terminal" in user
 
 
 def test_stage2_experience_entries_included(assembler: PromptAssembler):
@@ -346,6 +357,76 @@ def test_stage2_continuation_is_standalone_not_stage1_chat(assembler: PromptAsse
     assert "下跌通道分析识别" in s2_user
     assert "上涨通道分析识别" not in s2_user
     assert "【最后一步·必做】" in s2_user
+
+
+CONTRACT_MARKER = "请严格按照以下 JSON 格式输出决策结果"
+
+
+def test_stage1_system_prompt_carries_stage2_output_contract(assembler: PromptAssembler):
+    """C: the static reference contract moves into the shared system prefix."""
+    messages = assembler.build_stage1(_make_frame())
+    assert CONTRACT_MARKER in messages[0]["content"]
+    assert "阶段二输出契约" in messages[0]["content"]
+
+
+def test_stage2_standalone_contract_in_system_not_user(assembler: PromptAssembler):
+    messages = assembler.build_stage2(_make_frame(), {}, [], [])
+    assert CONTRACT_MARKER in messages[0]["content"]
+    assert CONTRACT_MARKER not in messages[1]["content"]
+
+
+def test_stage2_prefix_chain_contract_in_system_not_user(assembler: PromptAssembler):
+    frame = _make_frame()
+    stage1_messages = assembler.build_stage1(frame)
+    stage1_json = {
+        "cycle_position": "normal_channel",
+        "direction": "bullish",
+        "gate_result": "proceed",
+    }
+    messages = assembler.build_stage2_continuation(
+        frame=frame,
+        stage1_messages=stage1_messages,
+        stage1_reply_content='{"cycle_position":"normal_channel"}',
+        stage1_json=stage1_json,
+        strategy_files=["上涨通道分析识别.txt"],
+        experience_entries=[],
+        use_prefix_chain=True,
+    )
+    # messages[0] is the reused Stage-1 system turn = the cached prefix.
+    assert CONTRACT_MARKER in messages[0]["content"]
+    assert CONTRACT_MARKER not in messages[-1]["content"]
+
+
+def test_stage2_continuation_skips_duplicate_assistant_turn(assembler: PromptAssembler):
+    """Incremental chains already end with the Stage-1 JSON — do not append a copy."""
+    frame = _make_frame()
+    stage1_messages = assembler.build_stage1(frame)
+    stage1_messages.append({"role": "assistant", "content": '{"cycle_position":"normal_channel"}'})
+    stage1_json = {
+        "cycle_position": "normal_channel",
+        "direction": "bullish",
+        "gate_result": "proceed",
+    }
+
+    messages = assembler.build_stage2_continuation(
+        frame=frame,
+        stage1_messages=stage1_messages,
+        stage1_reply_content='{"cycle_position":"normal_channel"}',
+        stage1_json=stage1_json,
+        strategy_files=["上涨通道分析识别.txt"],
+        experience_entries=[],
+        use_prefix_chain=True,
+    )
+
+    roles = [m["role"] for m in messages]
+    assert roles == ["system", "user", "assistant", "user"]
+    # The existing assistant turn is kept verbatim; no second copy is added.
+    assert messages[2]["content"] == '{"cycle_position":"normal_channel"}'
+    assert "阶段二任务" in messages[3]["content"]
+    assert all(
+        not (a["role"] == "assistant" and b["role"] == "assistant")
+        for a, b in itertools.pairwise(messages)
+    )
 
 
 def test_stage2_continuation_prefix_chain_reuses_stage1(assembler: PromptAssembler):
