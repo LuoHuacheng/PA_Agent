@@ -37,7 +37,8 @@
 | `provider.api_key` | string | `""` | API Key（明文，内存中临时使用；不持久化到文件） |
 | `provider.thinking` | bool | `true` | 是否启用思考/推理类扩展参数（依模型与网关而定）。关闭可 3–5 倍提速但分析质量下降 |
 | `provider.reasoning_effort` | string | `"high"` | 推理深度：`low` / `medium` / `high` / `max` |
-| `provider.context_window` | int | `2000000` | 用于上下文占用提示的窗口大小（tokens） |
+| `provider.max_output_tokens` | int | `384000` | 单次请求输出预算（thinking + content 合计）。部分网关按渠道夹断（如夹到 4096，导致思考吃满、正文为空），可调到模型真实输出上限 |
+| `provider.context_window` | int | `128000` | 仅用于 UI 上下文占用百分比与告警阈值（不参与请求体）。请填模型真实窗口 |
 
 ### general — 通用设置
 
@@ -72,6 +73,7 @@
 | `monitoring.targets` | `[]` | 监控列表。每项为 `symbol`、`timeframe`、`enabled`，如 `{"symbol":"XAUUSD","timeframe":"15m","enabled":true}` |
 | `monitoring.max_concurrent_analyses` | `1` | 同时执行的 AI 分析上限（1–8）。提高会增加 API 并发与 token 消耗 |
 | `monitoring.poll_lead_seconds` | `5` | K 线收盘后等待数据源落库的秒数（0–120） |
+| `monitoring.poll_interval_minutes` | `0` | 分析节拍（分钟，0–1440）。`0` = 跟随 targets 的 K 线周期；`>0` = 固定按该间隔的整点边界分析（K 线周期不变） |
 | `monitoring.poll_retry_attempts` | `3` | 数据未更新或临时失败时的重试次数（0–10） |
 | `monitoring.poll_retry_seconds` | `5` | 重试之间的等待秒数（1–120） |
 

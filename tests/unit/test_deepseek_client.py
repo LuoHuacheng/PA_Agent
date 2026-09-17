@@ -27,6 +27,7 @@ def _make_mock_response(content: str = "hello", reasoning: str = "thinking...") 
     msg.reasoning_content = reasoning
     choice = MagicMock()
     choice.message = msg
+    choice.finish_reason = "stop"
     usage = MagicMock()
     usage.prompt_tokens = 100
     usage.completion_tokens = 50
@@ -66,6 +67,9 @@ def _make_stream(reasoning_chunks: list[str], content_chunks: list[str]) -> list
         delta.content = text
         ch.choices[0].delta = delta
         chunks.append(ch)
+    # The last chunk that still carries choices reports why generation ended.
+    if chunks:
+        chunks[-1].choices[0].finish_reason = "length"
     done = MagicMock()
     done.choices = []
     done.usage = MagicMock(
@@ -270,6 +274,41 @@ def test_chat_sends_max_tokens_when_thinking():
     assert kwargs["max_tokens"] == 384_000
 
 
+def test_completion_max_tokens_follows_settings():
+    """Configured provider.max_output_tokens wins over the global default."""
+    settings = _make_settings()
+    settings.max_output_tokens = 32_000
+    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 32_000
+
+
+def test_chat_sends_configured_max_tokens():
+    """chat() forwards the configured output budget to the API call."""
+    settings = _make_settings()
+    settings.max_output_tokens = 32_000
+    settings.thinking = False
+    client = DeepSeekClient(settings)
+
+    mock_resp = _make_mock_response()
+    mock_openai = MagicMock()
+    mock_openai.return_value.chat.completions.create.return_value = mock_resp
+
+    with patch("pa_agent.ai.deepseek_client._OpenAI", mock_openai):
+        client.chat([{"role": "user", "content": "hi"}])
+
+    kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
+    assert kwargs["max_tokens"] == 32_000
+
+
+def test_max_output_tokens_is_range_validated():
+    """Out-of-range budgets are rejected at load time, not silently clamped."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        AIProviderSettings(max_output_tokens=999_999)
+    with pytest.raises(pydantic.ValidationError):
+        AIProviderSettings(max_output_tokens=0)
+
+
 def test_system_message_stays_inline_for_generic_gateways():
     """System turns remain in messages for every OpenAI-compatible gateway."""
     settings = _make_settings()
@@ -291,6 +330,52 @@ def test_system_message_stays_inline_for_generic_gateways():
 
     sent = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
     assert sent == messages
+
+
+# ── prompt size guard ────────────────────────────────────────────────────────
+
+def test_chat_warns_when_prompt_nears_context_window(caplog):
+    """Oversized prompts surface in the log instead of failing silently upstream."""
+    settings = _make_settings()
+    settings.thinking = False
+    settings.context_window = 1_000
+    client = DeepSeekClient(settings)
+
+    mock_resp = _make_mock_response()
+    mock_openai = MagicMock()
+    mock_openai.return_value.chat.completions.create.return_value = mock_resp
+
+    messages = [{"role": "user", "content": "结构位 " * 800}]
+    with (
+        caplog.at_level(logging.WARNING, logger="pa_agent.ai.deepseek_client"),
+        patch("pa_agent.ai.deepseek_client._OpenAI", mock_openai),
+    ):
+        client.chat(messages)
+
+    warnings = [rec.getMessage() for rec in caplog.records if rec.levelno >= logging.WARNING]
+    assert any("context" in w.lower() or "上下文" in w for w in warnings), warnings
+    # Observability only — the prompt must still reach the API unchanged.
+    sent = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
+    assert sent == messages
+
+
+def test_chat_does_not_warn_for_small_prompt(caplog):
+    settings = _make_settings()
+    settings.thinking = False
+    settings.context_window = 1_000_000
+    client = DeepSeekClient(settings)
+
+    mock_resp = _make_mock_response()
+    mock_openai = MagicMock()
+    mock_openai.return_value.chat.completions.create.return_value = mock_resp
+
+    with (
+        caplog.at_level(logging.WARNING, logger="pa_agent.ai.deepseek_client"),
+        patch("pa_agent.ai.deepseek_client._OpenAI", mock_openai),
+    ):
+        client.chat([{"role": "user", "content": "hi"}])
+
+    assert not [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
 
 
 # ── stream ───────────────────────────────────────────────────────────────────
@@ -339,6 +424,32 @@ def test_stream_short_reasoning_and_short_content_warns() -> None:
         for m in [r.getMessage()]
     ]
     assert any("reasoning_content is very short" in m for m in warning_msgs), warning_msgs
+
+
+def test_chat_reports_finish_reason() -> None:
+    """finish_reason is surfaced so records can prove an output was not truncated."""
+    settings = _make_settings()
+    settings.thinking = False
+    client = DeepSeekClient(settings)
+
+    mock_resp = _make_mock_response()
+    mock_openai = MagicMock()
+    mock_openai.return_value.chat.completions.create.return_value = mock_resp
+
+    with patch("pa_agent.ai.deepseek_client._OpenAI", mock_openai):
+        reply = client.chat([{"role": "user", "content": "hi"}])
+
+    assert reply.finish_reason == "stop"
+    assert reply.raw["finish_reason"] == "stop"
+
+
+def test_stream_reports_finish_reason() -> None:
+    """stream_chat keeps the finish_reason of the last choice-bearing chunk."""
+    settings = _thinking_settings()
+    reply, _records = _stream_reply_and_records(settings, _make_stream(["think"], ["a", "b"]))
+
+    assert reply.finish_reason == "length"
+    assert reply.raw["finish_reason"] == "length"
 
 
 # ── lifecycle & safety ───────────────────────────────────────────────────────

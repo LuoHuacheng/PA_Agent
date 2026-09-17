@@ -26,6 +26,11 @@ class AIProviderSettings(BaseModel):
     api_key: str = ""
     thinking: bool = True
     reasoning_effort: Literal["low", "medium", "high", "max"] = "high"
+    #: 单次请求的输出预算 (thinking + content 合计)。默认沿用客户端全局上限
+    #: 384000；若网关按渠道夹断 max_tokens (实测 a6api 夹到 4096)，把这里调到
+    #: 模型真实输出上限，避免"思考吃满额度、正文 JSON 为空"。
+    max_output_tokens: int = Field(default=384_000, ge=1, le=384_000)
+    #: 仅用于 UI 上下文占用百分比与告警阈值；不参与请求体。请填模型真实窗口。
     context_window: int = 2_000_000
 
 
@@ -404,6 +409,9 @@ class MonitoringSettings(BaseModel):
     auto_discover: AutoDiscoverSettings = Field(default_factory=AutoDiscoverSettings)
     max_concurrent_analyses: int = Field(default=1, ge=1, le=8)
     poll_lead_seconds: int = Field(default=5, ge=0, le=120)
+    #: 分析的固定节拍（分钟）。0 = 跟随 targets 的 K 线周期（每根收盘分析一次）；
+    #: >0 = 按该间隔的整点边界分析，且 >=2 根 K 线未处理时自动回退全量分析。
+    poll_interval_minutes: int = Field(default=0, ge=0, le=1440)
     poll_retry_attempts: int = Field(default=3, ge=0, le=10)
     poll_retry_seconds: int = Field(default=5, ge=1, le=120)
     #: C3 轻量模式: 无结构事件连续安静达 N 根时跳过阶段二(默认关, monitor only).

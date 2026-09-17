@@ -60,6 +60,8 @@ class AIReply:
     usage: AIUsage
     request_id: str
     latency_ms: float
+    #: Provider stop reason ("stop" natural, "length" truncated, "" unknown).
+    finish_reason: str = ""
 
 
 class CancelledError(Exception):
@@ -153,9 +155,49 @@ def _completion_max_tokens(
     extra_body: dict[str, Any],
     effort: str | None,
 ) -> int:
-    """Total completion budget (thinking + content) for OpenAI-compatible APIs."""
-    del settings, effort, extra_body
-    return _PRACTICAL_UNLIMITED_MAX_TOKENS
+    """Total completion budget (thinking + content) for OpenAI-compatible APIs.
+
+    The configured provider.max_output_tokens wins so a gateway that clamps
+    max_tokens per channel can be matched instead of guessed; the module constant
+    stays as the ceiling and as the fallback for unset/invalid values.
+    """
+    del effort, extra_body
+    configured = getattr(settings, "max_output_tokens", None)
+    if not configured or int(configured) <= 0:
+        return _PRACTICAL_UNLIMITED_MAX_TOKENS
+    return min(int(configured), _PRACTICAL_UNLIMITED_MAX_TOKENS)
+
+
+#: Warn when the assembled prompt reaches this share of provider.context_window.
+_PROMPT_WARN_RATIO = 0.8
+
+
+def _warn_if_prompt_nears_window(
+    settings: AIProviderSettings,
+    messages: list[dict[str, Any]],
+    log: logging.Logger,
+) -> int:
+    """Estimate prompt size and warn when it approaches the configured window.
+
+    Observability only: the prompt is never truncated, so strategy text cannot be
+    dropped silently. Returns the estimate, or 0 when it cannot be computed.
+    """
+    window = int(getattr(settings, "context_window", 0) or 0)
+    if window <= 0 or not messages:
+        return 0
+    from pa_agent.ai.token_counter import estimate_tokens
+
+    estimated = estimate_tokens(messages)
+    if estimated >= window * _PROMPT_WARN_RATIO:
+        log.warning(
+            "Prompt estimated %d tokens >= %.0f%% of context_window=%d (msgs=%d); "
+            "the provider may truncate or reject it.",
+            estimated,
+            _PROMPT_WARN_RATIO * 100,
+            window,
+            len(messages),
+        )
+    return estimated
 
 
 def _resolve_thinking_params(
@@ -227,6 +269,7 @@ class DeepSeekClient:
         api_messages = messages
         _thinking_on = _thinking_enabled(extra_body, _effort)
         _max_tokens = _completion_max_tokens(self._settings, extra_body=extra_body, effort=_effort)
+        _warn_if_prompt_nears_window(self._settings, api_messages, self._log)
 
         masked_key = mask_secret(self._settings.api_key)
         self._log.debug(
@@ -292,6 +335,9 @@ class DeepSeekClient:
         )
 
         request_id = getattr(response, "id", "") or ""
+        finish_reason = getattr(response.choices[0], "finish_reason", "") or ""
+        if not isinstance(finish_reason, str):
+            finish_reason = ""
 
         # Build raw dict for debug tab — mask API key if it somehow appears
         raw: dict[str, Any] = {
@@ -299,6 +345,7 @@ class DeepSeekClient:
             "model": getattr(response, "model", ""),
             "content": content,
             "reasoning_content": reasoning_content,
+            "finish_reason": finish_reason,
             "usage": {
                 "prompt_tokens": usage.prompt_tokens,
                 "cached_prompt_tokens": usage.cached_prompt_tokens,
@@ -336,6 +383,7 @@ class DeepSeekClient:
             usage=usage,
             request_id=request_id,
             latency_ms=latency_ms,
+            finish_reason=finish_reason,
         )
 
     def stream_chat(
@@ -375,6 +423,7 @@ class DeepSeekClient:
         api_messages = messages
         _thinking_on = _thinking_enabled(extra_body, _effort)
         _max_tokens = _completion_max_tokens(self._settings, extra_body=extra_body, effort=_effort)
+        _warn_if_prompt_nears_window(self._settings, api_messages, self._log)
 
         self._log.info(
             "DeepSeekClient.stream_chat: model=%s thinking=%s reasoning_effort=%s "
@@ -404,6 +453,7 @@ class DeepSeekClient:
         completion_tokens = 0
         total_tokens = 0
         cached_tokens = 0
+        finish_reason = ""
 
         try:
             # Build kwargs with stream_options to get usage in the final chunk.
@@ -450,6 +500,9 @@ class DeepSeekClient:
                 model_name = model_name or (getattr(chunk, "model", "") or "")
 
                 choice0 = chunk.choices[0]
+                chunk_finish = getattr(choice0, "finish_reason", None)
+                if isinstance(chunk_finish, str) and chunk_finish:
+                    finish_reason = chunk_finish
                 delta = getattr(choice0, "delta", None)
                 if delta is None:
                     continue
@@ -487,6 +540,7 @@ class DeepSeekClient:
             "model": model_name,
             "content": content,
             "reasoning_content": reasoning_content,
+            "finish_reason": finish_reason,
             "usage": {
                 "prompt_tokens": usage.prompt_tokens,
                 "cached_prompt_tokens": usage.cached_prompt_tokens,
@@ -555,4 +609,5 @@ class DeepSeekClient:
             usage=usage,
             request_id=request_id,
             latency_ms=latency_ms,
+            finish_reason=finish_reason,
         )

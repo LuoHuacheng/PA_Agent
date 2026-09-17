@@ -101,6 +101,46 @@ def test_timeframe_scheduler_uses_natural_boundaries() -> None:
     assert next_poll_at("30m", now=1801, lead_seconds=5) == 3605
 
 
+def test_poll_interval_override_aligns_to_interval_boundary() -> None:
+    """poll_interval_minutes floors the cadence; 0 keeps natural bar close."""
+    # 120min boundary after now: 7200 (02:00) + lead
+    assert next_poll_at("30m", now=1_000, lead_seconds=5, interval_minutes=120) == 7_205
+    # exactly on a boundary -> the following one
+    assert next_poll_at("30m", now=7_200, lead_seconds=5, interval_minutes=120) == 14_405
+    # 0 = unchanged bar-close behaviour
+    assert next_poll_at("30m", now=1_801, lead_seconds=5, interval_minutes=0) == 3_605
+
+
+def test_schedule_next_uses_configured_poll_interval(tmp_path: Path) -> None:
+    """The scheduler honours monitoring.poll_interval_minutes."""
+    settings = _settings(MonitorTarget(symbol="BTCUSDT", timeframe="30m"))
+    settings.monitoring.poll_interval_minutes = 120
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+    )
+    state = next(iter(monitor._states.values()))
+    monitor._schedule_next(state, now=1_000)
+    assert state.next_poll_at == 7_205
+
+
+def test_initial_state_honours_poll_interval(tmp_path: Path) -> None:
+    """Initial scheduling must use the configured interval, not the bar close."""
+    settings = _settings(MonitorTarget(symbol="BTCUSDT", timeframe="30m"))
+    settings.monitoring.poll_interval_minutes = 120
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+        clock=lambda: 1_000.0,
+    )
+    state = next(iter(monitor._states.values()))
+    assert state.next_poll_at == 7_205
+
+
 def test_auto_discover_replaces_static_targets_on_apply(tmp_path: Path) -> None:
     settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
     settings.monitoring.auto_discover.enabled = True

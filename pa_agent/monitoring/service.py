@@ -53,9 +53,16 @@ def timeframe_seconds(timeframe: str) -> int:
     return _TIMEFRAME_SECONDS[normalized]
 
 
-def next_poll_at(timeframe: str, *, now: float, lead_seconds: int) -> float:
-    """First poll time after the next natural bar close."""
-    period = timeframe_seconds(timeframe)
+def next_poll_at(
+    timeframe: str, *, now: float, lead_seconds: int, interval_minutes: int = 0
+) -> float:
+    """First poll time after the next boundary of the poll period.
+
+    ``interval_minutes`` > 0 overrides the bar-close cadence with a fixed clock
+    interval (analysis still uses the target timeframe bars); 0 keeps the natural
+    bar-close behaviour.
+    """
+    period = interval_minutes * 60 if interval_minutes > 0 else timeframe_seconds(timeframe)
     close_at = (int(now) // period + 1) * period
     return float(close_at + lead_seconds)
 
@@ -204,6 +211,7 @@ class MultiSymbolMonitor:
                 target.timeframe,
                 now=self._clock(),
                 lead_seconds=self._cfg.poll_lead_seconds,
+                interval_minutes=self._cfg.poll_interval_minutes,
             ),
             last_processed_closed_ts=self._persisted_closed_ts.get(self._key_text(key)),
         )
@@ -299,6 +307,7 @@ class MultiSymbolMonitor:
                         target.timeframe,
                         now=self._clock(),
                         lead_seconds=self._cfg.poll_lead_seconds,
+                        interval_minutes=self._cfg.poll_interval_minutes,
                     ),
                     last_processed_closed_ts=self._persisted_closed_ts.get(self._key_text(key)),
                 )
@@ -578,7 +587,10 @@ class MultiSymbolMonitor:
 
     def _schedule_next(self, state: _TargetState, now: float) -> None:
         state.next_poll_at = next_poll_at(
-            state.target.timeframe, now=now, lead_seconds=self._cfg.poll_lead_seconds
+            state.target.timeframe,
+            now=now,
+            lead_seconds=self._cfg.poll_lead_seconds,
+            interval_minutes=self._cfg.poll_interval_minutes,
         )
 
     def _report(self, message: str, *, level: int = logging.INFO) -> None:

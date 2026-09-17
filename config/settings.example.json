@@ -4,6 +4,7 @@
     "base_url": "https://api.deepseek.com",
     "thinking": true,
     "reasoning_effort": "high",
+    "max_output_tokens": 384000,
     "context_window": 128000
   },
   "general": {
@@ -114,6 +115,7 @@
       "stablecoin_only": true
     },
     "max_concurrent_analyses": 1,
+    "poll_interval_minutes": 0,
     "poll_lead_seconds": 5,
     "poll_retry_attempts": 3,
     "poll_retry_seconds": 5,
