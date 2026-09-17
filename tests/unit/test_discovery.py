@@ -118,6 +118,18 @@ def test_market_cap_ranks_maps_usdt_and_skips_stablecoins() -> None:
     assert symbols == ["BTCUSDT", "ETHUSDT"]
 
 
+def test_market_cap_skips_usds_stablecoin() -> None:
+    """Newer stablecoin tickers (e.g. USDS) must not become monitor targets."""
+    payload = [
+        {"symbol": "btc", "market_cap": 1_600_000_000_000},
+        {"symbol": "usds", "market_cap": 900_000_000_000},
+        {"symbol": "eth", "market_cap": 300_000_000_000},
+    ]
+    _mock_urlopen(payload)
+    symbols = fetch_usdm_top_n(rank_by="market_cap", top_n=2, stablecoin_only=True)
+    assert symbols == ["BTCUSDT", "ETHUSDT"]
+
+
 def test_market_cap_fetches_coingecko_endpoint() -> None:
     urls = _mock_urlopen_capture(_MARKET_CAP_PAYLOAD)
     fetch_usdm_top_n(rank_by="market_cap", top_n=1, stablecoin_only=True)

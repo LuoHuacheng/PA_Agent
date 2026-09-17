@@ -21,7 +21,8 @@ _MARKET_CAP_URL = (
 )
 #: CoinGecko short symbols excluded when stablecoin_only=True (market-cap mode).
 _STABLECOIN_SYMBOLS = {"usdt", "usdc", "dai", "fdusd", "tusd", "pyusd",
-                       "usde", "busd", "usdp", "usdm", "eurc", "usd1"}
+                       "usde", "busd", "usdp", "usdm", "eurc", "usd1",
+                       "usds"}
 _TIMEOUT_S = 10.0
 #: Settled in fiat or another stablecoin; excluded when stablecoin_only=True.
 _NON_USDT_SETTLEMENTS = ("USDC", "FDUSD", "TUSD", "USDP", "EUR", "GBP", "BUSD")
