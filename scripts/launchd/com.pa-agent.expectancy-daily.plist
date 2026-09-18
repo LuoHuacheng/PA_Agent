@@ -6,10 +6,13 @@
   <string>com.pa-agent.expectancy-daily</string>
 
   <!-- 每 6 小时跑一次正期望日检, 台账落在 logs/daily_check.tsv。
-       用绝对路径; 安装脚本会把 __REPO__ 替换成真实仓库根。 -->
+       安装脚本把 __REPO__ 替换成仓库根, __BASH__ 替换成用户路径上的 bash 副本。
+       为什么不用 /bin/bash: 它在只读系统卷(SSV)上, macOS 的 TCC 拒绝把它登记进
+       "完全磁盘访问权限"(实测点选后 TCC.db 里连 bash 条目都没有), 于是 launchd
+       拉起的 bash 读不了 ~/Documents 下的仓库(exit 126)。 -->
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
+    <string>__BASH__</string>
     <string>__REPO__/scripts/daily_check.sh</string>
   </array>
 
