@@ -28,7 +28,7 @@ from _pa_sim_common import (
     window_bounds,
 )
 
-from pa_agent.trading.replay_pairing import classify_outcome
+from pa_agent.trading.replay_pairing import aggregate_legs, classify_outcome
 
 
 def net(t):
@@ -97,6 +97,8 @@ def main():
     ap.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
     ap.add_argument("--conf-cut", type=int, default=55, help="confidence split point (default 55)")
     ap.add_argument("--detail", action="store_true", help="print per-trade rows")
+    ap.add_argument("--aggregate", action="store_true",
+                    help="merge partial legs of one position before reporting")
     ap.add_argument("--out", default="", help="optional json output path")
     ap.add_argument("--conf-buckets-out", default="",
                     help="write conf 5-pt bucket win/loss counts for the closed trades")
@@ -120,6 +122,10 @@ def main():
         orders = load_json(cache, "orders.json")
 
     in_win = [t for t in trades if start_ms <= t["opened_at"] < end_ms]
+    if args.aggregate:
+        raw_n = len(in_win)
+        in_win = aggregate_legs(in_win)
+        print(f"聚合分腿: {raw_n} 腿 -> {len(in_win)} 笔 (tp_partial_close_pct 会把一次持仓拆成多腿)")
     unreal_map, _pos = attach_unrealized([t for t in in_win if not t.get("closed_at")], positions)
     cut = args.conf_cut
     groups = [
@@ -215,10 +221,14 @@ def main():
     for t in in_win:
         trade_r[t["sym"]] += t["realized"]
         trade_f[t["sym"]] += t["fees"]
+    diff_abs_total = 0.0
     for sym in symbols:
         diff = (trade_r[sym] + trade_f[sym]) - inc_sym[sym]
+        diff_abs_total += abs(diff)
         print("  %-9s income=%+9.3f trades=%+9.3f diff=%+.3f"
               % (sym, inc_sym[sym], trade_r[sym] + trade_f[sym], diff))
+    verdict = "一致" if diff_abs_total <= 1.0 else "不一致: 逐笔归因不可信"
+    print(f"  [对账判定] |diff| 合计 {diff_abs_total:.3f} USDT (阈值 1.000) -> {verdict}")
     funding = sum(float(r["income"]) for r in income
                   if r["symbol"] in symbols and start_ms <= int(r["time"]) < end_ms
                   and r["incomeType"] == "FUNDING_FEE")

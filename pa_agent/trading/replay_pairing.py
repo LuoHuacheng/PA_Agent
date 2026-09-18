@@ -175,6 +175,80 @@ def rebuild_trades(
     return out
 
 
+def _merge_legs(legs: list[dict]) -> dict:
+    """Sum the cash flows and quantity of one position's legs."""
+    qty = sum(float(t.get("qty") or 0.0) for t in legs)
+    notional = sum(float(t.get("qty") or 0.0) * float(t.get("entry") or 0.0) for t in legs)
+    closed = [t for t in legs if t.get("closed_at")]
+    merged: dict = {
+        "sym": legs[0].get("sym"),
+        "side": legs[0].get("side"),
+        "qty": qty,
+        "entry": (notional / qty) if qty else float(legs[0].get("entry") or 0.0),
+        "realized": sum(float(t.get("realized") or 0.0) for t in legs),
+        "fees": sum(float(t.get("fees") or 0.0) for t in legs),
+        "cid": next((t.get("cid") for t in legs if t.get("cid") and t.get("cid") != "manual"), "manual"),
+        "opened_at": min(t.get("opened_at") or 0 for t in legs),
+        "closed_at": max(t.get("closed_at") or 0 for t in closed) if closed else None,
+        "close_px": closed[-1].get("close_px") if closed else None,
+        "legs": len(legs),
+    }
+    for key in ("conf", "stop", "target"):
+        merged[key] = next((t.get(key) for t in legs if t.get(key) is not None), None)
+    if any(t.get("manual") for t in legs):
+        merged["manual"] = True
+    return merged
+
+
+def aggregate_legs(
+    trades: list[dict],
+    *,
+    open_window_ms: float = 180_000.0,
+    close_window_ms: float = 180_000.0,
+) -> list[dict]:
+    """Collapse the partial fills / partial closes of one position into one trade.
+
+    `rebuild_trades` deliberately returns per-signal *legs*, but a partial-TP
+    position (tp_partial_close_pct) and a tranche-filled limit entry both appear
+    as several legs. Reporting them as separate trades inflates the trade count,
+    multiplies the per-trade fee drag and mixes entry prices (observed: 7 ADAUSDT
+    legs with entries 0.2133-0.2139, all exiting at 0.2114 within the same
+    minute). Legs of the same symbol and side whose entry *and* exit both fall
+    inside the windows are merged; the `legs` key records how many were folded.
+    """
+    grouped: list[dict] = []
+    used = [False] * len(trades)
+    order = sorted(range(len(trades)), key=lambda i: trades[i].get("opened_at") or 0)
+    for i in order:
+        if used[i]:
+            continue
+        base = trades[i]
+        used[i] = True
+        cluster = [base]
+        for j in order:
+            if used[j]:
+                continue
+            other = trades[j]
+            if other.get("sym") != base.get("sym") or other.get("side") != base.get("side"):
+                continue
+            same_open = (
+                abs((other.get("opened_at") or 0) - (base.get("opened_at") or 0))
+                <= open_window_ms
+            )
+            both_closed = bool(other.get("closed_at")) and bool(base.get("closed_at"))
+            same_close = both_closed and (
+                abs((other.get("closed_at") or 0) - (base.get("closed_at") or 0))
+                <= close_window_ms
+            )
+            if not (same_open or same_close):
+                continue
+            used[j] = True
+            cluster.append(other)
+        grouped.append(_merge_legs(cluster) if len(cluster) > 1 else dict(base))
+    grouped.sort(key=lambda t: t.get("opened_at") or 0)
+    return grouped
+
+
 def classify_outcome(net: float) -> str:
     """win iff net > 0; zero nets count as loss (Q3 decision, repo-wide)."""
     return "win" if net > 0 else "loss"
