@@ -4048,6 +4048,61 @@ def test_timestop_warns_when_guard_record_missing(monkeypatch, caplog) -> None:
     assert "没有 guard 记录" in caplog.text or "no guard record" in caplog.text.lower()
 
 
+def test_timestop_keeps_waiting_while_position_still_open(monkeypatch) -> None:
+    """记录丢失但仓位还在: 线程必须继续等对账收养, 不许误退.
+
+    只有交易所明确报空仓才允许退出; 读到仍有仓位时一次都不许退出, 免得把
+    "对账短暂摘走记录"误判成平仓, 让活着的仓位失去超时保护。
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    reads = {"n": 0}
+
+    def open_position(client, symbol):
+        reads["n"] += 1
+        if reads["n"] > 3:
+            raise AssertionError("仓位仍在时 time-stop 不应退出")
+        return {"amount": Decimal("2"), "entry": Decimal("100")}
+
+    monkeypatch.setattr(position_manager, "current_position", open_position)
+    with pytest.raises(AssertionError, match="不应退出"):
+        binance_usdm_testnet._timestop_loop(
+            client=FakeClient(), symbol="BTCUSDT", stop_minutes=60, poll_seconds=1.0
+        )
+    assert reads["n"] == 4, "每轮都要重新确认仓位是否还在"
+
+
+def test_timestop_exits_when_position_already_flat(monkeypatch) -> None:
+    """仓位已平 + 记录已丢: time-stop 线程必须退出, 不许永久空转.
+
+    2026-09-18 实测(BTC 22:42 止盈平仓, guard 被合法丢弃): time-stop 线程仍每
+    poll 醒来找"对账收养", 而空仓永远不会被收养 —— 线程活到进程结束, 每个平过
+    仓的品种都留一个僵尸线程(22:43 日志里同一品种连刷 5 条告警就是这么来的)。
+    """
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) > 3:
+            raise AssertionError("time-stop 线程在已平仓上永久空转")
+
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", fake_sleep)
+    reads = {"n": 0}
+
+    def flat_position(client, symbol):
+        reads["n"] += 1
+        return {"amount": Decimal("0"), "entry": None}
+
+    monkeypatch.setattr(position_manager, "current_position", flat_position)
+
+    assert binance_usdm_testnet._read_guard("BTCUSDT") is None
+    binance_usdm_testnet._timestop_loop(
+        client=FakeClient(), symbol="BTCUSDT", stop_minutes=60, poll_seconds=1.0
+    )
+    assert reads["n"] == 1, "确认已平仓只需读一次交易所"
+    assert sleeps == [1.0], "宽限一轮后确认空仓即退出, 不许继续空转"
+
+
 
 
 

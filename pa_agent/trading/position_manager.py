@@ -1008,6 +1008,17 @@ def _timestop_loop(
                     symbol,
                 )
             misses += 1
+            # 记录没了不一定是"被对账短暂摘走", 也可能是仓位已平、guard 被合法
+            # 清理(止盈/止损/手工平仓)。空仓永远等不到收养, 线程会一直空转, 所以
+            # 宽限一轮后读一次交易所, 确认空仓就退出。
+            if misses >= _TIMESTOP_ADOPT_WAIT_POLLS and _position_is_flat(
+                client, symbol
+            ):
+                logger.info(
+                    "Time-stop: %s position flat and guard record gone; exiting",
+                    symbol,
+                )
+                return
             time.sleep(poll_seconds)
             continue
         misses = 0
@@ -1473,6 +1484,23 @@ def resume_stop_watchdogs(
 #: ZEC 事故)。本看护按此轮数间隔复核存活(轮询 10s 时约 60s 一次), 兼顾 Testnet
 #: 共享 IP 限流。
 _UNMOVED_STOP_VERIFY_TICKS = 6
+
+#: guard 记录消失后, time-stop 线程等对账收养的宽限轮数。给一轮宽限是为了避开
+#: 对账重写记录的窗口; 之后的轮次会读一次交易所 —— 只有明确空仓才退出, 免得
+#: 平仓过的品种在进程里留下永久空转的僵尸线程(2026-09-18 BTC 22:42 止盈平仓)。
+_TIMESTOP_ADOPT_WAIT_POLLS = 2
+
+
+def _position_is_flat(client: BinanceUSDMTestnetClient, symbol: str) -> bool:
+    """交易所是否确认该品种已无持仓 (读取失败一律按"未确认"处理).
+
+    只服务于"记录已丢, 线程要不要留"的判定: 读不到就继续等, 绝不因为一次
+    网络抖动把活着的仓位误判成空仓而退出管理。
+    """
+    try:
+        return current_position(client, symbol).get("amount") == 0
+    except BinanceAPIError:
+        return False
 
 
 def _stop_watchdog_loop(
