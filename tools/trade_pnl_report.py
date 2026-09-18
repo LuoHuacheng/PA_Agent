@@ -262,8 +262,27 @@ def main():
         diff_abs_total += abs(diff)
         print("  %-9s income=%+9.3f trades=%+9.3f diff=%+.3f"
               % (sym, inc_sym[sym], trade_r[sym] + trade_f[sym], diff))
-    verdict = "一致" if diff_abs_total <= 1.0 else "不一致: 逐笔归因不可信"
-    print(f"  [对账判定] |diff| 合计 {diff_abs_total:.3f} USDT (阈值 1.000) -> {verdict}")
+    verdict = "一致" if diff_abs_total <= 1.0 else "不一致"
+    print(f"  [窗口口径] |diff| 合计 {diff_abs_total:.3f} USDT -> {verdict}"
+          "  (按 opened_at 归因; 跨窗持仓会落在另一侧, 非配对正确性判定)")
+    # 配对正确性判定: 两侧都不过滤时间, 成交与账本必须逐币对齐.
+    inc_all: dict = defaultdict(float)
+    for r in income:
+        if r["symbol"] in symbols and r["incomeType"] in ("REALIZED_PNL", "COMMISSION"):
+            inc_all[r["symbol"]] += float(r["income"])
+    all_r: dict = defaultdict(float)
+    all_f: dict = defaultdict(float)
+    for t in trades:
+        all_r[t["sym"]] += t["realized"]
+        all_f[t["sym"]] += t["fees"]
+    print("全量口径对账 (配对正确性判定):")
+    total_all = 0.0
+    for sym in symbols:
+        d = (all_r[sym] + all_f[sym]) - inc_all[sym]
+        total_all += abs(d)
+        print(f"  {sym:<9} income={inc_all[sym]:+9.3f} trades={all_r[sym] + all_f[sym]:+9.3f} diff={d:+.3f}")
+    print(f"  [配对判定] |diff| 合计 {total_all:.3f} USDT (阈值 1.000) -> "
+          + ("配对正确" if total_all <= 1.0 else "配对仍有缺口"))
     funding = sum(float(r["income"]) for r in income
                   if r["symbol"] in symbols and start_ms <= int(r["time"]) < end_ms
                   and r["incomeType"] == "FUNDING_FEE")

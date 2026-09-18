@@ -21,6 +21,9 @@ from pa_agent.trading.replay_pairing import (
     rebuild_trades as _rebuild_trades_from_fills,
 )
 
+#: /fapi/v1/userTrades rejects startTime..endTime spans wider than 7 days.
+USER_TRADES_MAX_SPAN_MS = 6 * 24 * 3600 * 1000
+
 TZ = timezone(timedelta(hours=8))
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ZECUSDT"]
 _KL_URL = "https://fapi.binance.com/fapi/v1/klines"
@@ -113,30 +116,38 @@ def fetch_account_data(client, symbols, start_ms, cache_dir):
                 break
             cur = min(x["orderId"] for x in batch) - 1
             time.sleep(0.08)
-        # userTrades needs startTime on the FIRST page: without it Binance returns
-        # only the most recent 1000 fills, which silently truncated history to ~7 of
-        # the requested 15 days (account commission then looked 5x smaller than the
-        # income ledger). Later pages advance by fromId (startTime is ignored then).
-        fills, cur, seen = [], None, set()
-        while True:
-            p = {"symbol": sym, "limit": 1000}
-            if cur is None:
-                p["startTime"] = start_ms
-            else:
-                p["fromId"] = cur
-            batch = client._request("GET", "/fapi/v1/userTrades", p, signed=True)
-            if not batch:
-                break
-            fresh = [f for f in batch if f.get("id") not in seen]
-            seen.update(f.get("id") for f in fresh)
-            fills += fresh
-            if len(batch) < 1000:
-                break
-            nxt = max(x["id"] for x in batch) + 1
-            if cur is not None and nxt <= cur:
-                break  # no forward progress: stop instead of spinning
-            cur = nxt
-            time.sleep(0.08)
+        # userTrades is capped at a SEVEN-DAY startTime..endTime span, and without
+        # startTime it returns only the most recent page. Requesting 15 days in one
+        # call therefore silently returned ~7 days (account commission looked 5x
+        # smaller than the income ledger). Walk the range in <=7-day chunks, paging
+        # each chunk forward by fromId.
+        fills, seen = [], set()
+        chunk_start = start_ms
+        now_ms = int(time.time() * 1000)
+        while chunk_start < now_ms:
+            chunk_end = min(chunk_start + USER_TRADES_MAX_SPAN_MS, now_ms)
+            cur = None
+            while True:
+                p = {"symbol": sym, "limit": 1000}
+                if cur is None:
+                    p["startTime"] = chunk_start
+                    p["endTime"] = chunk_end
+                else:
+                    p["fromId"] = cur
+                batch = client._request("GET", "/fapi/v1/userTrades", p, signed=True)
+                if not batch:
+                    break
+                fresh = [f for f in batch if f.get("id") not in seen]
+                seen.update(f.get("id") for f in fresh)
+                fills += fresh
+                if len(batch) < 1000:
+                    break
+                nxt = max(x["id"] for x in batch) + 1
+                if cur is not None and nxt <= cur:
+                    break  # no forward progress: stop instead of spinning
+                cur = nxt
+                time.sleep(0.08)
+            chunk_start = chunk_end + 1
         oa[sym], ut[sym] = orders, fills
     json.dump(oa, open(cache_dir / "orders.json", "w"))
     json.dump(ut, open(cache_dir / "user_trades.json", "w"))
@@ -191,6 +202,11 @@ def rebuild_trades(cache_dir, symbols, dec_idx, pending_rows, *, by_position: bo
                "opened_at": t["opened_at"], "closed_at": t["closed_at"],
                "close_px": t["close_px"], "conf": None, "stop": None,
                "target": None, "manual": t["cid"] == "manual"}
+        # Position pairing carries the per-position exits; the legacy LIFO pairing
+        # does not. Dropping them here silently emptied partial-TP analysis.
+        for extra in ("exits", "fills", "legs"):
+            if extra in t:
+                rec[extra] = t[extra]
         if inner is not None:
             tc = inner.get("trade_confidence")
             try:

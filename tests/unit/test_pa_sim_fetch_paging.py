@@ -41,6 +41,8 @@ def test_usertrades_paging_starts_with_start_time_then_advances_by_from_id() -> 
         fetch_account_data(client, ['ADAUSDT'], 500, Path(tmp))
         trades = json.loads((Path(tmp) / 'user_trades.json').read_text(encoding='utf-8'))
     assert len(trades['ADAUSDT']) == 1002          # both pages captured
-    assert client.calls[0].get('startTime') == 500  # history must be anchored
-    assert 'fromId' not in client.calls[0]
+    first = client.calls[0]
+    assert first.get('startTime') == 500            # history must be anchored
+    assert 'fromId' not in first
+    assert first['endTime'] - first['startTime'] <= 6 * 24 * 3600 * 1000
     assert client.calls[1].get('fromId') == 1001    # advance past the max id
