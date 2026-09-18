@@ -1,8 +1,6 @@
 """观察窗口判定规则(§2.13)."""
 from __future__ import annotations
 
-import pytest
-
 from scripts.window_progress import count_opened, verdict
 
 
