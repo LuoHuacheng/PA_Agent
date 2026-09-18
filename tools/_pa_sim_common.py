@@ -5,6 +5,8 @@ import csv
 import json
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -26,7 +28,12 @@ USER_TRADES_MAX_SPAN_MS = 6 * 24 * 3600 * 1000
 
 TZ = timezone(timedelta(hours=8))
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ZECUSDT"]
-_KL_URL = "https://fapi.binance.com/fapi/v1/klines"
+#: Fills live on testnet, so excursions must be measured with testnet candles:
+#: mainnet prices differ by ~0.02%, the same order as the stop distances under
+#: investigation (a mainnet candle can therefore fake a stop-out that never
+#: happened). Mainnet REST stays available via the *base* argument.
+KL_TESTNET_BASE = "https://testnet.binancefuture.com"
+KL_MAINNET_BASE = "https://fapi.binance.com"
 
 
 def fmt_ms(ms: int) -> str:
@@ -50,6 +57,71 @@ def window_bounds(days: int, *, hours: int | None = None):
     start = today - timedelta(days=days - 1)
     end = today + timedelta(days=1)
     return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+
+
+def parse_kline(row) -> dict:
+    """One REST kline row -> dict with ms/ohlc/volume."""
+    return {
+        "time": int(row[0]),
+        "open": float(row[1]),
+        "high": float(row[2]),
+        "low": float(row[3]),
+        "close": float(row[4]),
+        "volume": float(row[5]),
+    }
+
+
+def fetch_klines(
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+    *,
+    interval: str = "1m",
+    base: str = KL_TESTNET_BASE,
+    cache_dir=None,
+) -> list[dict]:
+    """Klines covering [start_ms, end_ms], oldest first.
+
+    Pages forward with startTime until a batch runs past *end_ms*. Pass
+    *cache_dir* to memoise the exact request on disk: the same window is
+    re-read by every analysis pass.
+    """
+    cache_fp = None
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_fp = cache_dir / f"{symbol}_{interval}_{start_ms}_{end_ms}.json"
+        if cache_fp.exists():
+            return json.loads(cache_fp.read_text(encoding="utf-8"))
+    out, cursor = [], int(start_ms)
+    while cursor < end_ms:
+        url = (
+            f"{base}/fapi/v1/klines?symbol={symbol}&interval={interval}"
+            f"&startTime={cursor}&endTime={end_ms}&limit=1500"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "pa-agent/1.0"})
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    batch = json.loads(resp.read())
+                break
+            except urllib.error.URLError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
+        if not batch:
+            break
+        out += [parse_kline(r) for r in batch]
+        nxt = int(batch[-1][0]) + 1
+        if nxt <= cursor:
+            break  # no forward progress: stop instead of spinning
+        cursor = nxt
+        if len(batch) < 1500:
+            break
+        time.sleep(0.05)
+    if cache_fp is not None:
+        cache_fp.write_text(json.dumps(out), encoding="utf-8")
+    return out
 
 
 def load_decision_index(symbols):
