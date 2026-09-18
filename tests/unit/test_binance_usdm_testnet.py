@@ -3952,7 +3952,12 @@ def test_reconcile_leaves_managed_position_untouched(monkeypatch) -> None:
     )
     client = OrphanPositionClient(amount="0.5", entry="100", mark="110")
     result = binance_usdm_testnet.reconcile_positions(_settings(), client=client)
-    assert result == {"checked": 1, "adopted": 0, "dropped": 0}
+    assert result == {
+        "checked": 1,
+        "adopted": 0,
+        "dropped": 0,
+        "orphan_limit_entries": 0,
+    }
     record = binance_usdm_testnet._read_guard("BTCUSDT")
     assert record is not None and record["stop_algo_id"] == "pa-sl-live"
     assert _protections(client) == []
@@ -4043,4 +4048,205 @@ def test_timestop_warns_when_guard_record_missing(monkeypatch, caplog) -> None:
     assert "没有 guard 记录" in caplog.text or "no guard record" in caplog.text.lower()
 
 
+
+
+
+# ── P1a: 交易所挂单 ↔ 本地 pending 对账 (2026-09-18 ETH 孤儿挂单事故) ──────────
+# 事故: pytest 覆盖 state 抹掉 pending 记录后重启, resume_pending_limit_watchers
+# 没记录可恢复 —— ETHUSDT 2488 的 GTC 限价单在交易所继续挂着 3 小时无人看管,
+# 一旦成交就是完全无保护的仓位。持仓对账看不见"只是挂着、还没成交"的单子,
+# 所以必须有一套**挂单方向**的对账。
+
+class OpenOrdersClient(FakeClient):
+    """可配置 openOrders 的对账客户端。"""
+
+    def __init__(
+        self,
+        *,
+        open_orders: list[dict] | None = None,
+        status: str = "NEW",
+        statuses: list[str] | None = None,
+        amount: str = "0",
+        entry: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._open_orders = list(open_orders or [])
+        self._status = status
+        self._statuses = list(statuses or [])
+        self._amount = Decimal(amount)
+        self._entry = Decimal(entry) if entry is not None else None
+
+    def open_orders(self, symbol: str) -> list[dict]:
+        self.calls.append(("open_orders", symbol))
+        return list(self._open_orders)
+
+    def open_algo_orders(self, symbol: str) -> list[dict]:
+        self.calls.append(("open_algo_orders", symbol))
+        return []
+
+    def order_status(self, *, symbol: str, client_id: str) -> str:
+        self.calls.append(("order_status", client_id))
+        if self._statuses:
+            return self._statuses.pop(0)
+        return self._status
+
+    def position_info(self, symbol: str) -> dict:
+        self.calls.append(("position_info", symbol))
+        return {"amount": self._amount, "entry": self._entry}
+
+
+def _orphan_limit_entry(
+    client_id: str = "pa-entry-feedfacefeedfacefeedfacef",
+    *,
+    side: str = "BUY",
+    price: str = "2488",
+    qty: str = "0.05",
+) -> dict:
+    return {
+        "orderId": 28589505312,
+        "clientOrderId": client_id,
+        "symbol": "ETHUSDT",
+        "side": side,
+        "type": "LIMIT",
+        "price": price,
+        "origQty": qty,
+        "timeInForce": "GTC",
+        "status": "NEW",
+    }
+
+
+def test_reconcile_orphan_limit_entry_rebuilds_pending_and_rearms_watcher(
+    tmp_path, monkeypatch
+) -> None:
+    """交易所有挂单、本地无 pending 记录: 按交易记录里的计划重建记录并重新看护。"""
+    captured = _capture_threads(monkeypatch)
+    records = tmp_path / "trade_records"
+    _write_plan_csv(
+        records,
+        "ETHUSDT",
+        [["2026-09-18 18:04:10", "ETHUSDT", "做多", "限价单",
+          "2488.0", "2440.0", "2600.0", "2680.0"]],
+    )
+    monkeypatch.setattr(position_manager, "_TRADE_RECORDS_DIR", records)
+    settings = _reconcile_settings(["ETHUSDT"])
+    settings.binance_usdm_testnet.limit_fill_timeout_minutes = 10
+    client = OpenOrdersClient(open_orders=[_orphan_limit_entry()])
+
+    result = binance_usdm_testnet.reconcile_positions(settings, client=client)
+
+    assert result["orphan_limit_entries"] == 1, result
+    record = binance_usdm_testnet._STATE_STORE.pending_get("ETHUSDT")
+    assert record is not None, "孤儿挂单必须重建 pending 记录"
+    assert record["client_id"] == "pa-entry-feedfacefeedfacefeedfacef"
+    assert record["side"] == "BUY"
+    assert Decimal(record["quantity"]) == Decimal("0.05")
+    assert Decimal(record["stop"]) == Decimal("2440")
+    assert Decimal(record["target"]) == Decimal("2600")
+    assert Decimal(record["target2"]) == Decimal("2680")
+    resumed = [kw for target, kw in captured if getattr(target, "__name__", "") == "_watch_limit_entry"]
+    assert len(resumed) == 1, [getattr(t, "__name__", t) for t, _ in captured]
+    assert resumed[0]["client_id"] == "pa-entry-feedfacefeedfacefeedfacef"
+
+
+def test_reconcile_orphan_limit_entry_without_plan_is_canceled_not_kept(
+    tmp_path, monkeypatch
+) -> None:
+    """挂单在交易所、但找不到对应计划 —— 不能瞎猜止损, 必须撤单并留审计。"""
+    _capture_threads(monkeypatch)
+    monkeypatch.setattr(position_manager, "_TRADE_RECORDS_DIR", tmp_path / "missing")
+    client = OpenOrdersClient(open_orders=[_orphan_limit_entry()])
+    monkeypatch.setattr(cancel_log, "CANCEL_LOG_DIR", tmp_path / "cancels")
+
+    result = binance_usdm_testnet.reconcile_positions(
+        _reconcile_settings(["ETHUSDT"]), client=client
+    )
+
+    assert result["orphan_limit_entries"] == 1, result
+    assert ("cancel_limit", "pa-entry-feedfacefeedfacefeedfacef") in client.calls
+    assert binance_usdm_testnet._STATE_STORE.pending_get("ETHUSDT") is None
+    rows = [
+        json.loads(line)
+        for path in (tmp_path / "cancels").glob("cancels-*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [row["reason"] for row in rows] == ["stale_entry_removed"], rows
+
+
+def test_reconcile_leaves_watched_limit_entry_alone(tmp_path, monkeypatch) -> None:
+    """已有 pending 记录(= watcher 在等成交)的挂单不许重复对账。"""
+    captured = _capture_threads(monkeypatch)
+    monkeypatch.setattr(position_manager, "_TRADE_RECORDS_DIR", tmp_path / "missing")
+    client_id = "pa-entry-feedfacefeedfacefeedfacef"
+    binance_usdm_testnet._STATE_STORE.pending_put(
+        "ETHUSDT",
+        {
+            "client_id": client_id,
+            "signal_id": "sig-watched",
+            "side": "BUY",
+            "quantity": "0.05",
+            "stop": "2440.0",
+            "target": "2600.0",
+            "entry": "2488",
+            "placed_at": time.time(),
+        },
+    )
+    client = OpenOrdersClient(open_orders=[_orphan_limit_entry()])
+
+    result = binance_usdm_testnet.reconcile_positions(
+        _reconcile_settings(["ETHUSDT"]), client=client
+    )
+
+    assert result["orphan_limit_entries"] == 0, result
+    assert captured == []
+    assert ("cancel_limit", client_id) not in client.calls
+
+
+def test_reconcile_skips_filled_orphan_limit_entry_and_adopts_position(
+    tmp_path, monkeypatch
+) -> None:
+    """挂单其实已成交(openOrders 仍返回该单): 走持仓收养, 而不是当成挂单重挂。"""
+    _capture_threads(monkeypatch)
+    monkeypatch.setattr(position_manager, "_TRADE_RECORDS_DIR", tmp_path / "missing")
+    client = OpenOrdersClient(
+        open_orders=[_orphan_limit_entry()],
+        status="FILLED",
+        amount="0.05",
+        entry="2488",
+    )
+    result = binance_usdm_testnet.reconcile_positions(
+        _reconcile_settings(["ETHUSDT"]), client=client
+    )
+    assert result["orphan_limit_entries"] == 0, result
+    assert ("cancel_limit", "pa-entry-feedfacefeedfacefeedfacef") not in client.calls
+
+
+
+def test_reconcile_no_stop_uses_plan_stop0_not_breakeven(tmp_path, monkeypatch) -> None:
+    """补挂缺失止损必须回到计划里的 stop0, 不能默认保本价把风险口径改小。
+
+    2026-09-18 BTC 现场: 18:02 计划 入场=78000 止损=77595; 重启丢了 watcher,
+    对账补挂时却按 entry(保本)挂出 77848.4 —— 止损距离 0.52% 被腰斩到 0.19%,
+    单笔风险 3.97U → 1.49U, 一有噪音就被扫出场。
+    """
+    captured = _capture_threads(monkeypatch)
+    records = tmp_path / "trade_records"
+    _write_plan_csv(
+        records,
+        "BTCUSDT",
+        [["2026-09-18 18:04:11", "BTCUSDT", "做多", "限价单",
+          "78000.0", "77595.0", "78741.0", "80721.6"]],
+    )
+    monkeypatch.setattr(position_manager, "_TRADE_RECORDS_DIR", records)
+    # mark 78035: 计划止损 77595 仍可挂(未触发), 保本 78000 会被 -2021 拒绝。
+    client = OrphanPositionClient(amount="0.0098", entry="78000", mark="78035")
+    binance_usdm_testnet.reconcile_positions(
+        _reconcile_settings(["BTCUSDT"]), client=client
+    )
+    stops = _protections(client, "STOP_MARKET")
+    assert [s["stop_price"] for s in stops] == [Decimal("77595")], stops
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None
+    assert Decimal(record["stop0"]) == Decimal("77595")
+    assert captured
 

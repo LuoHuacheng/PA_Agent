@@ -171,12 +171,14 @@ def _rehang_protective_stop(
     stop0: Decimal,
     stage_tp2: bool,
     floor_pct: float,
-) -> tuple[bool, str, str]:
+) -> tuple[bool, str, str, Decimal | None]:
     """Place the best placeable replacement STOP for a missing protective stop.
 
     Tries every candidate from _rehang_stop_candidates in order; business
     rejections (-1111 precision / -2021 immediate) move to the next candidate,
-    transient errors raise. Returns (ok, new_stop_algo_id, note).
+    transient errors raise. Returns (ok, new_stop_algo_id, note, placed_price) —
+    第四个元素是**真正挂出去**的触发价, 调用方必须用它回填记录, 否则记录里的
+    stop0 会与实际止损不一致(2026-09-18 BTC 风险口径被悄悄改小的事故)。
     """
     exit_side = "SELL" if side == "BUY" else "BUY"
     mark = current_mark_price(client, symbol)
@@ -205,11 +207,17 @@ def _rehang_protective_stop(
                 )
                 continue
             raise
-        return True, candidate_id, f"re-hung protective stop at {_decimal_text(price)}"
+        return (
+            True,
+            candidate_id,
+            f"re-hung protective stop at {_decimal_text(price)}",
+            price,
+        )
     return (
         False,
         "",
         "no placeable re-hang candidate (mark=" + _decimal_text(mark) + ")",
+        None,
     )
 
 
@@ -244,7 +252,7 @@ def _ensure_protective_stop(
     if stop0 is None:
         return "error", current_stop, "guard record missing stop0"
     try:
-        ok, new_stop, note = _rehang_protective_stop(
+        ok, new_stop, note, _placed_price = _rehang_protective_stop(
             client,
             symbol=symbol,
             side=side,
@@ -1868,12 +1876,16 @@ def _adopt_position(
             f"reconcile {symbol}: neither position entry nor resting stop price"
         )
     if not stop_algo_id:
-        ok, placed_id, note = _rehang_protective_stop(
+        # 优先用计划里的原始止损位: 拿 entry(保本)补挂会把风险口径悄悄改小
+        # (2026-09-18 BTC: 计划 77595 被挂成 78000, 止损距离 0.52%→0.19%)。
+        # 计划缺失时才退回保本价, 并由 candidates 保证至少留在 min_stop_distance_pct 之外。
+        planned_stop = _positive_decimal((plan or {}).get("stop"))
+        ok, placed_id, note, placed_price = _rehang_protective_stop(
             client,
             symbol=symbol,
             side=side,
             entry=entry_price,
-            stop0=entry_price,
+            stop0=planned_stop or entry_price,
             stage_tp2=False,
             floor_pct=float(config.min_stop_distance_pct or 0.0),
         )
@@ -1882,7 +1894,12 @@ def _adopt_position(
                 f"reconcile {symbol}: cannot place protective stop ({note})"
             )
         stop_algo_id = placed_id
-        stop_price = entry_price
+        stop_price = placed_price or planned_stop or entry_price
+        if planned_stop is not None and stop_price != planned_stop:
+            logger.warning(
+                "Reconcile: %s planned stop %s unplaceable; %s",
+                symbol, _decimal_text(planned_stop), note,
+            )
         logger.warning("Reconcile: %s had no resting stop; %s", symbol, note)
     record: dict[str, Any] = {
         "stop_algo_id": stop_algo_id,
@@ -1969,6 +1986,21 @@ def _adopt_position(
     return record
 
 
+def _resolve_orphan_limit_entry(
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    config: BinanceUSDMTestnetSettings,
+) -> bool:
+    """挂单方向对账的转发口 (实现见 binance_usdm_testnet).
+
+    binance_usdm_testnet 通过 PEP 562 暴露本模块的名字, 模块级互相导入会成环,
+    所以这里延迟导入。
+    """
+    from pa_agent.trading.binance_usdm_testnet import _resolve_orphan_limit_entries
+
+    return _resolve_orphan_limit_entries(client, symbol, config)
+
+
 def reconcile_positions(
     settings: Settings | None = None,
     *,
@@ -1984,7 +2016,7 @@ def reconcile_positions(
     """
     configure_binance_environment(settings)
     config = binance_env.active_cfg(settings)
-    summary = {"checked": 0, "adopted": 0, "dropped": 0}
+    summary = {"checked": 0, "adopted": 0, "dropped": 0, "orphan_limit_entries": 0}
     if not config.enabled or config.dry_run or config.emergency_stop:
         return summary
     watch: list[str] = []
@@ -2021,6 +2053,10 @@ def reconcile_positions(
                     "Reconcile: dropped stale guard record for %s (position flat)",
                     symbol,
                 )
+            # 仓是平的, 但交易所可能挂着一张本地已无记录的限价单 —— 2026-09-18
+            # ETH 事故: 没人看管的挂单成交即裸仓, 必须先接管或撤掉。
+            if _resolve_orphan_limit_entry(active, symbol, config):
+                summary["orphan_limit_entries"] += 1
             continue
         side = _position_side_of(Decimal(amount))
         if record is not None:

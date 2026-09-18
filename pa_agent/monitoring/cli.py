@@ -423,8 +423,12 @@ def run_monitor() -> int:
             time.sleep(_RECONCILE_INTERVAL_SECONDS)
             try:
                 result = reconcile_positions(settings)
-                if result.get("adopted") or result.get("dropped"):
-                    logger.warning("定期持仓对账: %s", result)
+                if (
+                    result.get("adopted")
+                    or result.get("dropped")
+                    or result.get("orphan_limit_entries")
+                ):
+                    logger.warning("定期持仓/挂单对账: %s", result)
             except Exception:
                 logger.exception("定期持仓对账失败")
 
@@ -432,8 +436,12 @@ def run_monitor() -> int:
         from pa_agent.trading.position_manager import reconcile_positions
 
         startup_summary = reconcile_positions(settings)
-        if startup_summary.get("adopted") or startup_summary.get("dropped"):
-            logger.warning("启动持仓对账: %s", startup_summary)
+        if (
+            startup_summary.get("adopted")
+            or startup_summary.get("dropped")
+            or startup_summary.get("orphan_limit_entries")
+        ):
+            logger.warning("启动持仓/挂单对账: %s", startup_summary)
         threading.Thread(
             target=_reconcile_loop, daemon=True, name="position-reconcile"
         ).start()

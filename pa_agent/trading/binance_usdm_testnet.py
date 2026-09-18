@@ -762,6 +762,20 @@ class BinanceUSDMTestnetClient:
         )
         return _dict_response(result)
 
+    def open_orders(self, symbol: str) -> list[Any]:
+        """List resting (not yet filled/canceled) orders for *symbol*.
+
+        2026-09-18 ETH 事故: 只对账持仓会漏掉"还挂着、尚未成交"的入场单 ——
+        本地 pending 记录一旦丢失, 这张单就永远无人看管, 成交即裸仓。
+        """
+        payload = self._request(
+            "GET",
+            "/fapi/v1/openOrders",
+            {"symbol": symbol},
+            signed=True,
+        )
+        return payload if isinstance(payload, list) else []
+
     def order_status(self, *, symbol: str, client_id: str) -> str:
         """Return the exchange status of an order placed with ``client_id``."""
         result = self._request(
@@ -2146,6 +2160,167 @@ def _cancel_and_settle(
         conf=conf,
         target2=target2,
     )
+
+
+def _resting_entry_orders(
+    client: BinanceUSDMTestnetClient, symbol: str
+) -> list[dict[str, Any]]:
+    """Resting LIMIT entry orders for *symbol* (empty when unqueryable).
+
+    只认 GTC 限价入场单: 保护腿走 algo 接口, 市价单不会挂着, 都排除在外。
+    """
+    list_orders = getattr(client, "open_orders", None)
+    if not callable(list_orders):
+        return []
+    try:
+        orders = list_orders(symbol)
+    except BinanceAPIError as exc:
+        logger.warning("Reconcile: cannot list open orders for %s: %s", symbol, exc)
+        return []
+    if not isinstance(orders, list):
+        return []
+    return [
+        order
+        for order in orders
+        if isinstance(order, dict)
+        and str(order.get("type") or "").strip().upper() == "LIMIT"
+    ]
+
+
+def _entry_placed_at(order: dict[str, Any]) -> float:
+    """Placement timestamp of an exchange order (falls back to now)."""
+    try:
+        stamp = float(order.get("time") or 0.0) / 1000.0
+    except (TypeError, ValueError):
+        stamp = 0.0
+    return stamp if stamp > 0.0 else time.time()
+
+
+def _arm_limit_fill_watcher(
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    record: dict[str, Any],
+    config: BinanceUSDMTestnetSettings,
+) -> threading.Thread:
+    """Start the fill watcher for one pending record (window from placed_at)."""
+    timeout_seconds = float(config.limit_fill_timeout_minutes * 60)
+    placed_at = record.get("placed_at")
+    if isinstance(placed_at, (int, float)):
+        timeout_seconds = max(0.0, timeout_seconds - max(0.0, time.time() - placed_at))
+    watcher = threading.Thread(
+        target=_watch_limit_entry,
+        kwargs={
+            "client": client,
+            "symbol": symbol,
+            "client_id": str(record.get("client_id") or ""),
+            "side": str(record.get("side") or ""),
+            "stop": _positive_decimal(record.get("stop")),
+            "target": _positive_decimal(record.get("target")),
+            "target2": _positive_decimal(record.get("target2")),
+            "quantity": _positive_decimal(record.get("quantity")),
+            "signal_id": str(record.get("signal_id") or ""),
+            "conf": _parse_win_rate(record.get("conf")),
+            "config": config,
+            "timeout_seconds": timeout_seconds,
+            "poll_interval": config.limit_poll_interval_seconds,
+        },
+        daemon=True,
+    )
+    watcher.start()
+    return watcher
+
+
+def _resolve_orphan_limit_entries(
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    config: BinanceUSDMTestnetSettings | None = None,
+) -> bool:
+    """Take over (or dispose of) a resting entry the local state does not own.
+
+    2026-09-18 ETH 事故: pytest 覆盖 state 抹掉 pending 记录后重启,
+    resume_pending_limit_watchers 无记录可恢复, 而 2488 的 GTC 限价单在交易所
+    又躺了 3 小时 —— 成交即完全无保护的仓位。持仓对账只看持仓, 看不见"还没成交
+    的单", 所以这里补上挂单方向的对账:
+
+    - 能从交易记录按同价同向找到计划 => 重建 pending 记录 + 重新武装 watcher;
+    - 找不到计划 => 撤单并写 stale_entry_removed 审计(不许凭空猜止损)。
+
+    返回是否处理过至少一张孤儿挂单。
+    """
+    if config is not None and config.limit_fill_timeout_minutes <= 0:
+        return False
+    entries = _resting_entry_orders(client, symbol)
+    if not entries:
+        return False
+    existing = _STATE_STORE.pending_get(symbol)
+    owned_id = str(existing.get("client_id") or "") if isinstance(existing, dict) else ""
+    handled = False
+    for entry in entries:
+        client_id = str(entry.get("clientOrderId") or "").strip()
+        if not client_id or client_id == owned_id:
+            continue  # 已有记录 = watcher 在等成交, 不抢管
+        status = str(entry.get("status") or "").strip().upper()
+        if status not in ("NEW", "PARTIALLY_FILLED"):
+            continue  # 已成交/已撤: 成交由持仓收养兜底
+        side = str(entry.get("side") or "").strip().upper()
+        price = _positive_decimal(entry.get("price"))
+        quantity = _positive_decimal(entry.get("origQty"))
+        if side not in ("BUY", "SELL") or price is None or quantity is None or quantity <= 0:
+            logger.error(
+                "Reconcile: unusable resting entry for %s (id=%s side=%s price=%s qty=%s)",
+                symbol, client_id, side, price, quantity,
+            )
+            continue
+        handled = True
+        # 循环依赖: position_manager 单向依赖本模块, 计划回溯只能延迟导入。
+        from pa_agent.trading.position_manager import _recover_plan
+
+        plan = _recover_plan(symbol, side, price)
+        stop = _positive_decimal((plan or {}).get("stop"))
+        target = _positive_decimal((plan or {}).get("target"))
+        if stop is None or target is None:
+            try:
+                client.cancel_order(symbol=symbol, client_id=client_id)
+            except BinanceAPIError as exc:
+                _record_cancel_event(
+                    symbol, client_id, cancel_log.REASON_CANCEL_FAILED,
+                    detail=str(exc), entry_price=price,
+                )
+                logger.error(
+                    "Reconcile: cannot cancel orphan limit entry for %s: %s", symbol, exc
+                )
+                continue
+            _record_cancel_event(
+                symbol, client_id, cancel_log.REASON_STALE_ENTRY_REMOVED,
+                detail="orphan resting entry without a recoverable plan",
+                entry_price=price,
+            )
+            logger.warning(
+                "Reconcile: canceled orphan limit entry for %s (id=%s, no plan to protect it)",
+                symbol, client_id,
+            )
+            continue
+        target2 = _positive_decimal((plan or {}).get("target2"))
+        record: dict[str, Any] = {
+            "client_id": client_id,
+            "signal_id": str(entry.get("origClientOrderId") or ""),
+            "side": side,
+            "quantity": _decimal_text(quantity),
+            "stop": _decimal_text(stop),
+            "target": _decimal_text(target),
+            "target2": "" if target2 is None else _decimal_text(target2),
+            "conf": "",
+            "entry": _decimal_text(price),
+            "placed_at": _entry_placed_at(entry),
+        }
+        _persist_pending(symbol, record)
+        if config is not None:
+            _arm_limit_fill_watcher(client, symbol, record, config)
+        logger.warning(
+            "Reconcile: adopted orphan limit entry for %s (id=%s entry=%s stop=%s target=%s)",
+            symbol, client_id, _decimal_text(price), _decimal_text(stop), _decimal_text(target),
+        )
+    return handled
 
 
 def _watch_limit_entry(
