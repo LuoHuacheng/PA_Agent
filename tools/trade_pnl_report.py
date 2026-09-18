@@ -108,6 +108,8 @@ def main():
                     help="compare each partial-TP position against a single-exit exit")
     ap.add_argument("--positions", action="store_true",
                     help="pair fills per position (reconciles with the income ledger)")
+    ap.add_argument("--by-close", action="store_true",
+                    help="attribute trades by close time (same basis as the income ledger)")
     ap.add_argument("--out", default="", help="optional json output path")
     ap.add_argument("--conf-buckets-out", default="",
                     help="write conf 5-pt bucket win/loss counts for the closed trades")
@@ -132,7 +134,16 @@ def main():
         income = load_json(cache, "income.json")
         orders = load_json(cache, "orders.json")
 
-    in_win = [t for t in trades if start_ms <= t["opened_at"] < end_ms]
+    if args.by_close:
+        # Same basis as the income ledger: a position belongs to the period it was
+        # closed in, otherwise cross-window positions land on the wrong side and the
+        # per-symbol split cannot reconcile.
+        in_win = [
+            t for t in trades
+            if start_ms <= (t.get("closed_at") or t["opened_at"]) < end_ms
+        ]
+    else:
+        in_win = [t for t in trades if start_ms <= t["opened_at"] < end_ms]
     raw_win = list(in_win)
     if args.aggregate:
         raw_n = len(in_win)
