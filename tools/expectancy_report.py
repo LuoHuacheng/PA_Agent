@@ -20,10 +20,14 @@ from tools.shadow_replay import bootstrap_mean_ci
 MIN_N = {"R2": 30, "R3": 100}
 MAX_DD = {"R2": 0.25, "R3": 0.30}
 
-#: T6 灰度上线时刻(2026-09-18 15:11 UTC+8), 见 docs/闸门裁定表.md 第 5 节。
-#: R2/R3 的判定必须只用此时刻之后平仓的样本——否则会把改动前的亏损样本混进来
-#: (计划第 0 节禁令 2 的同源问题: 不能用旧样本报告新配方的收益)。
-GATE_START = "2026-09-18T15:11:00+08:00"
+#: **最近一次配置变更**时刻, R2/R3 判定只统计它之后的样本。
+#:
+#: 变更史(每次改线上的闸门/参数都必须更新这里, 否则会把两种配置的样本混在一起 ——
+#: 计划第 0 节禁令 2 的同源问题: 不能用旧配置的样本报告新配置的收益):
+#:   1. 2026-09-18 15:11 UTC+8  灰度上线: block_short_entry=true +
+#:      block_cycle_allowlist=[broad_channel,normal_channel,trading_range]  (docs/闸门裁定表.md §7)
+#:   2. 2026-09-18 16:53 UTC+8  limit_fill_timeout_minutes: 30 -> 120        (docs/闸门裁定表.md §7.2)
+GATE_START = "2026-09-18T16:53:01+08:00"
 
 
 def parse_cutoff(text):
@@ -128,7 +132,7 @@ def main(argv=None):
     ap.add_argument("path", nargs="?", default="trade_records/outcomes.csv")
     ap.add_argument("--since", default="", help="只统计该时刻(ISO8601)之后平仓的样本")
     ap.add_argument("--gate-since", action="store_true",
-                    help=f"只统计 T6 灰度上线({GATE_START})之后的样本")
+                    help=f"只统计最近一次配置变更({GATE_START})之后的样本")
     ap.add_argument("--capital", type=float, default=None,
                     help="参照本金(USDT); 给了就额外输出账户口径回撤")
     ap.add_argument("--account-dd-gate", action="store_true",
