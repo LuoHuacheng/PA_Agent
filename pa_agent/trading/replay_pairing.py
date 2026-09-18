@@ -232,6 +232,12 @@ def rebuild_positions(
                 "qty": close_qty,
                 "realized": rpnl * share,
                 "fees": comm * share,
+                # The closing order's clientOrderId says *what* closed the
+                # position: pa-sl/pa-tp are the protective orders, pa-rollback
+                # is an active exit, and anything else was placed outside this
+                # process. Empty when the order predates the exchange's
+                # order-history window (fills still carry the orderId).
+                "cid": cid,
             }
             pos["exits"].append(exit_row)
             pos["realized"] += exit_row["realized"]

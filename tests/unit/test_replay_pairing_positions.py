@@ -49,6 +49,28 @@ def test_partial_closes_become_one_position_with_exits() -> None:
     assert abs(row['fees'] + 0.20) < 1e-9
 
 
+def test_exit_rows_carry_the_closing_order_id() -> None:
+    """The closing clientOrderId is what tells stops from active closes apart."""
+    orders = {SYM: [_ok(1, 'pa-entry-aaa'), _ok(2, 'pa-sl-bbb'), _ok(3, 'x-cvGenerated')]}
+    fills = {
+        SYM: [
+            _fill(1, 1, 'BUY', 2, 100, 1_000, 0.0, 0.0),
+            _fill(2, 2, 'SELL', 1, 98, 2_000, -2.0, 0.0),
+            _fill(3, 3, 'SELL', 1, 97, 3_000, -3.0, 0.0),
+        ]
+    }
+    exits = rebuild_positions(orders, fills, [SYM])[0]['exits']
+    assert [e['cid'] for e in exits] == ['pa-sl-bbb', 'x-cvGenerated']
+
+
+def test_exit_rows_leave_the_cid_empty_when_the_order_is_unavailable() -> None:
+    # a stop order the exchange no longer lists in order history
+    orders = {SYM: [_ok(1, 'pa-entry-aaa')]}
+    fills = {SYM: [_fill(1, 1, 'BUY', 1, 100, 1_000), _fill(2, 99, 'SELL', 1, 98, 2_000)]}
+    exits = rebuild_positions(orders, fills, [SYM])[0]['exits']
+    assert exits[0]['cid'] == ''
+
+
 def test_same_side_add_on_sizes_into_the_entry() -> None:
     orders = {SYM: [_ok(1, 'pa-entry-bbb')]}
     fills = {
