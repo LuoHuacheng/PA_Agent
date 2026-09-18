@@ -27,7 +27,8 @@ MAX_DD = {"R2": 0.25, "R3": 0.30}
 #:   1. 2026-09-18 15:11 UTC+8  灰度上线: block_short_entry=true +
 #:      block_cycle_allowlist=[broad_channel,normal_channel,trading_range]  (docs/闸门裁定表.md §7)
 #:   2. 2026-09-18 16:53 UTC+8  limit_fill_timeout_minutes: 30 -> 120        (docs/闸门裁定表.md §7.2)
-GATE_START = "2026-09-18T16:53:01+08:00"
+#:   3. 2026-09-18 17:26 UTC+8  monitoring.poll_interval_minutes: 120 -> 30  (docs/闸门裁定表.md §7.3)
+GATE_START = "2026-09-18T17:25:55+08:00"
 
 
 def parse_cutoff(text):
