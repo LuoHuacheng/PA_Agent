@@ -17,6 +17,11 @@ if str(HERE) not in sys.path:
 
 from pa_agent.config.settings import load_settings
 from pa_agent.trading.binance_usdm_testnet import BinanceUSDMTestnetClient
+from pa_agent.trading.order_ledger import (  # noqa: E402 - imports follow the sys.path fix
+    attribute_exit,
+    exit_placements,
+    merge_into_orders,
+)
 from pa_agent.trading.replay_pairing import (
     cid_variants,
     rebuild_positions,
@@ -249,16 +254,25 @@ def _match_decision(t, dec_idx, pending_rows, order_time):
     return inner
 
 
-def rebuild_trades(cache_dir, symbols, dec_idx, pending_rows, *, by_position: bool = False):
+def rebuild_trades(
+    cache_dir, symbols, dec_idx, pending_rows, *, by_position: bool = False, ledger_dir=None
+):
     """LIFO pairing; one trade per pa-entry signal (open trades included).
 
     The LIFO rebuild itself lives in pa_agent.trading.replay_pairing
     (pure/dict based); this wrapper loads the cached account payloads, keeps
     the order_time index used by the nearest-time decision fallback, and
     reproduces the legacy per-trade decision attachment.
+
+    Historic placements are recovered from the local order ledger before
+    pairing: the exchange listing is bounded (~7 days measured) and consumed
+    conditional orders have no history endpoint, so without the ledger most
+    old exits cannot be attributed to the order that closed them.
     """
     orders_all = json.load(open(cache_dir / "orders.json", encoding="utf-8"))
     trades_all = json.load(open(cache_dir / "user_trades.json", encoding="utf-8"))
+    merge_into_orders(orders_all, ledger_dir=ledger_dir)
+    placements = exit_placements(ledger_dir=ledger_dir)
     order_time = {}
     for s, lst in orders_all.items():
         for o in lst:
@@ -290,6 +304,11 @@ def rebuild_trades(cache_dir, symbols, dec_idx, pending_rows, *, by_position: bo
                 rec["target"] = float(inner.get("take_profit_price"))
             except (TypeError, ValueError):
                 pass
+        # An algo stop leaves a fill whose orderId no endpoint resolves; the
+        # ledger knows which exit-family order was resting when it fired.
+        for exit_row in rec.get("exits") or ():
+            if not exit_row.get("cid") and exit_row.get("time"):
+                exit_row["cid"] = attribute_exit(t["sym"], int(exit_row["time"]), placements)
         out.append(rec)
     return out
 

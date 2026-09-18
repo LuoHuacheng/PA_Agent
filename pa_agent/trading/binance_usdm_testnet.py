@@ -34,6 +34,7 @@ from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
 from pa_agent.records import cancel_log
 from pa_agent.trading import binance_env
 from pa_agent.trading.binance_env import BinanceTradeEnv
+from pa_agent.trading.order_ledger import ORDER_POST_PATHS, record_order
 from pa_agent.trading.rate_limit import parse_banned_until_ms, rate_limiter
 from pa_agent.trading.runtime_state import RuntimeStateStore as _RuntimeStateStore
 from pa_agent.util.trade_metrics import (
@@ -608,6 +609,19 @@ class BinanceUSDMTestnetClient:
             if code not in (0, 200):
                 _observe_rate_limit_error(f"Binance error {code}: {result.get('msg', '')}")
                 raise BinanceAPIError(f"Binance error {code}: {result.get('msg', '')}")
+        # Local order ledger: the exchange keeps only ~7 days of orders and never
+        # returns the algoId it assigned to a conditional order, so a placement
+        # that is not recorded here becomes unattributable within a week
+        # (measured 2026-09-18: 76 of 92 closed positions had no resolvable
+        # closing order). Placed next to the request so an algo order -- whose
+        # response body is just {"code":200,"msg":"success"} -- is still logged.
+        if method == "POST" and path in ORDER_POST_PATHS:
+            record_order(
+                str((params or {}).get("symbol") or ""),
+                result,
+                request=params,
+                source=path.rsplit("/", 1)[-1],
+            )
         return result
 
     def create_listen_key(self) -> str:
