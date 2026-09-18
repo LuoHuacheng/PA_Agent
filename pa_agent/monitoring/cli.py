@@ -95,10 +95,12 @@ def _process_cwd(pid: int) -> Path | None:
     return None
 
 
-def _is_monitor_process(
-    command: str, project_root: Path | None = None, *, pid: int | None = None
-) -> bool:
-    root = (project_root or Path(__file__).resolve().parents[2]).resolve()
+def _command_is_monitor(command: str, root: Path) -> bool:
+    """命令行本身是否足以证明这是本项目的监控进程.
+
+    两条证据任一成立即可: 完整指向 <root>/run.py, 或命中 -m pa_agent.monitoring.cli
+    这类模块入口标记(后者在 cwd 得不到时仍需调用方校验工作目录)。
+    """
     normalized = command.replace("\\", "/")
     expected_script = str(root / "run.py").replace("\\", "/")
     entry_marker = (
@@ -106,17 +108,38 @@ def _is_monitor_process(
         or "pa-monitor" in normalized
         or "pa_agent.monitoring.cli" in normalized
     )
-    has_entry = expected_script in normalized
-    if pid is not None and not has_entry:
-        cwd = _process_cwd(pid)
-        if sys.platform == "win32":
-            # Windows has no portable cwd lookup; the command line is the only evidence.
-            has_entry = entry_marker
-        else:
-            has_entry = entry_marker and cwd is not None and cwd == root
-    return has_entry and (
-        "--monitor" in normalized or "pa-monitor" in normalized or "monitoring.cli" in normalized
-    )
+    return expected_script in normalized or entry_marker
+
+
+def _is_monitor_process(
+    command: str, project_root: Path | None = None, *, pid: int | None = None
+) -> bool:
+    root = (project_root or Path(__file__).resolve().parents[2]).resolve()
+    normalized = command.replace("\\", "/")
+    expected_script = str(root / "run.py").replace("\\", "/")
+    if not _command_is_monitor(command, root):
+        return False
+    if (
+        "--monitor" not in normalized
+        and "pa-monitor" not in normalized
+        and "monitoring.cli" not in normalized
+    ):
+        return False
+    if expected_script in normalized:
+        return True
+    if pid is None:
+        # 没有 PID 可查时(纯字符串判断), 模块入口不足以证明是我们的进程.
+        return False
+    cwd = _process_cwd(pid)
+    if sys.platform == "win32":
+        # Windows has no portable cwd lookup; the command line is the only evidence.
+        return True
+    if cwd is not None:
+        return cwd == root
+    # cwd 取不到(无 ps / 无 lsof 的精简环境): 命令行已证明是模块入口, 按"认得出
+    # 就是我们的"处理 —— 注释早就写着"无法识别的活进程必须算活着, 否则双开"。
+    # 放宽只影响"是否认领进程", 抢占判定另有旁证(见 _pid_record_matches_project)。
+    return True
 
 
 def _read_pid_record(pid_path: Path) -> dict[str, Any] | None:
@@ -138,7 +161,29 @@ def _read_pid(pid_path: Path) -> int | None:
     return int(record["pid"]) if record is not None else None
 
 
-def _is_stale_pid_record(pid_path: Path) -> bool:
+def _resolve_root(root: Path | None = None) -> Path:
+    return (root or Path(__file__).resolve().parents[2]).resolve()
+
+
+def _pid_record_matches_project(pid: int, root: Path | None = None) -> bool:
+    """PID 记录指向的进程能否**正面证明**属于本项目.
+
+    两种证据: 命令行能证明(含 cwd 校验), 或命令行完全取不到(ps 被禁/缺失)时以
+    "PID 文件是我们写的 + 进程工作目录 == 项目根"为旁证。后者服务于 status/stop:
+    2026-09-18 沙箱禁 /bin/ps 时它们只会报"未运行"、拒发信号, 而服务明明在跑。
+    抢占判定不走这条旁证(见 _is_stale_pid_record), 双开保护不放宽。
+    """
+    resolved = _resolve_root(root)
+    command = _process_command(pid)
+    if _is_monitor_process(command, resolved, pid=pid):
+        return True
+    if command:
+        return False  # 有命令行却不匹配: 明确不是我们的进程
+    cwd = _process_cwd(pid)
+    return cwd is not None and cwd == resolved
+
+
+def _is_stale_pid_record(pid_path: Path, root: Path | None = None) -> bool:
     record = _read_pid_record(pid_path)
     if record is None:
         return True
@@ -148,7 +193,7 @@ def _is_stale_pid_record(pid_path: Path) -> bool:
     command = _process_command(pid)
     # An unidentifiable live process (missing ps/lsof) must count as live so two
     # monitors cannot run under one PID file.
-    return bool(command) and not _is_monitor_process(command, pid=pid)
+    return bool(command) and not _is_monitor_process(command, _resolve_root(root), pid=pid)
 
 
 def _acquire_monitor_pid(pid_path: Path) -> bool:
@@ -203,7 +248,7 @@ def _arm_stop_watchdog(delay: float, pid_path: Path | None = None) -> threading.
     return watchdog
 
 
-def stop_monitor(pid_path: Path) -> int:
+def stop_monitor(pid_path: Path, root: Path | None = None) -> int:
     pid = _read_pid(pid_path)
     if pid is None:
         pid_path.unlink(missing_ok=True)
@@ -214,8 +259,7 @@ def stop_monitor(pid_path: Path) -> int:
         pid_path.unlink(missing_ok=True)
         print("[监控已停止] 进程已退出。")
         return 0
-    command = _process_command(pid)
-    if not _is_monitor_process(command, pid=pid):
+    if not _pid_record_matches_project(pid, root):
         print("[监控未停止] PID 文件对应的进程不是本项目监控，未发送信号。")  # noqa: RUF001
         return 1
     try:
@@ -245,16 +289,16 @@ def stop_monitor(pid_path: Path) -> int:
     return 0
 
 
-def _live_monitor_pid(pid_path: Path) -> int | None:
+def _live_monitor_pid(pid_path: Path, root: Path | None = None) -> int | None:
     """PID 文件里那个进程确实是我们自己的监控时返回其 PID, 否则 None."""
     pid = _read_pid(pid_path)
     if pid is None or not _pid_exists(pid):
         return None
-    return pid if _is_monitor_process(_process_command(pid), pid=pid) else None
+    return pid if _pid_record_matches_project(pid, root) else None
 
 
-def monitor_status(pid_path: Path) -> int:
-    pid = _live_monitor_pid(pid_path)
+def monitor_status(pid_path: Path, root: Path | None = None) -> int:
+    pid = _live_monitor_pid(pid_path, root)
     if pid is not None:
         print(f"[监控运行中] PID={pid}")
         return 0
