@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pa-agent.expectancy-daily</string>
+
+  <!-- 每 6 小时跑一次正期望日检, 台账落在 logs/daily_check.tsv。
+       用绝对路径; 安装脚本会把 __REPO__ 替换成真实仓库根。 -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO__/scripts/daily_check.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>10</integer></dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__REPO__/logs/daily_check.out</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/logs/daily_check.err</string>
+</dict>
+</plist>
