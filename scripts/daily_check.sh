@@ -14,6 +14,7 @@ all=$(.venv/bin/python tools/expectancy_report.py 2>&1 | head -1 | tr '\t' ' ')
 post=$(.venv/bin/python tools/expectancy_report.py --gate-since 2>&1 | head -1 | tr '\t' ' ')
 rb=$(.venv/bin/python tools/expectancy_report.py --gate-since --loss-bound 2 2>&1 | tail -1 | tr '\t' ' ')
 gate=$(.venv/bin/python scripts/verify_gate.py 2>&1 | tail -1 | tr '\t' ' ')
+rbk=$(.venv/bin/python tools/expectancy_report.py --rollback-check 2>&1 | tail -1 | tr '\t' ' ')
 orders=$(ls records/orders/ 2>/dev/null | wc -l | tr -d ' ')
 
 service="no"
@@ -24,12 +25,13 @@ if [ -f config/monitoring.pid ]; then
 fi
 
 mkdir -p logs
-printf '%s\t全部: %s\t上线后: %s\t路B: %s\t闸门: %s\torders=%s\tservice=%s\n' \
-  "$ts" "$all" "$post" "$rb" "$gate" "$orders" "$service" >> logs/daily_check.tsv
+printf '%s\t全部: %s\t上线后: %s\t路B: %s\t回滚: %s\t闸门: %s\torders=%s\tservice=%s\n' \
+  "$ts" "$all" "$post" "$rb" "$rbk" "$gate" "$orders" "$service" >> logs/daily_check.tsv
 echo "--- 日检 ($ts) ---"
 echo "1) 全部历史: $all"
 echo "2) 上线后  : $post      <- 看 n 的进度"
 echo "3) 路B判定 : $rb      <- 现行判定目标"
-echo "4) 闸门    : $gate"
-echo "5) 账本条目: $orders  (必须 > 0)   服务存活: $service"
+echo "4) 回滚检查: $rbk"
+echo "5) 闸门    : $gate"
+echo "6) 账本条目: $orders  (必须 > 0)   服务存活: $service"
 tail -2 logs/daily_check.tsv

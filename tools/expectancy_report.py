@@ -103,6 +103,25 @@ def loss_bound_ok(conf_lower, bound):
     return float(conf_lower) > -abs(float(bound))
 
 
+def rollback_alerts(n, conf_lower, dd_ratio, dd_account=None):
+    """按 docs/正期望验证规程.md §4 的触发条件判定是否需要回滚.
+
+    计划 T6 Step 6 的两条:
+      - n>=30 但 90%CI 下界 <= 0  -> 回滚
+      - 最大回撤 >= 25%           -> 立即回滚(不等 n)
+    返回 (告警列表, 是否触发)。
+    """
+    if n < MIN_N["R2"]:
+        return ([f"样本不足(n={n} < {MIN_N['R2']}), 回滚条件无法评估"], False)
+    alerts = []
+    if conf_lower <= 0:
+        alerts.append(f"90%CI 下界 {conf_lower:+.2f}U <= 0")
+    dd = dd_account if dd_account is not None else dd_ratio
+    if dd >= MAX_DD["R2"]:
+        alerts.append(f"最大回撤 {dd:.1%} >= {MAX_DD['R2']:.0%}")
+    return alerts, bool(alerts)
+
+
 def evaluate(nets, capital=None, loss_bound=None):
     """由逐笔净额算出 n/均/区间/胜率/回撤/阶段/是否通过.
 
@@ -149,6 +168,8 @@ def main(argv=None):
                     help="参照本金(USDT); 给了就额外输出账户口径回撤")
     ap.add_argument("--account-dd-gate", action="store_true",
                     help="用账户口径回撤(需 --capital)代替计划口径判定 R2/R3")
+    ap.add_argument("--rollback-check", action="store_true",
+                    help="按 §4 触发条件判定是否需要回滚(触发时退出码 3)")
     ap.add_argument("--loss-bound", type=float, default=None,
                     help="路 B 判定: 证明均值不差于 -X U/笔(样本需求远小于证明正期望); "
                          "给了它就以它决定退出码")
@@ -157,6 +178,11 @@ def main(argv=None):
     if args.account_dd_gate and not args.capital:
         print("--account-dd-gate 需要同时给 --capital", file=sys.stderr)
         return 2
+
+    if args.rollback_check and not args.since:
+        # 回滚只能看**变更后**样本: 变更前的历史样本不反映当前配置(2026-09-18 实测会误报)
+        args.gate_since = True
+        print("[回滚检查] 未指定 --since, 自动限定为最近一次配置变更之后的样本")
 
     rows = _load_rows(args.path)
     cutoff_label = ""
@@ -171,6 +197,9 @@ def main(argv=None):
     pairs = sorted((str(r.get("ts_close") or ""), _num(r.get("net_usdt"))) for r in rows)
     nets = [n for _, n in pairs if n is not None]
     if not nets:
+        if args.rollback_check:
+            print(f"[回滚检查] 样本不足 (n=0, since={cutoff_label or '全部'}), 回滚条件无法评估")
+            return 0
         print("FAIL: 无成交记录" + (f"(since={cutoff_label})" if cutoff_label else ""))
         return 1
 
@@ -179,6 +208,17 @@ def main(argv=None):
     acct = ""
     if res["dd_account"] is not None:
         acct = f" 账户回撤{res['dd_account']:.1%}(本金{args.capital:.0f}U)"
+    if args.rollback_check:
+        alerts, hit = rollback_alerts(res["n"], res["lo"], res["dd"], res["dd_account"])
+        for a in alerts:
+            print(("[回滚告警] " if hit else "[回滚检查] ") + a)
+        if hit:
+            print("=> 触发 §4 回滚条件: 按变更逐项撤销, 并同步前移 GATE_START、记录触发指标")
+            return 3
+        if res["n"] >= MIN_N["R2"]:
+            print("=> 未触发回滚条件")
+        return 0
+
     def _loss_verdict():
         """路 B 判定: 能否排除均值差于 -bound。拿到 n<30 的小样本时它也能给结论(这正是它的用途)。"""
         bound = abs(float(args.loss_bound))

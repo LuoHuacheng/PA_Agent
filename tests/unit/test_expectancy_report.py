@@ -13,6 +13,7 @@ from tools.expectancy_report import (
     max_drawdown,
     max_drawdown_usdt,
     parse_cutoff,
+    rollback_alerts,
 )
 
 
@@ -96,6 +97,34 @@ def test_loss_bound_ok_compares_lower_bound_to_negative_bound():
 def test_evaluate_exposes_loss_ok_only_when_bound_given():
     assert evaluate([1.0] * 30)["loss_ok"] is None
     assert evaluate([1.0] * 30, loss_bound=2.0)["loss_ok"] is True
+
+
+def test_rollback_not_evaluable_below_r2_threshold():
+    alerts, hit = rollback_alerts(10, -5.0, 0.9)
+    assert hit is False
+    assert "样本不足" in alerts[0]
+
+
+def test_rollback_triggers_on_non_positive_ci_lower():
+    alerts, hit = rollback_alerts(30, -0.01, 0.0)
+    assert hit is True
+    assert any("90%CI" in a for a in alerts)
+
+
+def test_rollback_triggers_on_drawdown():
+    alerts, hit = rollback_alerts(30, 1.0, 0.30)
+    assert hit is True
+    assert any("回撤" in a for a in alerts)
+
+
+def test_rollback_clean_when_ci_positive_and_dd_small():
+    alerts, hit = rollback_alerts(30, 1.0, 0.10)
+    assert hit is False and alerts == []
+
+
+def test_rollback_prefers_account_drawdown_when_given():
+    # 峰值口径 90% 看着要回滚, 但账户口径只有 10% => 不回滚
+    assert rollback_alerts(30, 1.0, 0.90, dd_account=0.10)[1] is False
 
 
 def test_main_loss_bound_gives_verdict_on_tiny_sample(tmp_path, capsys):

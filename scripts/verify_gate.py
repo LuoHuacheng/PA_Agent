@@ -102,8 +102,7 @@ def main(argv=None):
     records = load_records(args.pattern, cutoff)
     print(f"since={args.since} 上线后记录数={len(records)} 白名单={list(allow)}")
     if not records:
-        print("结论: 暂无上线后记录 —— 等下一次轮询"
-              "(节奏看 monitoring.poll_interval_minutes, 当前 120 分钟一轮)")
+        print("结论: 暂无上线后记录 —— 等下一次轮询 (节奏看 monitoring.poll_interval_minutes)")
         return 2
 
     bad = attempted = 0
