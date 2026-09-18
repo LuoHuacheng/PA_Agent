@@ -175,6 +175,186 @@ def rebuild_trades(
     return out
 
 
+def rebuild_positions(
+    orders_by_symbol: dict[str, list[dict]],
+    fills_by_symbol: dict[str, list[dict]],
+    symbols: list[str],
+) -> list[dict]:
+    """One record per position, with every exit attached.
+
+    The LIFO leg pairing (`rebuild_trades`) splits a position into per-fill legs,
+    which inflates trade counts and — worse — leaves fills it cannot pair out of
+    the result entirely, so the rebuilt PnL does not reconcile with the account
+    income ledger (measured: |diff| 152.7 USDT over 5 symbols).
+
+    Attribution here is by *position*: same-direction fills extend the open
+    position (quantity-weighted entry), opposite fills close it, and a flip closes
+    the current position before opening a new one. Every fill's realised PnL and
+    commission lands in exactly one record, so totals reconcile by construction.
+    `exits` holds each reduction (time/px/qty/realized/fees) for partial-TP work.
+    """
+    order_by_id = {
+        (s, o["orderId"]): o
+        for s, lst in orders_by_symbol.items()
+        for o in lst
+        if s in symbols
+    }
+    out: list[dict] = []
+    for sym in symbols:
+        fills = sorted(fills_by_symbol.get(sym, []), key=lambda x: (x["time"], x["id"]))
+        pos: dict | None = None
+        for fl in fills:
+            qty = float(fl["qty"])
+            px = float(fl["price"])
+            signed = qty if fl["side"] == "BUY" else -qty
+            rpnl = float(fl.get("realizedPnl") or 0.0)
+            comm = -abs(float(fl.get("commission") or 0.0))
+            o = order_by_id.get((sym, fl["orderId"]), {})
+            cid = str(o.get("clientOrderId") or "")
+            if qty <= 0:
+                continue
+            if pos is None:
+                pos = _open_position(sym, signed, qty, px, cid, int(fl["time"]), rpnl, comm)
+                continue
+            if (signed > 0) == (pos["side"] > 0):
+                pos["qty"] += qty
+                pos["size"] += qty
+                pos["entry_notional"] += qty * px
+                pos["realized"] += rpnl
+                pos["fees"] += comm
+                pos["fills"] += 1
+                continue
+            close_qty = min(qty, pos["qty"])
+            share = close_qty / qty
+            exit_row = {
+                "time": int(fl["time"]),
+                "px": px,
+                "qty": close_qty,
+                "realized": rpnl * share,
+                "fees": comm * share,
+            }
+            pos["exits"].append(exit_row)
+            pos["realized"] += exit_row["realized"]
+            pos["fees"] += exit_row["fees"]
+            pos["close_px"] = px
+            pos["closed_at"] = int(fl["time"])
+            pos["qty"] -= close_qty
+            pos["fills"] += 1
+            remainder = qty - close_qty
+            if pos["qty"] <= _EPS:
+                out.append(_finalize_position(pos, closed=True))
+                pos = None
+                if remainder > _EPS:
+                    pos = _open_position(
+                        sym,
+                        remainder if signed > 0 else -remainder,
+                        remainder,
+                        px,
+                        cid,
+                        int(fl["time"]),
+                        rpnl * (remainder / qty),
+                        comm * (remainder / qty),
+                    )
+        if pos is not None:
+            out.append(_finalize_position(pos, closed=False))
+    out.sort(key=lambda t: t["opened_at"])
+    return out
+
+
+def _open_position(
+    sym: str,
+    signed_qty: float,
+    qty: float,
+    px: float,
+    cid: str,
+    ts: int,
+    realized: float,
+    fees: float,
+) -> dict:
+    return {
+        "sym": sym,
+        "side": 1 if signed_qty > 0 else -1,
+        "qty": qty,
+        "size": qty,
+        "entry_notional": qty * px,
+        "realized": realized,
+        "fees": fees,
+        "cid": cid if cid.startswith(ENTRY_CID_PREFIX) else "manual",
+        "opened_at": ts,
+        "closed_at": None,
+        "close_px": None,
+        "exits": [],
+        "fills": 1,
+    }
+
+
+def _finalize_position(pos: dict, *, closed: bool) -> dict:
+    # Report the size the position was opened with: a fully closed position has no
+    # remaining quantity, but its entry/report size must survive.
+    size = pos["size"]
+    return {
+        "sym": pos["sym"],
+        "side": pos["side"],
+        "qty": size,
+        "entry": (pos["entry_notional"] / size) if size > 0 else 0.0,
+        "realized": pos["realized"],
+        "fees": pos["fees"],
+        "cid": pos["cid"],
+        "opened_at": pos["opened_at"],
+        "closed_at": pos["closed_at"] if closed else None,
+        "close_px": pos["close_px"],
+        "exits": list(pos["exits"]),
+        "fills": pos["fills"],
+        "legs": len(pos["exits"]),
+    }
+
+
+def position_partial_comparison(positions: list[dict]) -> list[dict]:
+    """Partial-vs-single-exit comparison for `rebuild_positions` records.
+
+    The position record already carries every exit, so no time-clustering guess
+    is involved. The counterfactual exits the whole quantity once at the last
+    observed exit price while paying the same commission, so the delta reduces to
+    gross(last exit) - realised: positive means banking the partial cost money,
+    negative means it protected the position.
+    """
+    rows: list[dict] = []
+    for pos in positions:
+        exits = sorted(pos.get("exits") or [], key=lambda e: e.get("time") or 0)
+        qty = float(pos.get("qty") or 0.0)
+        entry = float(pos.get("entry") or 0.0)
+        fees = float(pos.get("fees") or 0.0)
+        realized = float(pos.get("realized") or 0.0)
+        sign = 1.0 if pos.get("side") == 1 else -1.0
+        row = {
+            "sym": pos.get("sym"),
+            "side": pos.get("side"),
+            "legs": len(exits),
+            "qty": qty,
+            "entry": entry,
+            "actual": realized + fees,
+            "actual_fees": fees,
+            "realized": realized,
+            "partial": len(exits) > 1,
+        }
+        if len(exits) > 1:
+            first_px = float(exits[0].get("px") or 0.0)
+            last_px = float(exits[-1].get("px") or 0.0)
+            gross = (last_px - entry) * qty * sign
+            row.update(
+                {
+                    "partial_qty": float(exits[0].get("qty") or 0.0),
+                    "partial_px": first_px,
+                    "final_px": last_px,
+                    "single_exit": gross + fees,
+                    "delta": gross - realized,
+                    "helped": (last_px - first_px) * sign < 0,
+                }
+            )
+        rows.append(row)
+    return rows
+
+
 def _merge_legs(legs: list[dict]) -> dict:
     """Sum the cash flows and quantity of one position's legs."""
     qty = sum(float(t.get("qty") or 0.0) for t in legs)

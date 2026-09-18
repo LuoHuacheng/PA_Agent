@@ -15,7 +15,11 @@ if str(HERE) not in sys.path:
 
 from pa_agent.config.settings import load_settings
 from pa_agent.trading.binance_usdm_testnet import BinanceUSDMTestnetClient
-from pa_agent.trading.replay_pairing import cid_variants, rebuild_trades as _rebuild_trades_from_fills
+from pa_agent.trading.replay_pairing import (
+    cid_variants,
+    rebuild_positions,
+    rebuild_trades as _rebuild_trades_from_fills,
+)
 
 TZ = timezone(timedelta(hours=8))
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ZECUSDT"]
@@ -151,7 +155,7 @@ def _match_decision(t, dec_idx, pending_rows, order_time):
     return inner
 
 
-def rebuild_trades(cache_dir, symbols, dec_idx, pending_rows):
+def rebuild_trades(cache_dir, symbols, dec_idx, pending_rows, *, by_position: bool = False):
     """LIFO pairing; one trade per pa-entry signal (open trades included).
 
     The LIFO rebuild itself lives in pa_agent.trading.replay_pairing
@@ -168,7 +172,8 @@ def rebuild_trades(cache_dir, symbols, dec_idx, pending_rows):
             if c:
                 order_time.setdefault(c, (s, o["time"]))
     out = []
-    for t in _rebuild_trades_from_fills(orders_all, trades_all, symbols):
+    pair = rebuild_positions if by_position else _rebuild_trades_from_fills
+    for t in pair(orders_all, trades_all, symbols):
         inner = _match_decision(t, dec_idx, pending_rows, order_time)
         rec = {"sym": t["sym"], "side": t["side"], "qty": t["qty"], "entry": t["entry"],
                "realized": t["realized"], "fees": t["fees"], "cid": t["cid"],

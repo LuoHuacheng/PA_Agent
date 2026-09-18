@@ -32,6 +32,7 @@ from pa_agent.trading.replay_pairing import (
     aggregate_legs,
     classify_outcome,
     partial_exit_comparison,
+    position_partial_comparison,
 )
 
 
@@ -105,6 +106,8 @@ def main():
                     help="merge partial legs of one position before reporting")
     ap.add_argument("--partial-compare", action="store_true",
                     help="compare each partial-TP position against a single-exit exit")
+    ap.add_argument("--positions", action="store_true",
+                    help="pair fills per position (reconciles with the income ledger)")
     ap.add_argument("--out", default="", help="optional json output path")
     ap.add_argument("--conf-buckets-out", default="",
                     help="write conf 5-pt bucket win/loss counts for the closed trades")
@@ -122,7 +125,9 @@ def main():
         print("fetching orders/trades since %s ..." % fmt_ms(fetch_start))
         fetch_account_data(client, symbols, fetch_start, cache)
         dec_idx, pending_rows = load_decision_index(symbols)
-        trades = rebuild_trades(cache, symbols, dec_idx, pending_rows)
+        trades = rebuild_trades(
+            cache, symbols, dec_idx, pending_rows, by_position=args.positions
+        )
         positions = load_json(cache, "positions.json")
         income = load_json(cache, "income.json")
         orders = load_json(cache, "orders.json")
@@ -219,7 +224,11 @@ def main():
         print(f"  <{b:4d}m:  n={len(by_dur[b]):2d} 胜率={wr} 已平净={g['realized']:+.2f} 均/笔={avg}")
     print("")
     if args.partial_compare:
-        rows = partial_exit_comparison(raw_win)
+        rows = (
+            position_partial_comparison(raw_win)
+            if args.positions
+            else partial_exit_comparison(raw_win)
+        )
         parts = [r for r in rows if r.get("partial")]
         print("分腿前后对比 (仅统计有 >=2 次减仓的持仓):")
         print("  symbol    side legs      实际净      单次净        差额      分腿价      末次价    护住")
