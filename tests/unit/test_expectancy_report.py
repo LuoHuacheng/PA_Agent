@@ -8,6 +8,7 @@ from tools.expectancy_report import (
     account_drawdown_pct,
     evaluate,
     filter_since,
+    loss_bound_ok,
     main,
     max_drawdown,
     max_drawdown_usdt,
@@ -83,6 +84,27 @@ def test_account_drawdown_pct_uses_capital_as_denominator():
 def test_evaluate_only_reports_account_dd_when_capital_given():
     assert evaluate([1.0] * 30)["dd_account"] is None
     assert evaluate([1.0] * 30, capital=100.0)["dd_account"] == 0.0
+
+
+def test_loss_bound_ok_compares_lower_bound_to_negative_bound():
+    assert loss_bound_ok(0.5, 2.0) is True     # -0.5 > -2
+    assert loss_bound_ok(-1.5, 2.0) is True    # -1.5 > -2
+    assert loss_bound_ok(-2.5, 2.0) is False
+    assert loss_bound_ok(-3.0, -2.0) is False  # bound 取绝对值
+
+
+def test_evaluate_exposes_loss_ok_only_when_bound_given():
+    assert evaluate([1.0] * 30)["loss_ok"] is None
+    assert evaluate([1.0] * 30, loss_bound=2.0)["loss_ok"] is True
+
+
+def test_main_loss_bound_gives_verdict_on_tiny_sample(tmp_path, capsys):
+    """路B 的意义就是小样本也能出结论(证明正期望要 261 笔)。"""
+    path = _write_csv(tmp_path / "o.csv", [("a", "1000", "+1"), ("b", "2000", "-1")])
+    rc = main([str(path), "--loss-bound", "3"])
+    out = capsys.readouterr().out
+    assert "路B判定" in out
+    assert rc == 0
 
 
 def test_evaluate_empty_is_insufficient():

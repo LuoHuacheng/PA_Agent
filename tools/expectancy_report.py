@@ -92,7 +92,17 @@ def account_drawdown_pct(nets, capital):
     return max_drawdown_usdt(nets) / float(capital)
 
 
-def evaluate(nets, capital=None):
+def loss_bound_ok(conf_lower, bound):
+    """能否排除「均亏损大于 bound U/笔」.
+
+    这是"路 B"的判定: 证明均值**不差于 -bound**, 比证明"均值为正"需要的样本少得多
+    (对小效应而言)。例: 标准差约 4.9U 时, 要排除 -2U/笔 只需 n 约 16 笔 (真值约 0),
+    而要证明 +0.5U/笔 需要 261 笔。见 docs/决策备忘.md。
+    """
+    return float(conf_lower) > -abs(float(bound))
+
+
+def evaluate(nets, capital=None, loss_bound=None):
     """由逐笔净额算出 n/均/区间/胜率/回撤/阶段/是否通过.
 
     capital 给定时额外算出账户口径回撤 dd_account(比例), 否则它为 None。
@@ -110,9 +120,10 @@ def evaluate(nets, capital=None):
     dd_usdt = max_drawdown_usdt(nets)
     dd_account = account_drawdown_pct(nets, capital) if capital else None
     ok = bool(nets) and stage != "样本不足" and mean > 0 and lo > 0 and dd < MAX_DD[stage]
+    loss_ok = loss_bound_ok(lo, loss_bound) if (nets and loss_bound is not None) else None
     return {"n": len(nets), "mean": mean, "lo": lo, "hi": hi, "wr": wr,
             "dd": dd, "dd_usdt": dd_usdt, "dd_account": dd_account,
-            "stage": stage, "ok": ok}
+            "stage": stage, "ok": ok, "loss_ok": loss_ok}
 
 
 def _load_rows(path):
@@ -137,6 +148,9 @@ def main(argv=None):
                     help="参照本金(USDT); 给了就额外输出账户口径回撤")
     ap.add_argument("--account-dd-gate", action="store_true",
                     help="用账户口径回撤(需 --capital)代替计划口径判定 R2/R3")
+    ap.add_argument("--loss-bound", type=float, default=None,
+                    help="路 B 判定: 证明均值不差于 -X U/笔(样本需求远小于证明正期望); "
+                         "给了它就以它决定退出码")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
 
     if args.account_dd_gate and not args.capital:
@@ -159,17 +173,29 @@ def main(argv=None):
         print("FAIL: 无成交记录" + (f"(since={cutoff_label})" if cutoff_label else ""))
         return 1
 
-    res = evaluate(nets, capital=args.capital)
+    res = evaluate(nets, capital=args.capital, loss_bound=args.loss_bound)
     prefix = f"since={cutoff_label} " if cutoff_label else ""
     acct = ""
     if res["dd_account"] is not None:
         acct = f" 账户回撤{res['dd_account']:.1%}(本金{args.capital:.0f}U)"
+    def _loss_verdict():
+        """路 B 判定: 能否排除均值差于 -bound。拿到 n<30 的小样本时它也能给结论(这正是它的用途)。"""
+        bound = abs(float(args.loss_bound))
+        tag = "可排除" if res["loss_ok"] else "无法排除"
+        cmp = ">" if res["loss_ok"] else "<="
+        print(f"路B判定: 90%CI 下界 {res['lo']:+.2f}U {cmp} -{bound:.2f}U "
+              f"=> {tag} 均亏损大于 {bound:.2f}U/笔 (n={res['n']})")
+        return 0 if res["loss_ok"] else 1
+
     if res["stage"] == "样本不足":
         print(f"{prefix}n={res['n']} 均{res['mean']:+.2f}U 胜率{res['wr']:.0%} "
               f"90%CI[{res['lo']:+.2f}, {res['hi']:+.2f}] "
               f"回撤{res['dd_usdt']:.2f}U(峰值口径{res['dd']:.1%}){acct} "
               f"-> FAIL(样本不足, 需 n>={MIN_N['R2']})")
+        if res["loss_ok"] is not None:
+            return _loss_verdict()
         return 1
+
     dd_for_gate = res["dd_account"] if args.account_dd_gate else res["dd"]
     ok = res["mean"] > 0 and res["lo"] > 0 and dd_for_gate < MAX_DD[res["stage"]]
     dd_label = "账户回撤" if args.account_dd_gate else "峰值口径回撤"
@@ -179,6 +205,8 @@ def main(argv=None):
           f"阶段={res['stage']} -> {'PASS' if ok else 'FAIL'}")
     print(f"门槛({res['stage']}): n>={MIN_N[res['stage']]}, 均>0, CI下界>0, "
           f"{dd_label}<{MAX_DD[res['stage']]:.0%}")
+    if res["loss_ok"] is not None:
+        return _loss_verdict()
     return 0 if ok else 1
 
 
