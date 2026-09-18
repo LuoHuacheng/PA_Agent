@@ -12,8 +12,8 @@
        拉起的 bash 读不了 ~/Documents 下的仓库(exit 126)。 -->
   <key>ProgramArguments</key>
   <array>
-    <string>__BASH__</string>
-    <string>__REPO__/scripts/daily_check.sh</string>
+    <string>__PY__</string>
+    <string>__REPO__/scripts/daily_check.py</string>
   </array>
 
   <key>WorkingDirectory</key>
