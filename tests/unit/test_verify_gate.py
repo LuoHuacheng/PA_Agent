@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import json
 
-from scripts.verify_gate import describe, is_entry_attempt, load_records, violations_for
+from scripts.verify_gate import (
+    describe,
+    gate_reason_counts,
+    is_entry_attempt,
+    load_records,
+    violations_for,
+)
 
 
 def test_short_entry_is_a_violation():
@@ -25,6 +31,22 @@ def test_empty_allowlist_disables_cycle_check():
 
 def test_missing_cycle_is_not_a_violation():
     assert violations_for("做多", None, ("broad_channel",)) == []
+
+
+def test_gate_reason_counts_groups_by_prefix():
+    infos = [
+        {"gate_reasons": ["rr_block: 计划盈亏比 1.37 < 1.5"]},
+        {"gate_reasons": ["rr_block: 计划盈亏比 1.20 < 1.5", "short_block: 回放 45 天空单胜率 16%"]},
+        {"gate_reasons": []},
+        {},
+    ]
+    assert gate_reason_counts(infos) == {"rr_block": 2, "short_block": 1}
+
+
+def test_describe_surfaces_gate_reasons():
+    doc = {"stage2_decision": {"execution": {"status": "gate_blocked",
+                                             "gate_reasons": ["rr_block: x"]}}}
+    assert describe("p.json", doc)["gate_reasons"] == ["rr_block: x"]
 
 
 def test_wait_decision_is_not_an_entry_attempt():

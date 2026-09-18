@@ -72,6 +72,16 @@ def violations_for(direction, cycle, allow):
     return out
 
 
+def gate_reason_counts(infos):
+    """按拦截原因前缀(冒号前)统计次数, 便于看哪个闸门在实盘拦得最多."""
+    counts = {}
+    for info in infos:
+        for reason in info.get("gate_reasons") or ():
+            key = str(reason).split(":")[0].strip()
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def describe(path, doc):
     """抽出一笔计划的可读字段."""
     dec = doc.get("stage2_decision") or {}
@@ -87,6 +97,7 @@ def describe(path, doc):
         "cycle": diag.get("cycle_position"),
         "outcome": terminal.get("outcome"),
         "exec_status": (dec.get("execution") or {}).get("status"),
+        "gate_reasons": list((dec.get("execution") or {}).get("gate_reasons") or ()),
     }
 
 
@@ -106,18 +117,24 @@ def main(argv=None):
         return 2
 
     bad = attempted = 0
+    infos = []
     for path, doc in records:
         info = describe(path, doc)
         if not is_entry_attempt(info["order_type"], info["direction"]):
             print(f"{info['file']} {info['symbol']} 观望(outcome={info['outcome']}) "
                   f"cycle={info['cycle']}  SKIP: 无入场意图")
             continue
+        infos.append(info)
         attempted += 1
         viol = violations_for(info["direction"], info["cycle"], allow)
         bad += 1 if viol else 0
         tag = "VIOLATION: " + "; ".join(viol) if viol else "OK"
+        blocked = ("  拦截: " + "; ".join(info["gate_reasons"])) if info["gate_reasons"] else ""
         print(f"{info['file']} {info['symbol']} {info['direction']} {info['cycle']} "
-              f"exec={info['exec_status']}  {tag}")
+              f"exec={info['exec_status']}  {tag}{blocked}")
+    counts = gate_reason_counts(infos)
+    if counts:
+        print("拦截原因统计: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     print(f"结论: 上线后 {len(records)} 条记录, 尝试入场 {attempted} 条; "
           + ("闸门有泄漏, 见上" if bad else "闸门生效, 无违规"))
     return 1 if bad else 0
