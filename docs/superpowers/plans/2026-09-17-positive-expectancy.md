@@ -1,4 +1,630 @@
-# 正期望改造计划 Implementation Plan
+# 正期望改造 v2 · 可完整执行计划
+
+> **本文档已重构为「可完整执行」的形态。** 上半部分（第 0–3 节）是**唯一执行路径**，
+> 每一步都带前提、文件、命令、期望输出和验收门槛；下半部分（附录 A–F）是**归档**：
+> 原计划 v1 的任务书与诊断，仅供追溯，**不要照着附录执行**。
+>
+> 执行者请从 **第 3 节 T1** 顺序往下做；每做完一个 T 就在该节顶部勾选并写下提交号。
+
+## 0. 执行协议（每个 Task 都适用，不要跳）
+
+**环境**
+
+- 一律 `.venv/bin/python`（系统 python3 缺 pydantic）；**所有命令的工作目录都是仓库根**。
+- 服务当前**已停止**（无 `config/monitoring.pid`）。凡是要改 `config/settings.json` 的步骤，
+  先 `cp config/settings.json config/settings.json.bak_<日期>_<标签>`。
+- `config/settings.json` 被 gitignore（**不要提交**）；`config/settings.example.json` 被跟踪，
+  **两个 env 块（`binance_usdm_live` + `binance_usdm_testnet`）必须同步改**。
+
+**每个 Task 的固定流程**
+
+1. 先写失败测试 → 2. 跑它确认失败（把报错原文记进提交信息）→ 3. 最小实现 → 4. 跑它确认通过
+→ 5. 跑全量回归 + ruff → 6. 提交（**不 push**）。
+
+**回归基线（2026-09-18，改动前必须记下来与它对比）**
+
+| 检查 | 基线 |
+|---|---|
+| `.venv/bin/python -m pytest --ignore=tests/e2e -q` | **1306 passed, 1 skipped** |
+| `ruff check <改动文件>` | 与该文件 HEAD 版本**持平**（不比 HEAD 多） |
+
+**三条禁令（违反则这一轮的结论作废）**
+
+1. **禁止用点估计下结论**。任何"某配方更好"的判断，必须带 90% 自助法区间；区间跨零 = 没有结论。
+2. **禁止在同一批样本上既选配方又报告它的收益**。选配方用前 38 天，报告用最后 7 天（T6 的样本外）。
+3. **禁止一次改多个闸门**。一次只动一个开关，记下前后对照，否则无法归因。
+
+---
+
+## 1. 目标与完成定义
+
+**主目标（一句话）**：让 PA_Agent 在**忠实回放**与**实盘 testnet** 上的单笔净额均值**统计上显著为正**
+（90% 自助法置信区间下界 > 0），同时把成交单量从 0.3 笔/天提到 **≥ 1 笔/天**。
+
+**分档门槛**（全部满足才算通过该档）
+
+| 档 | 样本 | 通过条件 | 不通过怎么办 |
+|---|---|---|---|
+| **R1a** 单闸门回放 | n ≥ 20 | 均U > 0 **且** 90%CI 下界 > 0 | 换闸门，不上线 |
+| **R1b** 组合配方回放 | n ≥ 10 | 同上 | 放弃该组合（本样本量不支持叠条件） |
+| **R2** 实盘小样 | n ≥ 30 | 均U > 0 且 最大回撤 < 25% | 立刻回滚配置 |
+| **R3** 实盘确认 | n ≥ 100 | 均U > 0 且 90%CI 下界 > 0 且 最大回撤 < 30% | 回滚 |
+| **R4** 加仓 | R3 通过 | 单笔风险 4U → 8U，再验 n ≥ 100 | 任一 30% 回撤即减半 |
+
+> **为什么 R1 要拆两档**：实测 45 笔样本里，能到 **n≥20** 的只有 6 个单闸门变体；
+> 而组合类配方只有个位数——「做多 + RR≥1.5」**n=7**、「做多 + RR≥1.5 + 仅 channel」**n=2**。
+> 它们**结构上无法通过 n≥20**。不拆档就只能得出「什么都不够格」的假结论。
+> （唯一通过 R1b 的是「做多 + 通道/区间」n=14，见 T2。）
+
+**完成定义（DoD，每条都可机器验证）**
+
+- [ ] `--variants` 输出里，至少一个变体满足 R1a 或 R1b → 记下它的名字与区间。
+- [ ] `tools/expectancy_report.py` 在实盘数据上输出 `PASS`（R3）。
+- [ ] `docs/正期望验证规程.md` 存在，且阶段门禁表与本文件第 1 节逐字一致。
+- [ ] `config/settings.example.json` 两个 env 块的**键集**一致（值可不同）。
+- [ ] `pytest` 与 `ruff` 不劣于第 0 节基线。
+- [ ] `records/orders/` 非空（订单账本在跑，否则 7 天后出场归因再次失效）。
+
+---
+
+## 2. 现状与基线（动手前先复现一遍，数字对不上就别往下做）
+
+### 2.1 已完成的三个 Task（**不要重做**）
+
+| 原 Task | 提交 | 结果 |
+|---|---|---|
+| Task 0 回放费用校准 | `db54db3` | 单边费率 `maker+taker == 往返`（1/3 与 2/3，实测四点定标）；兜底支路不再双计。手续费 37.04 → **18.52U** |
+| Task 1 提示词补止损下限 | `8552cc5` | 实现为 `prompt_assembler._render_execution_constraints()`（按帧渲染真实数值），**不是**静态规则文本 |
+| Task 2 周期白名单门控 | `1ba44bd` | `block_cycle_allowlist` 已就位，默认 `[]`（关）；**实盘也保持关**（理由见附录 D-Task 2） |
+
+计划外补的两件基建（本 v2 会用到）：`2f73f58` `tools/exit_cause_report.py`（出场成因归因）、
+`67af2aa` `pa_agent/trading/order_ledger.py`（本地订单账本）。
+
+### 2.2 一条命令复现基线
+
+```bash
+cd /Users/hc/Documents/ai/PA_Agent
+.venv/bin/python tools/shadow_replay.py --replay --days 45 \
+  --min-stop-atr 1.5 --min-stop-pct 0.2 --timeout-min 30 \
+  --trend-days 7 --trend-neutral 1.5 2>&1 | tail -14
+```
+
+**期望输出（2026-09-18 实测，对不上说明样本/环境变了）：**
+
+```text
+手续费率(往返, 名义占比): 0.00060
+=== 结局分布 === {'rejected_stop_floor': 545, 'unfilled': 160, 'stop': 25, 'no_data': 13, 'time_stop': 10, 'tp2': 10}
+成交 45 笔 / 计划 763 笔 = 5.9%
+净 1.57U  均 0.03U  胜率 42.2%  手续费 18.52U
+```
+
+⚠️ `--trend-days 7 --trend-neutral 1.5` **不能省**：省掉后 CSV 的 `trend_pct` 全空，
+逆势闸门判定会静默失效（2026-09-17 踩过）。
+
+### 2.3 当前实盘闸门栈（来自 `config/settings.json`，T2 要逐个裁定）
+
+| 开关 | 实盘值 | 回放里单独关掉它的效果（点估计，样本内 n=45） |
+|---|---|---|
+| `counter_trend_block` | true | 关掉（禁逆势 1.5% 口径）+38.21U / 33 笔 |
+| `block_trending_tr_entry` | true | 关掉（禁 trending_tr）+31.15U / 25 笔 |
+| `block_neutral_diag_entry` | true | 关掉 −9.24U / 37 笔（**点估计**；加区间后跨零 ⇒ 证据不足，见 T2） |
+| `block_session_entry` | true | 回放未单列，需在 T2 补 |
+| `block_short_entry` | false | 关掉做空 +30.58U / 23 笔 |
+| `min_plan_reward_risk` | 1.5 | 调到 1.5 保留 36% 成交，净 +16.69U |
+| `time_stop_minutes` | 720 | 见 T5 |
+| `tp_partial_close_pct` | 50 | 见 T4 |
+| `min_stop_mode` / `min_stop_distance_pct` / `min_stop_atr_multiple` | atr / 0.2 / 1.5 | 下限已生效（09-13 后无 <0.2% 止损） |
+| `breakeven_stop_trigger` | off | 见 T4 |
+| `risk_per_trade_usdt` | 4.0 | R4 才动 |
+
+**`trade_conf` 门槛是反例**：`trade_conf>=55` 过滤后 39 笔 **−22.49U**。
+**不要再往"提高置信度门槛"方向调参**，两轮独立数据都证伪了它。
+
+---
+
+## 3. 待执行任务（按 T1 → T6 顺序做，每个都带验收）
+
+### T1 · 回放变体表加自助法置信区间  ⬜ 未做
+
+**前提**：无，**可立即执行**。它是其余所有任务的前置——没有区间就不许下结论。
+**为什么**：现在 15 行变体表全是点估计，`+38.21U` 与 `n=2` 的 `+12.26U` 并列展示，
+而本计划自己定的规矩是「区间不含 0 才进下一步」——区间还不存在。
+
+**Files**
+- Modify: `tools/shadow_replay.py`（新增函数；`report_variants` 在 **:480**；`summarize` 在 **:639**）
+- Create: `tests/unit/test_shadow_replay_stats.py`
+- Create: `docs/正期望改造计划-基线.md`
+
+**Step 1 · 写失败测试** `tests/unit/test_shadow_replay_stats.py`
+
+```python
+"""自助法置信区间: 没有区间就不许下结论."""
+from __future__ import annotations
+
+from tools.shadow_replay import bootstrap_mean_ci
+
+
+def test_all_positive_sample_has_positive_interval():
+    lo, hi = bootstrap_mean_ci([5.0] * 30)
+    assert lo > 0 and hi > 0
+
+
+def test_mixed_sample_straddles_zero():
+    lo, hi = bootstrap_mean_ci([10.0, -9.0] * 15)
+    assert lo < 0 < hi
+
+
+def test_seed_makes_it_deterministic():
+    assert bootstrap_mean_ci([1.0, -2.0, 3.0]) == bootstrap_mean_ci([1.0, -2.0, 3.0])
+
+
+def test_empty_input_is_zero_interval():
+    assert bootstrap_mean_ci([]) == (0.0, 0.0)
+```
+
+> **不要用** `importlib.util.spec_from_file_location` 那套写法（原稿 Task 3 的写法）。
+> 不注册 `sys.modules` 时模块内的 `@dataclass` 取不到命名空间，实测直接崩：
+> `AttributeError: 'NoneType' object has no attribute '__dict__'`。
+> 用仓库既有惯例 `from tools.shadow_replay import ...` 即可（`test_vergex_gens.py` 一直这么写）。
+
+**Step 2 · 确认失败**：
+`.venv/bin/python -m pytest tests/unit/test_shadow_replay_stats.py -q`
+→ 期望 `ImportError: cannot import name 'bootstrap_mean_ci'`
+
+**Step 3 · 加函数**（放在 `tools/shadow_replay.py` 的 `fee_rate_from_outcomes` 附近）
+
+```python
+def bootstrap_mean_ci(nets, *, iters=20000, alpha=0.10, seed=7):
+    """净额均值的自助法置信区间(nets = 每笔净额 USDT); 空输入返回 (0.0, 0.0)."""
+    values = [float(x) for x in nets]
+    if not values:
+        return (0.0, 0.0)
+    rng = random.Random(seed)
+    n = len(values)
+    means = []
+    for _ in range(iters):
+        means.append(sum(rng.choice(values) for _ in range(n)) / n)
+    means.sort()
+    return (means[int(iters * (alpha / 2))], means[int(iters * (1 - alpha / 2))])
+```
+
+> 实测 **0.13 秒/变体**，15 行变体约 2 秒，**不需要**调小 `iters`。
+
+**Step 4 · 接进 `report_variants`（:480）** 表头与数据行各加两列：
+
+```python
+    print("%-26s %5s %6s %10s %8s %7s %9s %10s %9s %9s" %
+          ("变体", "笔数", "保留", "净U", "均U", "胜率", "净/风险", "相比基线", "90%下", "90%上"))
+```
+
+```python
+        lo, hi = bootstrap_mean_ci([r["net"] for r in sub])
+        print("%-26s %5d %5.0f%% %10.2f %8.2f %6.0f%% %9.3f %+10.2f %9.2f %9.2f" % (
+            name, len(sub), len(sub) / len(base) * 100, net, net / len(sub),
+            sum(1 for r in sub if r["net"] > 0) / len(sub) * 100,
+            net / risk if risk else 0, net - base_net, lo, hi))
+```
+
+**Step 5 · 接进 `summarize`（:639）**：同样加两列，区间用 `[r["net"] for r in filled]`。
+
+**Step 6 · 验证**
+
+```bash
+.venv/bin/python -m pytest tests/unit/test_shadow_replay_stats.py -q
+.venv/bin/python -m pytest --ignore=tests/e2e -q          # 期望 1310 passed, 1 skipped
+.venv/bin/python -m ruff check tools/shadow_replay.py     # 期望 37 条 == HEAD, 不多
+```
+
+**Step 7 · 落基线**：把 `--variants` 全表（含区间）抄进 `docs/正期望改造计划-基线.md`，
+文件头写明「生成命令 + 日期 + 样本量」。
+
+**Step 8 · 提交**：`✨ feat(tools): 回放变体表加自助法置信区间，无区间不下结论`
+
+**验收**
+- [ ] 4 个测试通过；`--variants` 输出多出 `90%下` / `90%上` 两列
+- [ ] `docs/正期望改造计划-基线.md` 存在且含区间列
+- [ ] ruff == 37，pytest 不比基线差
+
+---
+
+### T2 · 用区间逐条裁定现有闸门  ⬜ 未做（依赖 T1）
+
+**前提**：T1 完成（有 `bootstrap_mean_ci`）。
+**产出**：`docs/闸门裁定表.md`（新建）。**本任务只出结论，不动 `config/settings.json`**——
+改实盘是 T6 的事。
+
+**Step 1 · 一次算出所有候选闸门的区间**
+
+```bash
+cd /Users/hc/Documents/ai/PA_Agent
+.venv/bin/python - <<'PY'
+import csv
+from tools.shadow_replay import _is_counter_trend, bootstrap_mean_ci
+
+def num(x):
+    try: return float(x)
+    except (TypeError, ValueError): return None
+
+rows = []
+for r in csv.DictReader(open("logs/shadow_rows.csv", encoding="utf-8-sig")):
+    if r["filled"] != "True": continue
+    for k in ("net", "rr", "trade_conf", "trend_pct"):
+        r[k] = num(r[k])          # CSV 全是字符串; _is_counter_trend 要 float, 不转就 TypeError
+    rows.append(r)
+
+def hour(r): return int(r["record_time"][11:13])
+CH = ("broad_channel", "normal_channel", "trading_range")
+cases = [
+    ("基线 全部", rows),
+    ("禁 session(04-12时)", [r for r in rows if not 4 <= hour(r) <= 11]),
+    ("仅 session(04-12时)", [r for r in rows if 4 <= hour(r) <= 11]),
+    ("禁 neutral 诊断", [r for r in rows if r["diag_direction"] != "neutral"]),
+    ("仅 neutral 诊断", [r for r in rows if r["diag_direction"] == "neutral"]),
+    ("禁 trending_tr (R1a)", [r for r in rows if r["cycle_position"] != "trending_tr"]),
+    ("仅 trending_tr", [r for r in rows if r["cycle_position"] == "trending_tr"]),
+    ("禁逆势 1.5% (R1a)", [r for r in rows if not _is_counter_trend(r, 1.5)]),
+    ("trade_conf>=55", [r for r in rows if (r["trade_conf"] or 0) >= 55]),
+    ("仅做多 (R1a)", [r for r in rows if r["direction"] == "做多"]),
+    ("仅通道/区间 (R1b)", [r for r in rows if r["cycle_position"] in CH]),
+    ("做多+通道/区间 (R1b)", [r for r in rows if r["direction"] == "做多" and r["cycle_position"] in CH]),
+    ("做多+RR>=1.5 (R1b)", [r for r in rows if r["direction"] == "做多" and (r["rr"] or 0) >= 1.5]),
+]
+print("%-24s %4s %9s %7s %21s %s" % ("变体", "n", "净U", "均U", "90%CI", "R1"))
+for name, sub in cases:
+    nets = [r["net"] for r in sub]
+    lo, hi = bootstrap_mean_ci(nets)
+    need = 20 if "(R1a)" in name else (10 if "(R1b)" in name else None)
+    v = "" if need is None else ("PASS" if (len(nets) >= need and lo > 0) else "fail")
+    print("%-24s %4d %+9.2f %+7.2f [%+8.2f,%+8.2f] %s" % (
+        name, len(nets), sum(nets), sum(nets)/len(nets), lo, hi, v))
+PY
+```
+
+**Step 2 · 期望输出（2026-09-18 用同一算法先行算出，T1 完成后应能复现）**
+
+```text
+变体                          n        净U      均U                 90%CI R1
+基线 全部                      45     +1.57   +0.03 [   -1.14,   +1.24]
+禁 session(04-12时)          35    +30.55   +0.87 [   -0.50,   +2.30]
+仅 session(04-12时)          10    -28.98   -2.90 [   -4.29,   -1.13]   <- 区间全负
+禁 neutral 诊断               37     -9.24   -0.25 [   -1.53,   +1.09]
+仅 neutral 诊断                8    +10.81   +1.35 [   -1.50,   +4.33]
+禁 trending_tr (R1a)        25    +31.15   +1.25 [   -0.46,   +3.00] fail
+仅 trending_tr              20    -29.58   -1.48 [   -2.85,   -0.01]   <- 区间全负
+禁逆势 1.5% (R1a)             33    +38.21   +1.16 [   -0.25,   +2.59] fail
+trade_conf>=55             39    -22.49   -0.58 [   -1.77,   +0.68]
+仅做多 (R1a)                  23    +30.58   +1.33 [   -0.39,   +3.03] fail
+仅通道/区间 (R1b)               22    +39.19   +1.78 [   -0.11,   +3.66] fail
+做多+通道/区间 (R1b)             14    +41.60   +2.97 [   +1.01,   +4.90] PASS
+做多+RR>=1.5 (R1b)            7    +24.03   +3.43 [   +0.20,   +6.47] fail
+```
+
+**Step 3 · 裁定规则（照抄执行，不要自己发挥）**
+
+| 观察到 | 裁定 |
+|---|---|
+| 区间**上界 < 0**（全负）且实盘**已开**该闸门 | ✅ 保留（闸门方向正确，是"关掉它"变差） |
+| 区间**上界 < 0** 且实盘**未开** | ⚠️ 可开，但需 T6 的样本外复核后才动 |
+| 区间**下界 > 0** | ✅ 该配方有统计支持 → 进 T6 |
+| 区间**跨 0** | ❌ 证据不足 → **不动**（哪怕点估计很漂亮） |
+
+**Step 4 · 按上面规则得到的裁定（2026-09-18，样本内 n=45）**
+
+| 闸门 | 实盘 | 裁定 | 依据 |
+|---|---|---|---|
+| `block_session_entry` | true | **保留** | 「仅 session 04-12时」n=10 CI **[−4.29,−1.13] 全负** ⇒ 该时段显著亏钱 |
+| `block_trending_tr_entry` | true | **保留** | 「仅 trending_tr」n=20 CI [−2.85,−0.01] 全负 ⇒ 该周期显著亏钱 |
+| `block_neutral_diag_entry` | true | **不动** | 「禁 neutral」CI [−1.53,+1.09] **跨零** ⇒ 点估计 −9.24U 不足以定案 |
+| `counter_trend_block` | true | **暂时保留** | 「禁逆势」+38.21U 但 CI [−0.25,+2.59] 跨零（n=33 仍不够） |
+| `block_short_entry` | false | **不动** | 「仅做多」+30.58U 但 CI [−0.39,+3.03] 跨零 |
+| `min_plan_reward_risk`=1.5 | 1.5 | **不动** | RR≥1.0 与基线同值；RR≥1.5 的增益未单独做区间 |
+| `block_cycle_allowlist` | `[]` | **不动** | 单独白名单 CI [−0.11,+3.66] 跨零 |
+| **组合：仅做多 + 通道/区间** | — | ⭐ **唯一 PASS** | n=14 CI **[+1.01,+4.90]** 全正 ⇒ 进 T6 |
+| `trade_conf` 门槛 | 无 | **不要加** | ≥55 的 CI 跨零且点估计为负 |
+
+> **⚠️ 这一节推翻了两轮点估计的结论，必须读进去**：
+> 「禁逆势 +38.21U」「禁 trending_tr +31.15U」「仅做多 +30.58U」「仅通道/区间 +39.19U」
+> ——**四个全部跨零**。它们不是"有效的闸门"，只是样本噪声。**唯一**站得住的是
+> 「做多 + 通道/区间」这一个组合（n=14）。这也正是第 0 节禁令 1 存在的原因。
+>
+> 同理，上一轮文档里「禁 neutral 在伤害实盘」的说法**已被区间否掉**：那只是点估计。
+
+**Step 5 · 写 `docs/闸门裁定表.md`**：把 Step 3 的规则、Step 4 的裁定表、
+以及产生它的命令与日期抄进去。**每个裁定都必须带 n 和区间**，没有区间的写「证据不足，不动」。
+
+**Step 6 · 提交**：`📝 docs(plans): 用置信区间裁定闸门，仅一个配方通过 R1`
+
+**验收**
+- [ ] Step 1 命令的输出与 Step 2 的期望表一致（不一致说明样本变了，停下重估）
+- [ ] `docs/闸门裁定表.md` 存在，每行都带 n 与 90%CI
+- [ ] `config/settings.json` **未被修改**（用 `git status` 无法验证，因为它是 gitignore；用文件 mtime 或 diff 备份确认）
+
+---
+
+### T3 · 实盘期望判定脚本 + 验证规程  ⬜ 未做（依赖 T1）
+
+**前提**：T1 完成（要复用 `bootstrap_mean_ci`）。
+
+**Files**
+- Create: `tools/expectancy_report.py`
+- Create: `docs/正期望验证规程.md`
+
+**Step 1 · 写脚本**（注意：用 `sys.path` + 正常 import，**不要**用原稿的
+`importlib.util.spec_from_file_location`，那套会崩）
+
+```python
+"""按硬门槛判定实盘期望是否显著为正."""
+from __future__ import annotations
+
+import csv
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools.shadow_replay import bootstrap_mean_ci  # noqa: E402 - path set above
+
+MIN_N = {"R2": 30, "R3": 100}
+MAX_DD = {"R2": 0.25, "R3": 0.30}
+
+
+def max_drawdown(nets):
+    """按时间顺序累计净额的峰值回撤(相对峰值)."""
+    peak = equity = worst = 0.0
+    for n in nets:
+        equity += n
+        peak = max(peak, equity)
+        if peak > 0:
+            worst = max(worst, (peak - equity) / peak)
+    return worst
+
+
+def main(path="trade_records/outcomes.csv"):
+    rows = list(csv.DictReader(open(path, encoding="utf-8-sig")))
+
+    def num(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+    pairs = sorted((str(r.get("ts_close") or ""), num(r.get("net_usdt"))) for r in rows)
+    nets = [n for _, n in pairs if n is not None]
+    if not nets:
+        print("FAIL: 无成交记录")
+        return 1
+    mean = sum(nets) / len(nets)
+    lo, hi = bootstrap_mean_ci(nets)
+    wr = sum(1 for n in nets if n > 0) / len(nets)
+    dd = max_drawdown(nets)
+    stage = "R3" if len(nets) >= MIN_N["R3"] else ("R2" if len(nets) >= MIN_N["R2"] else "样本不足")
+    if stage == "样本不足":
+        print(f"n={len(nets)} 均{mean:+.2f}U 胜率{wr:.0%} 90%CI[{lo:+.2f}, {hi:+.2f}] "
+              f"最大回撤{dd:.1%} -> FAIL(样本不足, 需 n>={MIN_N['R2']})")
+        return 1
+    ok = mean > 0 and lo > 0 and dd < MAX_DD[stage]
+    print(f"n={len(nets)} 均{mean:+.2f}U 胜率{wr:.0%} 90%CI[{lo:+.2f}, {hi:+.2f}] "
+          f"最大回撤{dd:.1%} 阶段={stage} -> {'PASS' if ok else 'FAIL'}")
+    print(f"门槛({stage}): n>={MIN_N[stage]}, 均>0, CI下界>0, 回撤<{MAX_DD[stage]:.0%}")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(*sys.argv[1:]))
+```
+
+**Step 2 · 跑它并确认 FAIL**
+
+```bash
+.venv/bin/python tools/expectancy_report.py
+```
+
+**期望（2026-09-18 实盘 73 笔，均 −2.19U、胜率 37%）**：输出以 `-> FAIL` 结尾。
+**FAIL 是正确行为**——当前实盘就是负期望，脚本必须如实说。
+
+**Step 3 · 写 `docs/正期望验证规程.md`**，至少包含：
+
+- 第 1 节的 R1a/R1b/R2/R3/R4 门槛表（**与本文件逐字一致**）
+- 每日一行检查：`.venv/bin/python tools/expectancy_report.py`
+- 每日第二行检查（账本）：`ls records/orders/ | wc -l` 必须 `> 0`
+- 回滚清单：恢复 `config/settings.json.bak_*` → 停服务 → 记原因
+- 停服/起服命令（见 T6 Step 4 的两种写法）
+
+**Step 4 · 提交**：`✨ feat(tools): 新增实盘期望判定脚本与阶段验证规程`
+
+**验收**
+- [ ] `tools/expectancy_report.py` 在 73 笔上输出 FAIL 且带 CI 与回撤
+- [ ] `docs/正期望验证规程.md` 的门槛表与第 1 节一致
+- [ ] `pytest` 与 `ruff` 不劣于基线（该脚本不新增 lint 项）
+
+---
+
+### T4 · 出场侧实验（本计划原先完全没有的方向）  ⬜ 未做
+
+**前提**：`tools/exit_cause_report.py` 已存在（`2f73f58`）；`records/orders/` 有数据更好，没有也能跑。
+**为什么**：五个原 Task 全在入场，但 2026-09-18 的出场归因显示亏损主要在出场侧：
+`<30m` 桶 36 笔 **−89.87U**（占窗口亏损 54%），且 09-13 之后该桶 10 笔**全部**由交易所侧
+`pa-sl` 平掉。**结论：能改的不是"晚点平仓"，而是止损位与获利结构。**
+
+**Step 1 · 复现出场基线**
+
+```bash
+.venv/bin/python tools/exit_cause_report.py --days 14 --out logs/exit_cause.json 2>&1 | head -30
+```
+
+**期望（2026-09-18）**：`<30m n=36 净 −89.87`、`3-6h n=9 净 −65.50`（其中 ZEC 单笔 −61.60）、
+`均MAE −0.797 / 均MFE +0.855`（几乎对称 ⇒ 入场无方向优势）。
+
+**Step 2 · 三次单参数实验（一次只动一个，禁令 3）**
+
+```bash
+# a) 止损位: 1.5 → 2.5 ATR
+.venv/bin/python tools/shadow_replay.py --replay --days 45 --min-stop-atr 2.5 --min-stop-pct 0.2 \
+  --timeout-min 30 --trend-days 7 --trend-neutral 1.5 2>&1 | grep -E "净 |结局分布"
+
+# b) 部分止盈: 50% → 0(全平) / 70%
+.venv/bin/python tools/shadow_replay.py --replay --days 45 --min-stop-atr 1.5 --min-stop-pct 0.2 \
+  --timeout-min 30 --partial-pct 0 --trend-days 7 --trend-neutral 1.5 2>&1 | grep -E "净 "
+
+# c) 保本移损: off → 0.5r（走对照组入口 --baseline）
+.venv/bin/python tools/shadow_replay.py --baseline --days 45 --baseline-be 0.5r \
+  --trend-days 7 --trend-neutral 1.5 2>&1 | tail -5
+```
+
+**Step 3 · 判定**：每次跑完把 `logs/shadow_rows.csv` 存档（`cp logs/shadow_rows.csv logs/shadow_rows_<标签>.csv`），
+再用 T2 Step 1 的脚本算区间。**只有区间下界 > 0 的参数才进 T6。**
+
+**Step 4 · 写 `docs/出场侧实验.md`**：三个参数各自的前后 n/净/区间 + 结论。
+
+**Step 5 · 提交**：`📝 docs(plans): 出场侧单参数实验(止损位/部分止盈/保本)`
+
+**验收**
+- [ ] 三份 `logs/shadow_rows_*.csv` 存档存在
+- [ ] `docs/出场侧实验.md` 每个参数都带 n/净/区间
+- [ ] 没有修改任何 `pa_agent/` 代码（本任务只做实验）
+
+---
+
+### T5 · 时间止损参数寻优（原 Task 4 的重写）  ⬜ 未做
+
+**前提**：无。
+**为什么重写**：原 Task 4 的前提（"实盘没有时间止损，要决定是否移植"）**已失效**——
+实盘 `time_stop_minutes=720`，由 `pa_agent/trading/position_manager.py` 的 Time-stop 轮询执行，
+运行日志里 `时间止损` 出现 9 次、`Time-stop` 31 次。所以现在要问的是**720 是不是最优**。
+
+**Step 1 · 四个口径对比**
+
+```bash
+cd /Users/hc/Documents/ai/PA_Agent
+for TS in 720 1440 4320 100000; do
+  echo "=== time-stop-min=$TS ==="
+  .venv/bin/python tools/shadow_replay.py --replay --days 45 --time-stop-min $TS \
+    --min-stop-atr 1.5 --min-stop-pct 0.2 --timeout-min 30 \
+    --trend-days 7 --trend-neutral 1.5 2>&1 | grep -E "净 |结局分布"
+done
+```
+
+**Step 2 · 判定**：把每个口径的 `net` 列喂给 T1 的 `bootstrap_mean_ci`，
+**只有区间下界 > 0 且优于 720 的口径才进 T6**。
+
+**Step 3 · 交叉验证（重要）**：时间止损只影响"慢慢磨"的仓位——`exit_cause_report` 已证明
+`<30m` 桶 09-13 后 10 笔**全是交易所侧 `pa-sl` 平掉的**，时间止损对它们**一笔都改不了**。
+所以若某个 `TS` 值让净额大幅变化，必须解释是哪一档时长被改变；
+时长桶基线（14 天，92 笔）：`<30m −89.87` / `1-3h +8.54` / `3-6h −65.50`（含 ZEC −61.60）/
+`12-24h −30.25` / `>24h +3.89`。
+
+**Step 4 · 提交**：`📝 docs(plans): 时间止损参数寻优结果`
+
+**验收**
+- [ ] 四个口径的结果与区间都记进文档
+- [ ] 给出"720 保留 / 改 X"的明确结论，或"证据不足，保留 720"
+
+---
+
+### T6 · 灰度上线 + 实盘小样验证（**唯一**允许改 settings.json 的任务）  ⬜ 未做
+
+**前提**：T1、T2、T3 完成。
+
+> ### ⚠️ 先说清一个硬约束：回放样本外**做不了**
+>
+> 实测把 45 笔按时间切：
+>
+> | 留出 | 样本内 | 样本外 | 唯一 PASS 配方在样本外的 n |
+> |---|---|---|---|
+> | 最后 7 天（切点 09-11） | 39 笔 | 6 笔 | **2 笔** |
+> | 最后 10 天（切点 09-08） | 33 笔 | 12 笔 | 3 笔 |
+> | 最后 14 天（切点 09-04） | 10 笔 | 35 笔 | 11 笔，但**样本内只剩 3 笔**（无法选配方） |
+>
+> 配方（做多+通道/区间）的 14 笔里 11 笔集中在最近 14 天，所以任何"留出"都会把
+> 选择集或验证集压到 2–3 笔。**结论：不能靠回放留出验证，只能靠实盘小样（R2）。**
+> 这也意味着 T6 是本计划唯一有真实风险的一步——**必须按下面的回滚清单执行**。
+
+**Step 1 · 备份**
+
+```bash
+cp config/settings.json config/settings.json.bak_$(date +%Y%m%d)_pre_gate
+```
+
+**Step 2 · 只改一个配方**（T2 裁定的唯一 PASS 项；两个键同属一个配方，属于一次决策）
+
+```bash
+.venv/bin/python - <<'PY'
+import json, pathlib
+p = pathlib.Path("config/settings.json")
+doc = json.loads(p.read_text(encoding="utf-8"))
+cfg = doc["binance_usdm_testnet"]
+cfg["block_short_entry"] = True
+cfg["block_cycle_allowlist"] = ["broad_channel", "normal_channel", "trading_range"]
+p.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print("ok:", {k: cfg[k] for k in ("block_short_entry", "block_cycle_allowlist")})
+PY
+```
+
+同时把这两个键同步到 `config/settings.example.json` 的**两个 env 块**（值给默认：
+`block_short_entry: false`、`block_cycle_allowlist: []`）。
+
+> 若 T4/T5 也有通过项，**在 R2 通过之后**再叠加，不要和本配方同时上（禁令 3）。
+
+**Step 3 · 记录本次改动**（写进 `docs/闸门裁定表.md`）
+：改了哪两个键、依据是哪一行区间、预期什么、失败判据是什么。
+
+**Step 4 · 起服务**（两种写法，按环境选）
+
+```bash
+# 常规环境
+pa-monitor start
+
+# 沙箱/受限环境(pa-monitor stop 内部用 ps, 会被拒绝)——直接管 pid 文件
+nohup .venv/bin/python -m pa_agent.monitoring.cli start > logs/monitor.out 2>&1 &
+# 停: 不读 pid 文件也能停, 用 python 发信号
+.venv/bin/python -c "import pathlib, os, signal; os.kill(int(pathlib.Path('config/monitoring.pid').read_text().strip()), signal.SIGTERM)"
+```
+
+**Step 5 · 日检**（每天一次，两条都要看）
+
+```bash
+.venv/bin/python tools/expectancy_report.py     # 期望先 FAIL(样本不足), n 攒到 30 后再判定
+ls records/orders/ | wc -l                      # 必须 > 0, 否则出场归因 7 天后失效
+```
+
+**Step 6 · 判定与回滚**
+
+| 观察 | 动作 |
+|---|---|
+| n≥30 且 `expectancy_report` PASS | 进 R3（继续攒到 n≥100） |
+| n≥30 但 CI 下界 ≤ 0 | **回滚**：恢复备份 → 停服务 → 记原因 |
+| 最大回撤 ≥ 25% | **立即回滚**，不等 n |
+| `records/orders/` 为空 | 停下查账本（`order_ledger` 写失败会只告警不报错） |
+
+回滚命令：
+
+```bash
+cp config/settings.json.bak_<日期>_pre_gate config/settings.json
+.venv/bin/python -c "import pathlib, os, signal; os.kill(int(pathlib.Path('config/monitoring.pid').read_text().strip()), signal.SIGTERM)"
+```
+
+**Step 7 · 提交**（**不含** settings.json，它被 gitignore）
+
+```bash
+git add docs/闸门裁定表.md docs/正期望验证规程.md config/settings.example.json
+git status --short      # 确认 settings.json 不在列表里
+git commit -m "✨ feat(config): 灰度启用做多+通道/区间配方，附回滚清单"
+```
+
+**验收**
+- [ ] 备份文件存在，且回滚命令实测可执行（在备份上演练一次）
+- [ ] `config/settings.example.json` 两个 env 块键集一致
+- [ ] 裁定表里写明了本次改动的依据行（n 与区间）
+- [ ] 日检两条命令都有输出且被记录
+
+---
+
+## 4. 附录（归档，勿按此执行）
+
+以下为**原计划 v1 的内容与 2026-09-18 的复核批注**，仅用于追溯证据来源。
+执行路径只有上面第 0–3 节。
+
+
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -12,7 +638,7 @@
 
 ---
 
-## 执行状态（2026-09-18 复核后更新）
+### A. 执行状态（2026-09-18 复核）
 
 | Task | 状态 | 提交 / 证据 |
 |---|---|---|
@@ -33,7 +659,7 @@
 
 ---
 
-## Global Constraints
+### B. Global Constraints（原稿）
 
 - Python 3.11，虚拟环境 `.venv`；所有命令用 `.venv/bin/python`（系统 python3 缺 pydantic）。
 - 提交格式固定：`<emoji> <type>(scope): 中文描述`，例：`🐛 fix(tools): 修正回放手续费双重计入`。**不主动 push。**
@@ -44,7 +670,7 @@
 
 ---
 
-## 诊断：证据与结论
+### C. 原诊断 E1–E5（已按 2026-09-18 复核批注修正）
 
 ### E1 回放手续费约是实盘的 2 倍（最高优先级）
 
@@ -236,7 +862,7 @@ else:
 
 ---
 
-## 文件结构（本计划会动到的文件）
+### D. 原计划的文件清单
 
 | 文件 | 职责 | 动作 |
 |---|---|---|
@@ -252,7 +878,7 @@ else:
 
 ---
 
-### Task 0: 回放费用模型校准 ✅ 已完成（`db54db3`）
+#### 【归档】Task 0: 回放费用模型校准 ✅ 已完成（`db54db3`）
 
 > **实际落地与本文的差异**：① 本文写的 `MAKER_SHARE = 0.33`，实测支持的是
 > `1.0/3.0`（见 E1 的三点定标）；② 测试的 loader 写法本身跑不起来（本文件已修正）；
@@ -390,7 +1016,7 @@ git commit -m "🐛 fix(tools): 修正回放手续费双重计入, 单边费率�
 
 ---
 
-### Task 1: 提示词补上止损下限规则 ✅ 已完成（`8552cc5`，实现方式不同）
+#### 【归档】Task 1: 提示词补上止损下限规则 ✅ 已完成（`8552cc5`）
 
 > 见 E4 末尾的状态说明：实际走的是「按帧动态渲染执行约束」，不是「静态规则文本」，
 > 观测脚本也需要重写。
@@ -496,7 +1122,7 @@ git commit -m "✨ feat(ai): 提示词写明止损距离下限, 降低计划被�
 
 ---
 
-### Task 2: 周期白名单门控（配方收敛） ✅ 已完成（`1ba44bd`）
+#### 【归档】Task 2: 周期白名单门控 ✅ 已完成（`1ba44bd`）
 
 > **实际落地与本文的差异**：
 > ① 本文 Step 1 用的 `make_pipeline` / `make_signal` fixture **不存在**；实际测试沿用
@@ -618,7 +1244,7 @@ git commit -m "✨ feat(trading): 新增周期白名单入口门控, 默认关�
 
 ---
 
-### Task 3: 回放输出自助法置信区间 ⬜ 未做（**建议优先做**，因为它是其余判断的前提）
+#### 【归档】Task 3: 自助法置信区间 → 已重写为正文 T1
 
 > **本文需要修正的地方**：
 > ① Step 1/5 的 loader 已在本文件修正（缺 `sys.modules` 注册）；
@@ -735,7 +1361,7 @@ git commit -m "✨ feat(tools): 回放变体表加自助法置信区间, 无区�
 
 ---
 
-### Task 4: 量化时间止损的贡献，决定是否移植 ⬜ 未做（**前提已失效，建议重写为参数寻优**）
+#### 【归档】Task 4: 时间止损移植 → 已重写为正文 T5
 
 > E2 已过期：实盘**有**时间止损（`time_stop_minutes=720`）。「是否移植」不再有意义，
 > 剩下的问题是「12 小时是不是最优值」。
@@ -808,7 +1434,7 @@ git commit -m "📝 docs(tools): 量化时间止损贡献并给出移植结论"
 
 ---
 
-### Task 5: 实盘验证协议与阶段门禁 ⬜ 未做（脚本的 loader 已修正，其余可用）
+#### 【归档】Task 5: 实盘验证协议 → 已重写为正文 T3/T6
 
 > **已核实成立的部分**：`tools/expectancy_report.py` 的预期输出是对的——
 > 当前 `trade_records/outcomes.csv` 73 笔，均值 **−2.19U**、胜率 **37%**，
@@ -941,7 +1567,7 @@ git commit -m "✨ feat(tools): 新增实盘期望判定脚本与阶段验证规
 
 ---
 
-## 可执行性评估（2026-09-18 逐条实测）
+### E. 可执行性评估（2026-09-18 逐条实测）
 
 **判定口径**：一个 agent worker 拿着这条 Step，不追问、不猜，能不能跑完并拿到可验证的结果。
 「能」= 可执行；「要改一处才能跑」= 有缺陷；「照抄必崩」= 不可执行。
@@ -1043,7 +1669,7 @@ R1 要求「n≥20 且区间不含 0」。实测能达到 n≥20 的只有：基
 
 ---
 
-## 完成定义（Definition of Done）
+### F. 原完成定义（已被第 1 节取代）
 
 1. **R1**：`--days 45` 忠实回放，目标配方 n≥20、均U>0、90% CI 下界>0。
 2. **R3**：实盘 testnet n≥100、均U>0、90% CI 下界>0、最大回撤<30%。
@@ -1054,7 +1680,7 @@ R1 要求「n≥20 且区间不含 0」。实测能达到 n≥20 的只有：基
 4. `config/settings.example.json` 两个 env 块与实盘键集一致（值可不同）。
 5. `pytest` 与 `ruff` 不劣于改动前基线。
 
-## 风险与已知陷阱
+### G. 风险与已知陷阱（仍然有效）
 
 - **数据窥探**：Task 2 的配方是在同一 45 笔样本上搜出来的（32 组合搜索的 argmax 曾给出
   +50.38U）。**必须**留出最后 7 天做样本外复核；回放通过不等于实盘通过。
@@ -1072,7 +1698,7 @@ R1 要求「n≥20 且区间不含 0」。实测能达到 n≥20 的只有：基
 - **testnet 与实盘差异**：testnet 撮合宽松（限价单成交率偏高）。R3 的均U 需按 0.7 折扣估算主网。
 - **不要为了追收益加杠杆**：单笔风险 26.7% 下，30 天回撤 ≥50% 的概率是 52–72%（见历史分析）。
 
-## Self-Review 记录（原稿）
+### H. Self-Review 记录（原稿）
 
 > 下面是原计划的自我复核，**保留原样**。2026-09-18 的复核结论见本文件顶部的
 > 「执行状态」与文末的「可执行性评估」：原稿的「占位符扫描：每个代码步骤都给了可运行
