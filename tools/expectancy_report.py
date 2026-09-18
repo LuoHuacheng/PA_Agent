@@ -77,8 +77,22 @@ def max_drawdown_usdt(nets):
     return worst
 
 
-def evaluate(nets):
-    """由逐笔净额算出 n/均/区间/胜率/回撤/阶段/是否通过."""
+def account_drawdown_pct(nets, capital):
+    """账户口径回撤 = 绝对峰值回撤 / 参照本金.
+
+    计划 T3 的 max_drawdown() 分母是"累计净额峰值", 不是账户 —— 见其 docstring 与
+    docs/正期望验证规程.md §2.7。要按账户口径判 R2/R3, 必须给出参照本金。
+    """
+    if not capital or capital <= 0:
+        return 0.0
+    return max_drawdown_usdt(nets) / float(capital)
+
+
+def evaluate(nets, capital=None):
+    """由逐笔净额算出 n/均/区间/胜率/回撤/阶段/是否通过.
+
+    capital 给定时额外算出账户口径回撤 dd_account(比例), 否则它为 None。
+    """
     if len(nets) >= MIN_N["R3"]:
         stage = "R3"
     elif len(nets) >= MIN_N["R2"]:
@@ -90,9 +104,11 @@ def evaluate(nets):
     wr = (sum(1 for n in nets if n > 0) / len(nets)) if nets else 0.0
     dd = max_drawdown(nets)
     dd_usdt = max_drawdown_usdt(nets)
+    dd_account = account_drawdown_pct(nets, capital) if capital else None
     ok = bool(nets) and stage != "样本不足" and mean > 0 and lo > 0 and dd < MAX_DD[stage]
-    return {"n": len(nets), "mean": mean, "lo": lo, "hi": hi,
-            "wr": wr, "dd": dd, "dd_usdt": dd_usdt, "stage": stage, "ok": ok}
+    return {"n": len(nets), "mean": mean, "lo": lo, "hi": hi, "wr": wr,
+            "dd": dd, "dd_usdt": dd_usdt, "dd_account": dd_account,
+            "stage": stage, "ok": ok}
 
 
 def _load_rows(path):
@@ -113,7 +129,15 @@ def main(argv=None):
     ap.add_argument("--since", default="", help="只统计该时刻(ISO8601)之后平仓的样本")
     ap.add_argument("--gate-since", action="store_true",
                     help=f"只统计 T6 灰度上线({GATE_START})之后的样本")
+    ap.add_argument("--capital", type=float, default=None,
+                    help="参照本金(USDT); 给了就额外输出账户口径回撤")
+    ap.add_argument("--account-dd-gate", action="store_true",
+                    help="用账户口径回撤(需 --capital)代替计划口径判定 R2/R3")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
+
+    if args.account_dd_gate and not args.capital:
+        print("--account-dd-gate 需要同时给 --capital", file=sys.stderr)
+        return 2
 
     rows = _load_rows(args.path)
     cutoff_label = ""
@@ -131,20 +155,27 @@ def main(argv=None):
         print("FAIL: 无成交记录" + (f"(since={cutoff_label})" if cutoff_label else ""))
         return 1
 
-    res = evaluate(nets)
+    res = evaluate(nets, capital=args.capital)
     prefix = f"since={cutoff_label} " if cutoff_label else ""
+    acct = ""
+    if res["dd_account"] is not None:
+        acct = f" 账户回撤{res['dd_account']:.1%}(本金{args.capital:.0f}U)"
     if res["stage"] == "样本不足":
         print(f"{prefix}n={res['n']} 均{res['mean']:+.2f}U 胜率{res['wr']:.0%} "
               f"90%CI[{res['lo']:+.2f}, {res['hi']:+.2f}] "
-              f"回撤{res['dd_usdt']:.2f}U(峰值口径{res['dd']:.1%}) "
+              f"回撤{res['dd_usdt']:.2f}U(峰值口径{res['dd']:.1%}){acct} "
               f"-> FAIL(样本不足, 需 n>={MIN_N['R2']})")
         return 1
+    dd_for_gate = res["dd_account"] if args.account_dd_gate else res["dd"]
+    ok = res["mean"] > 0 and res["lo"] > 0 and dd_for_gate < MAX_DD[res["stage"]]
+    dd_label = "账户回撤" if args.account_dd_gate else "峰值口径回撤"
     print(f"{prefix}n={res['n']} 均{res['mean']:+.2f}U 胜率{res['wr']:.0%} "
           f"90%CI[{res['lo']:+.2f}, {res['hi']:+.2f}] "
-          f"回撤{res['dd_usdt']:.2f}U(峰值口径{res['dd']:.1%}) "
-          f"阶段={res['stage']} -> {'PASS' if res['ok'] else 'FAIL'}")
-    print(f"门槛({res['stage']}): n>={MIN_N[res['stage']]}, 均>0, CI下界>0, 回撤<{MAX_DD[res['stage']]:.0%}")
-    return 0 if res["ok"] else 1
+          f"回撤{res['dd_usdt']:.2f}U(峰值口径{res['dd']:.1%}){acct} "
+          f"阶段={res['stage']} -> {'PASS' if ok else 'FAIL'}")
+    print(f"门槛({res['stage']}): n>={MIN_N[res['stage']]}, 均>0, CI下界>0, "
+          f"{dd_label}<{MAX_DD[res['stage']]:.0%}")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

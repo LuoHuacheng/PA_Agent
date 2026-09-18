@@ -5,6 +5,7 @@ import csv
 
 from tools.expectancy_report import (
     GATE_START,
+    account_drawdown_pct,
     evaluate,
     filter_since,
     main,
@@ -69,6 +70,17 @@ def test_evaluate_reports_both_drawdown_flavours():
     res = evaluate([10.0, -5.0] * 15)
     assert res["dd"] > 0
     assert res["dd_usdt"] > 0
+
+
+def test_account_drawdown_pct_uses_capital_as_denominator():
+    assert account_drawdown_pct([10.0, -5.0], 100.0) == 0.05
+    assert account_drawdown_pct([10.0, -5.0], 0.0) == 0.0
+    assert account_drawdown_pct([10.0, -5.0], None) == 0.0
+
+
+def test_evaluate_only_reports_account_dd_when_capital_given():
+    assert evaluate([1.0] * 30)["dd_account"] is None
+    assert evaluate([1.0] * 30, capital=100.0)["dd_account"] == 0.0
 
 
 def test_evaluate_empty_is_insufficient():
