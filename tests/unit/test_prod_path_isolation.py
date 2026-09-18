@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from pa_agent.config.paths import PROJECT_ROOT
 from pa_agent.feedback import base_rate_injector
 from pa_agent.records import cancel_log, trade_logger
@@ -61,6 +63,33 @@ def test_record_order_never_touches_real_ledger() -> None:
     after_mtime = {p.name: p.stat().st_mtime_ns for p in real_dir.glob("orders-*.jsonl")}
     assert after == before, f"单测新增了真实账本文件: {set(after) - set(before)}"
     assert after_mtime == before_mtime, "单测改写了真实账本文件"
+
+
+def test_isolation_survives_fixture_rollback(monkeypatch) -> None:
+    """用例结束后(隔离若已回滚)泄漏线程解析出的路径仍须在仓库外.
+
+    2026-09-18 探针实测的第二个污染通道: `_stop_watchdog_loop` 这类 daemon 线程
+    会活过用例 teardown, 只靠函数级 monkeypatch 的话, 它下一次 `_drop_guard`
+    就写到真实 state 上。这里主动 undo 掉用例级补丁来模拟那一刻。
+    """
+    monkeypatch.undo()
+    for name, target in {
+        "binance_usdm_testnet._RUNTIME_STATE_PATH": binance_usdm_testnet._RUNTIME_STATE_PATH,
+        "order_ledger.DEFAULT_LEDGER_DIR": order_ledger.DEFAULT_LEDGER_DIR,
+        "trade_logger.TRADE_RECORDS_DIR": trade_logger.TRADE_RECORDS_DIR,
+    }.items():
+        assert not _inside_repo(target), f"回滚后 {name} 指回仓库真实目录: {target}"
+
+
+def test_repo_write_tripwire_blocks_production_paths() -> None:
+    """兜底硬闸门: 测试进程直接 open 生产落盘目录必须报错, 不许静默写坏."""
+    for relative in ("trade_records/binance_usdm_testnet_state.json", "records/orders/x.jsonl"):
+        target = PROJECT_ROOT / relative
+        with (
+            pytest.raises(RuntimeError, match="生产落盘路径"),
+            open(target, "w", encoding="utf-8") as handle,
+        ):
+            handle.write("should never land on disk")
 
 
 def test_state_write_never_touches_real_state() -> None:

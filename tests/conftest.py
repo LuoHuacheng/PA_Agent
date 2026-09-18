@@ -11,6 +11,8 @@ BTC 裸仓 6 分 41 秒、ETH 挂单被遗弃 3 小时。
 """
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 _TARGETS = (
@@ -31,6 +33,30 @@ _TARGETS = (
     ("pa_agent.config.paths", "RECORDS_DIR", "records"),
     ("pa_agent.config.paths", "RECORDS_PENDING_DIR", "records/pending"),
 )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_runtime_write_paths_session(tmp_path_factory):
+    """会话级重定向, **不随用例回滚** —— leak 线程的最后一道隔离.
+
+    2026-09-18 探针实测: 单测启动的 `_stop_watchdog_loop` 是 daemon 线程,
+    函数级 monkeypatch 在 teardown 回滚后, 它的下一次 `_drop_guard` 会落到
+    真实 state 文件上(真实 guards 被写成 [])。会话级直接把模块属性指向
+    临时目录并**永不还原**, 这样任何活过用例的线程也只能写到临时目录。
+    仓库根的 conftest 另有一道"写生产路径即报错"的硬闸门兜底。
+    """
+    root = tmp_path_factory.mktemp("runtime-write-paths-session")
+    for module_name, attr, relative in _TARGETS:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        current = getattr(module, attr, None)
+        if current is None:
+            continue
+        target = root / relative
+        setattr(module, attr, str(target) if isinstance(current, str) else target)
+    yield
 
 
 @pytest.fixture(autouse=True)
