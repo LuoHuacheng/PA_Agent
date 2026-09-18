@@ -10,7 +10,17 @@ from pa_agent.monitoring.cli import (
     _is_monitor_process,
     _release_monitor_pid,
     _shutdown_monitor_process,
+    _signal_name,
 )
+
+
+def test_signal_name_labels_signals_for_shutdown_logs() -> None:
+    """Shutdown diagnostics need a readable signal name in the log."""
+    import signal as _signal
+
+    assert _signal_name(_signal.SIGTERM) == "SIGTERM"
+    assert _signal_name(_signal.SIGINT) == "SIGINT"
+    assert _signal_name(9999) == "9999"
 
 
 def test_pid_guard_rejects_live_monitor_instance(tmp_path: Path, monkeypatch) -> None:

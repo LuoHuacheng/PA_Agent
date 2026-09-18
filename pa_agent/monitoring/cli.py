@@ -24,6 +24,14 @@ _STOP_TIMEOUT_SECONDS = 15.0
 _STOP_WATCHDOG_SECONDS = 4.0
 
 
+def _signal_name(signum: int) -> str:
+    """Readable signal name for shutdown diagnostics (fallback: the raw number)."""
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return str(signum)
+
+
 def _pid_exists(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -336,6 +344,13 @@ def run_monitor() -> int:
     watchdog_armed = threading.Event()
 
     def request_stop(_signum: int, _frame: Any) -> None:
+        # Diagnostic: a silent process death was indistinguishable from a normal
+        # exit. Log who asked us to stop before anything else runs.
+        logger.warning(
+            "监控收到信号 %s, 开始优雅停止 (pid=%d)",
+            _signal_name(_signum),
+            os.getpid(),
+        )
         stop_event.set()
         if watchdog_armed.is_set():
             return
@@ -635,6 +650,11 @@ def run_monitor() -> int:
             pass
         return 0
     finally:
+        logger.warning(
+            "监控开始收尾 (pid=%d, stop_requested=%s)",
+            os.getpid(),
+            stop_event.is_set(),
+        )
         if user_stream is not None:
             try:
                 user_stream.stop(timeout=3.0)
@@ -662,6 +682,7 @@ def run_monitor() -> int:
             )
         signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)
+        logger.warning("监控进程已退出 (pid=%d)", os.getpid())
 
 
 _FOREGROUND_FLAG = "--foreground"
