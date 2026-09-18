@@ -226,6 +226,9 @@ class SignalPipeline:
             reasons.append("trending_tr_block: 回放 118 笔净/风险 -0.55")
         if getattr(cfg, "block_neutral_diag_entry", False) and str(diag.get("direction") or "") == "neutral":
             reasons.append("neutral_diag_block: 实盘 neutral 单胜率 25%")
+        allow = tuple(getattr(cfg, "block_cycle_allowlist", ()) or ())
+        if allow and cycle and cycle not in allow:
+            reasons.append(f"cycle_block: 周期位置 {cycle} 不在白名单({'/'.join(allow)})")
         if getattr(cfg, "block_session_entry", False) and _session_blocked_now():
             reasons.append("session_block: 回放 04-12时(UTC+8) 74 笔 -290U")
         min_rr = float(getattr(cfg, "min_plan_reward_risk", 0.0) or 0.0)

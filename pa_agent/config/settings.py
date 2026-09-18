@@ -266,6 +266,13 @@ class BinanceUSDMTestnetSettings(BaseModel):
     block_short_entry: bool = False
     block_trending_tr_entry: bool = False
     block_neutral_diag_entry: bool = False
+    # 周期位置白名单: 非空时只允许这些 cycle_position 入场(空 = 不启用)。
+    # 2026-09-18 修正费用模型后重跑 45 天回放: trending_tr 20 笔 -29.58U,
+    # tight_channel/spike 3 笔 -8.03U; 通道与区间(broad/normal/trading_range)
+    # 22 笔 +39.18U。比 block_trending_tr_entry 多挡 tight_channel/spike,
+    # 且可灰度、可回放调参而不改代码。
+    block_cycle_allowlist: list[str] = Field(default_factory=list)
+
     # 禁 04:00-11:59(UTC+8) 自动开仓: 回放 45 天该时段 74 笔亏 -290U(美盘尾段+
     # 亚盘早段低流动性); 与 trending_tr 仅 51% 交集, 独立有效 — 组合后模型流
     # 从 -0.40R/笔 收到 ≈0.00R (shadow_replay --matrix 2026-09-13)。

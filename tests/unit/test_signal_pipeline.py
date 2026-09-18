@@ -272,6 +272,37 @@ def test_block_trending_tr_entry(monkeypatch) -> None:
     assert exec_calls == []
 
 
+def test_block_cycle_allowlist(monkeypatch) -> None:
+    """周期白名单: 非空时只有名单内的 cycle_position 能入场.
+
+    回放 45 天(2026-09-18 修正费用模型): trending_tr 20 笔 -29.58U,
+    tight_channel/spike 3 笔 -8.03U; 通道/区间 22 笔 +39.18U。
+    """
+    exec_calls, _ = _patch_io(monkeypatch)
+    allow = ["broad_channel", "normal_channel", "trading_range"]
+    pipeline = SignalPipeline(_env_settings(block_cycle_allowlist=allow))
+    blocked = pipeline.dispatch(_env_signal("做多", "trending_tr", "bullish"))
+    assert blocked.gate_blocked and "cycle_block" in blocked.gate_reasons[0]
+    assert exec_calls == []
+    allowed = pipeline.dispatch(_env_signal("做多", "normal_channel", "bullish"))
+    assert not allowed.gate_blocked and len(exec_calls) == 1
+
+
+def test_cycle_allowlist_empty_is_noop(monkeypatch) -> None:
+    exec_calls, _ = _patch_io(monkeypatch)
+    pipeline = SignalPipeline(_env_settings(block_cycle_allowlist=[]))
+    result = pipeline.dispatch(_env_signal("做多", "trending_tr", "bullish"))
+    assert not result.gate_blocked and len(exec_calls) == 1
+
+
+def test_cycle_allowlist_missing_cycle_is_allowed(monkeypatch) -> None:
+    """诊断没给周期位置时不拦(否则白名单会把所有缺字段的信号一起杀掉)."""
+    exec_calls, _ = _patch_io(monkeypatch)
+    pipeline = SignalPipeline(_env_settings(block_cycle_allowlist=["broad_channel"]))
+    result = pipeline.dispatch(_env_signal("做多", "", "bullish"))
+    assert not result.gate_blocked and len(exec_calls) == 1
+
+
 def test_block_neutral_diag_entry(monkeypatch) -> None:
     exec_calls, _ = _patch_io(monkeypatch)
     pipeline = SignalPipeline(_env_settings(block_neutral_diag_entry=True))

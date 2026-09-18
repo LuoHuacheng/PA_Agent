@@ -190,7 +190,8 @@
     "block_short_entry": false,
     "block_trending_tr_entry": true,
     "block_neutral_diag_entry": true,
-    "block_session_entry": true
+    "block_session_entry": true,
+    "block_cycle_allowlist": []
   },
   "binance_usdm_testnet": {
     "enabled": false,
@@ -241,7 +242,8 @@
     "block_short_entry": false,
     "block_trending_tr_entry": true,
     "block_neutral_diag_entry": true,
-    "block_session_entry": true
+    "block_session_entry": true,
+    "block_cycle_allowlist": []
   },
   "telegram": {
     "enabled": false,
