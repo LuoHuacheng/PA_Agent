@@ -21,19 +21,22 @@ from tools.expectancy_report import GATE_START, parse_cutoff
 
 TZ8 = timezone(timedelta(hours=8))
 
+#: §2.13 的分辨窗口: 60 分钟节拍(120 次分析/天)下 3 天起功效可接受(0.69), 5 天最佳(0.91)。
+MIN_DAYS = 3
+
 
 def verdict(fills, attempts, days):
     """§2.13 的判定规则 -> (情景, 说明).
 
-    days 至少 2 天才算"可分辨"; 不足时返回"观察中"。
+    days 至少 MIN_DAYS 天才算"可分辨"; 不足时返回"观察中"。
     """
-    if days < 2:
-        return "观察中", f"才 {days:.2f} 天, 2 天后才可分辨"
+    if days < MIN_DAYS:
+        return "观察中", f"才 {days:.2f} 天, {MIN_DAYS} 天后才可分辨"
     if fills >= 2:
-        return "乐观", f"{days:.1f} 天 {fills} 笔过闸门成交 -> 实盘口径(约 1.6 笔/天)"
+        return "乐观", f"{days:.1f} 天 {fills} 笔过闸门成交 -> 实盘口径(约 0.80 笔/天)"
     if fills == 0 and attempts == 0:
         return "瓶颈不在节拍", "0 成交且 0 入场尝试 -> 查模型/闸门, 不要叠加变更"
-    return "悲观", f"{days:.1f} 天仅 {fills} 笔过闸门成交 -> 回放口径(约 0.27 笔/天)"
+    return "悲观", f"{days:.1f} 天仅 {fills} 笔过闸门成交 -> 回放口径(约 0.136 笔/天)"
 
 
 def count_orders(ledger_glob, cutoff_ms):
