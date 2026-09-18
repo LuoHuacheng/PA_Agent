@@ -35,6 +35,7 @@ import csv
 import glob
 import json
 import os
+import random
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -509,8 +510,8 @@ def report_variants(rows, neutral_list=()):
     base_net = sum(r["net"] for r in base)
     print()
     print("=== 过滤变体 (基线 %d 笔, 净 %+.2fU) ===" % (len(base), base_net))
-    print("%-26s %5s %6s %10s %8s %7s %9s %10s" %
-          ("变体", "笔数", "保留", "净U", "均U", "胜率", "净/风险", "相比基线"))
+    print("%-26s %5s %6s %10s %8s %7s %9s %10s %9s %9s" %
+          ("变体", "笔数", "保留", "净U", "均U", "胜率", "净/风险", "相比基线", "90%下", "90%上"))
     for name, pred in filters:
         sub = [r for r in base if pred(r)]
         if not sub:
@@ -518,10 +519,11 @@ def report_variants(rows, neutral_list=()):
             continue
         net = sum(r["net"] for r in sub)
         risk = sum(r["risk_usdt"] for r in sub)
-        print("%-26s %5d %5.0f%% %10.2f %8.2f %6.0f%% %9.3f %+10.2f" % (
+        lo, hi = bootstrap_mean_ci([r["net"] for r in sub])
+        print("%-26s %5d %5.0f%% %10.2f %8.2f %6.0f%% %9.3f %+10.2f %9.2f %9.2f" % (
             name, len(sub), len(sub) / len(base) * 100, net, net / len(sub),
             sum(1 for r in sub if r["net"] > 0) / len(sub) * 100,
-            net / risk if risk else 0, net - base_net))
+            net / risk if risk else 0, net - base_net, lo, hi))
 
 
 
@@ -636,33 +638,49 @@ def taker_fee_rate(fee_rate):
     return float(fee_rate) * (1.0 - MAKER_SHARE)
 
 
+def bootstrap_mean_ci(nets, *, iters=20000, alpha=0.10, seed=7):
+    """净额均值的自助法置信区间(nets = 每笔净额 USDT); 空输入返回 (0.0, 0.0)."""
+    values = [float(x) for x in nets]
+    if not values:
+        return (0.0, 0.0)
+    rng = random.Random(seed)
+    n = len(values)
+    means = []
+    for _ in range(iters):
+        means.append(sum(rng.choice(values) for _ in range(n)) / n)
+    means.sort()
+    return (means[int(iters * (alpha / 2))], means[int(iters * (1 - alpha / 2))])
+
+
 def summarize(rows, key):
     groups = defaultdict(list)
     for row in rows:
         groups[row[key]].append(row)
-    print("%-16s %5s %5s %6s %10s %8s %7s %9s" %
-          (key, "计划", "成交", "成交率", "净U", "均U", "胜率", "净/风险"))
+    print("%-16s %5s %5s %6s %10s %8s %7s %9s %9s %9s" %
+          (key, "计划", "成交", "成交率", "净U", "均U", "胜率", "净/风险", "90%下", "90%上"))
     for name in sorted(groups, key=lambda k: sum(r["net"] for r in groups[k])):
         bucket = groups[name]
         filled = [r for r in bucket if r["filled"]]
         net = sum(r["net"] for r in filled)
         risk = sum(r["risk_usdt"] for r in filled)
         wins = sum(1 for r in filled if r["net"] > 0)
-        print("%-16s %5d %5d %5.0f%% %10.2f %8.2f %6.0f%% %9.3f" % (
+        lo, hi = bootstrap_mean_ci([r["net"] for r in filled])
+        print("%-16s %5d %5d %5.0f%% %10.2f %8.2f %6.0f%% %9.3f %9.2f %9.2f" % (
             name, len(bucket), len(filled),
             (len(filled) / len(bucket) * 100) if bucket else 0,
             net, (net / len(filled)) if filled else 0,
             (wins / len(filled) * 100) if filled else 0,
-            (net / risk) if risk else 0))
+            (net / risk) if risk else 0, lo, hi))
     total = [r for r in rows if r["filled"]]
     net = sum(r["net"] for r in total)
     risk = sum(r["risk_usdt"] for r in total)
-    print("%-16s %5d %5d %5.0f%% %10.2f %8.2f %6.0f%% %9.3f" % (
+    lo, hi = bootstrap_mean_ci([r["net"] for r in total])
+    print("%-16s %5d %5d %5.0f%% %10.2f %8.2f %6.0f%% %9.3f %9.2f %9.2f" % (
         "合计", len(rows), len(total),
         (len(total) / len(rows) * 100) if rows else 0,
         net, (net / len(total)) if total else 0,
         (sum(1 for r in total if r["net"] > 0) / len(total) * 100) if total else 0,
-        (net / risk) if risk else 0))
+        (net / risk) if risk else 0, lo, hi))
 
 
 def generate_baseline_plans(timeline, symbol, timeframe, *,
