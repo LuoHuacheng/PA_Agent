@@ -394,7 +394,10 @@ def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
         entry_fee_rate = taker_fee if entry_taker else maker_fee
         fees = entry_fee_rate * notional + taker_fee * sum(px * q for px, q in exits)
     else:
-        fees = fee_rate * (notional + sum(px * q for px, q in exits))
+        # fee_rate 是往返费率: 单边取一半分别计入场与出场。整段乘 fee_rate 会把
+        # 往返费率按两条腿各收一次(实测 12.03 bps, 是实盘 6.01 bps 的两倍)。
+        half = fee_rate / 2.0
+        fees = half * notional + half * sum(px * q for px, q in exits)
     exit_avg = (sum(px * q for px, q in exits) / qty) if qty else None
     net = gross - fees
     return Outcome(True, reason, fill_px, exit_avg, qty, notional, gross, fees, net,
@@ -617,6 +620,22 @@ def fee_rate_from_outcomes(path):
     return rates[len(rates) // 2]
 
 
+#: maker 单边费率占往返费率的比例。实测(2026-09-18, trade_records/outcomes.csv
+#: 73 笔): 往返费率中位 6.01 bps, 最小 4.00 bps 对应"两腿都走 maker", 而
+#: 2/3 x 6.01 = 4.01 bps -- 故 maker = 1/3 往返, taker = 2/3 往返。
+MAKER_SHARE = 1.0 / 3.0
+
+
+def maker_fee_rate(fee_rate):
+    """单边 maker 费率。与 taker_fee_rate 之和等于往返费率。"""
+    return float(fee_rate) * MAKER_SHARE
+
+
+def taker_fee_rate(fee_rate):
+    """单边 taker 费率。"""
+    return float(fee_rate) * (1.0 - MAKER_SHARE)
+
+
 def summarize(rows, key):
     groups = defaultdict(list)
     for row in rows:
@@ -723,8 +742,8 @@ def run_baseline(args):
     plans = load_plans(PENDING_DIR, days=args.days, symbols=symbols)
     timelines = merge_timelines(plans)
     fee_rate = args.fee_rate if args.fee_rate is not None else fee_rate_from_outcomes(OUTCOMES_CSV)
-    maker_fee = args.maker_fee if args.maker_fee is not None else fee_rate * 0.4
-    taker_fee = args.taker_fee if args.taker_fee is not None else fee_rate * 0.8
+    maker_fee = args.maker_fee if args.maker_fee is not None else maker_fee_rate(fee_rate)
+    taker_fee = args.taker_fee if args.taker_fee is not None else taker_fee_rate(fee_rate)
     be_tr = None
     if getattr(args, "baseline_be", "0.5r") == "0.5r":
         be_tr = 0.5
@@ -781,8 +800,8 @@ def run_replay(args):
             args.trend_days, tagged, len(plans)))
 
     if getattr(args, "matrix", False):
-        maker_fee = args.maker_fee if args.maker_fee is not None else fee_rate * 0.4
-        taker_fee = args.taker_fee if args.taker_fee is not None else fee_rate * 0.8
+        maker_fee = args.maker_fee if args.maker_fee is not None else maker_fee_rate(fee_rate)
+        taker_fee = args.taker_fee if args.taker_fee is not None else taker_fee_rate(fee_rate)
         report_matrix(
             [(p, timelines.get((p.symbol, p.timeframe), [])) for p in plans],
             args=args, fee_rate=fee_rate, maker_fee=maker_fee, taker_fee=taker_fee,

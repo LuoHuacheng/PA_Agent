@@ -30,8 +30,10 @@ from tools.shadow_replay import (
     fee_rate_from_outcomes,
     generate_baseline_plans,
     load_plans,
+    maker_fee_rate,
     merge_timelines,
     simulate_plan,
+    taker_fee_rate,
 )
 from tools.vergex_gens import (
     gen_dual_supertrend,
@@ -201,7 +203,7 @@ def main() -> None:
     args = ap.parse_args()
 
     fee_rate = args.fee_rate if args.fee_rate is not None else fee_rate_from_outcomes(OUTCOMES_CSV)
-    maker_fee, taker_fee = fee_rate * 0.4, fee_rate * 0.8
+    maker_fee, taker_fee = maker_fee_rate(fee_rate), taker_fee_rate(fee_rate)
 
     from tools.shadow_replay import PENDING_DIR
 
