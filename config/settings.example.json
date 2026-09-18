@@ -128,9 +128,6 @@
     ],
     "htf_max_summary_chars": 400
   },
-  "tushare": {
-    "token": ""
-  },
   "feedback": {
     "enabled": false,
     "days": 30,
