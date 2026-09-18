@@ -70,6 +70,29 @@ def count_fills(outcomes, cutoff_ms):
     return n
 
 
+def count_opened(log_path, cutoff_ms):
+    """统计窗口内**已建仓**笔数(日志里 "limit entry filled and protected").
+
+    注意与 count_fills 的区别: 建仓 != 平仓。样本口径(R2/路B)用的是**已平仓**,
+    建仓只是"在途"。
+    """
+    n = 0
+    try:
+        with open(log_path, encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if "limit entry filled and protected" not in line:
+                    continue
+                try:
+                    ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ8)
+                except ValueError:
+                    continue
+                if ts.timestamp() * 1000 >= cutoff_ms:
+                    n += 1
+    except OSError:
+        return 0
+    return n
+
+
 def main():
     cutoff = parse_cutoff(GATE_START)
     now_ms = datetime.now(tz=TZ8).timestamp() * 1000
@@ -82,11 +105,13 @@ def main():
         if is_entry_attempt(info["order_type"], info["direction"]):
             attempts += 1
     orders = count_orders("records/orders/*.jsonl", cutoff)
+    opened = count_opened("logs/pa_agent.log", cutoff)
     fills = count_fills("trade_records/outcomes.csv", cutoff)
 
     scen, why = verdict(fills, attempts, days)
     print(f"窗口起点(最近一次配置变更): {GATE_START}  (已 {days:.2f} 天)")
-    print(f"分析(记录)={len(records)}  入场尝试={attempts}  入场挂单={orders}  成交={fills}")
+    print(f"分析(记录)={len(records)}  入场尝试={attempts}  入场挂单={orders}  "
+          f"已建仓={opened}  已平仓(样本)={fills}")
     print(f"判定: [{scen}] {why}")
     return 0
 
