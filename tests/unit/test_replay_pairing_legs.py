@@ -1,7 +1,7 @@
 """Tests for leg aggregation in the P&L replay pairing."""
 from __future__ import annotations
 
-from pa_agent.trading.replay_pairing import aggregate_legs
+from pa_agent.trading.replay_pairing import aggregate_legs, partial_exit_comparison
 
 
 def _leg(side: str, qty: float, entry: float, pnl: float, fees: float, opened: int, closed: int | None, px: float, cid: str = 'manual') -> dict:
@@ -54,6 +54,43 @@ def test_distant_trades_never_merge() -> None:
         _leg('BUY', 1.0, 1.0, 1.0, -0.1, 9_000_000, 9_600_000, 1.1),
     ]
     assert len(aggregate_legs(legs)) == 2
+
+
+def test_partial_exit_comparison_measures_the_partial() -> None:
+    """Partial banked 104 then the rest exited 102: holding would have been worse."""
+    legs = [
+        _leg('BUY', 1.5, 100.0, 6.00, -0.30, 0, 60_000, 104.0),
+        _leg('BUY', 1.5, 100.0, 3.00, -0.31, 0, 120_000, 102.0),
+    ]
+    rows = partial_exit_comparison(legs)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row['partial'] is True
+    assert row['legs'] == 2
+    assert row['partial_px'] == 104.0
+    assert row['final_px'] == 102.0
+    assert row['helped'] is True  # final exit worse than the partial exit
+    assert abs(row['actual'] - (9.0 - 0.61)) < 1e-9
+    assert row['single_exit'] < row['actual']
+    assert abs(row['delta'] - (row['single_exit'] - row['actual'])) < 1e-9
+
+
+def test_partial_exit_comparison_flags_missed_upside() -> None:
+    """Partial at 102, final at 108: banking early gave up upside (helped=False)."""
+    legs = [
+        _leg('BUY', 1.0, 100.0, 2.00, -0.20, 0, 60_000, 102.0),
+        _leg('BUY', 1.0, 100.0, 8.00, -0.21, 0, 120_000, 108.0),
+    ]
+    row = partial_exit_comparison(legs)[0]
+    assert row['helped'] is False
+    assert row['single_exit'] > row['actual']
+
+
+def test_partial_exit_comparison_marks_positions_without_partials() -> None:
+    legs = [_leg('BUY', 1.0, 100.0, 2.0, -0.2, 0, 60_000, 102.0)]
+    row = partial_exit_comparison(legs)[0]
+    assert row['partial'] is False
+    assert 'single_exit' not in row
 
 
 def test_single_leg_is_passed_through_unmarked() -> None:

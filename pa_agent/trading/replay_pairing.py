@@ -200,23 +200,14 @@ def _merge_legs(legs: list[dict]) -> dict:
     return merged
 
 
-def aggregate_legs(
+def _cluster_legs(
     trades: list[dict],
     *,
     open_window_ms: float = 180_000.0,
     close_window_ms: float = 180_000.0,
-) -> list[dict]:
-    """Collapse the partial fills / partial closes of one position into one trade.
-
-    `rebuild_trades` deliberately returns per-signal *legs*, but a partial-TP
-    position (tp_partial_close_pct) and a tranche-filled limit entry both appear
-    as several legs. Reporting them as separate trades inflates the trade count,
-    multiplies the per-trade fee drag and mixes entry prices (observed: 7 ADAUSDT
-    legs with entries 0.2133-0.2139, all exiting at 0.2114 within the same
-    minute). Legs of the same symbol and side whose entry *and* exit both fall
-    inside the windows are merged; the `legs` key records how many were folded.
-    """
-    grouped: list[dict] = []
+) -> list[list[dict]]:
+    """Group legs of one position: same symbol+side, entries and exits close in time."""
+    clusters: list[list[dict]] = []
     used = [False] * len(trades)
     order = sorted(range(len(trades)), key=lambda i: trades[i].get("opened_at") or 0)
     for i in order:
@@ -244,8 +235,109 @@ def aggregate_legs(
                 continue
             used[j] = True
             cluster.append(other)
-        grouped.append(_merge_legs(cluster) if len(cluster) > 1 else dict(base))
-    grouped.sort(key=lambda t: t.get("opened_at") or 0)
+        clusters.append(cluster)
+    clusters.sort(key=lambda c: min(t.get("opened_at") or 0 for t in c))
+    return clusters
+
+
+def _fee_rate(legs: list[dict]) -> float:
+    """Effective commission rate implied by the fills (median of |fee|/notional)."""
+    rates = []
+    for t in legs:
+        try:
+            notional = abs(float(t.get("qty") or 0.0) * float(t.get("entry") or 0.0))
+            fee = abs(float(t.get("fees") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        if notional > 0 and fee > 0:
+            rates.append(fee / notional)
+    if not rates:
+        return 0.0
+    rates.sort()
+    return rates[len(rates) // 2]
+
+
+def partial_exit_comparison(
+    legs: list[dict],
+    *,
+    open_window_ms: float = 180_000.0,
+    close_window_ms: float = 180_000.0,
+) -> list[dict]:
+    """Compare each position's actual partial-TP outcome with a single-exit exit.
+
+    `tp_partial_close_pct` splits one position into (at least) two legs, paying a
+    second commission event. This answers whether that partial earned its extra
+    fee: actual net (sum of leg realised + fees) versus a counterfactual that
+    exits the whole quantity once, at the last observed exit price. `helped` is
+    True when the final exit was worse than the partial exit, i.e. banking the
+    partial protected the position.
+    """
+    rate = _fee_rate(legs)
+    rows: list[dict] = []
+    for cluster in _cluster_legs(legs, open_window_ms=open_window_ms, close_window_ms=close_window_ms):
+        qty = sum(float(t.get("qty") or 0.0) for t in cluster)
+        notional = sum(float(t.get("qty") or 0.0) * float(t.get("entry") or 0.0) for t in cluster)
+        if qty <= 0:
+            continue
+        entry = notional / qty
+        sign = 1.0 if cluster[0].get("side") == "BUY" else -1.0
+        exits = sorted(
+            [t for t in cluster if t.get("closed_at") and t.get("close_px")],
+            key=lambda t: t.get("closed_at") or 0,
+        )
+        actual = sum(float(t.get("realized") or 0.0) for t in cluster)
+        actual_fees = sum(float(t.get("fees") or 0.0) for t in cluster)
+        row = {
+            "sym": cluster[0].get("sym"),
+            "side": cluster[0].get("side"),
+            "legs": len(cluster),
+            "qty": qty,
+            "entry": entry,
+            "actual": actual + actual_fees,
+            "actual_fees": actual_fees,
+            "partial": len(exits) > 1,
+        }
+        if len(exits) > 1:
+            first_px = float(exits[0].get("close_px") or 0.0)
+            last_px = float(exits[-1].get("close_px") or 0.0)
+            gross = (last_px - entry) * qty * sign
+            hyp_fees = -rate * qty * entry - rate * qty * last_px
+            row.update(
+                {
+                    "partial_qty": float(exits[0].get("qty") or 0.0),
+                    "partial_px": first_px,
+                    "final_px": last_px,
+                    "single_exit": gross + hyp_fees,
+                    "delta": (gross + hyp_fees) - (actual + actual_fees),
+                    "helped": (last_px - first_px) * sign < 0,
+                }
+            )
+        rows.append(row)
+    return rows
+
+
+def aggregate_legs(
+    trades: list[dict],
+    *,
+    open_window_ms: float = 180_000.0,
+    close_window_ms: float = 180_000.0,
+) -> list[dict]:
+    """Collapse the partial fills / partial closes of one position into one trade.
+
+    `rebuild_trades` deliberately returns per-signal *legs*, but a partial-TP
+    position (tp_partial_close_pct) and a tranche-filled limit entry both appear
+    as several legs. Reporting them as separate trades inflates the trade count,
+    multiplies the per-trade fee drag and mixes entry prices (observed: 7 ADAUSDT
+    legs with entries 0.2133-0.2139, all exiting at 0.2114 within the same
+    minute). Legs of the same symbol and side whose entry *and* exit both fall
+    inside the windows are merged; the `legs` key records how many were folded.
+    """
+    grouped = [
+        _merge_legs(cluster) if len(cluster) > 1 else dict(cluster[0])
+        for cluster in _cluster_legs(
+            trades, open_window_ms=open_window_ms, close_window_ms=close_window_ms
+        )
+    ]
     return grouped
 
 

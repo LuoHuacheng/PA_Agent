@@ -28,7 +28,11 @@ from _pa_sim_common import (
     window_bounds,
 )
 
-from pa_agent.trading.replay_pairing import aggregate_legs, classify_outcome
+from pa_agent.trading.replay_pairing import (
+    aggregate_legs,
+    classify_outcome,
+    partial_exit_comparison,
+)
 
 
 def net(t):
@@ -99,6 +103,8 @@ def main():
     ap.add_argument("--detail", action="store_true", help="print per-trade rows")
     ap.add_argument("--aggregate", action="store_true",
                     help="merge partial legs of one position before reporting")
+    ap.add_argument("--partial-compare", action="store_true",
+                    help="compare each partial-TP position against a single-exit exit")
     ap.add_argument("--out", default="", help="optional json output path")
     ap.add_argument("--conf-buckets-out", default="",
                     help="write conf 5-pt bucket win/loss counts for the closed trades")
@@ -122,6 +128,7 @@ def main():
         orders = load_json(cache, "orders.json")
 
     in_win = [t for t in trades if start_ms <= t["opened_at"] < end_ms]
+    raw_win = list(in_win)
     if args.aggregate:
         raw_n = len(in_win)
         in_win = aggregate_legs(in_win)
@@ -211,6 +218,25 @@ def main():
         avg = f"{g['avg']:+.2f}" if g["avg"] is not None else "-"
         print(f"  <{b:4d}m:  n={len(by_dur[b]):2d} 胜率={wr} 已平净={g['realized']:+.2f} 均/笔={avg}")
     print("")
+    if args.partial_compare:
+        rows = partial_exit_comparison(raw_win)
+        parts = [r for r in rows if r.get("partial")]
+        print("分腿前后对比 (仅统计有 >=2 次减仓的持仓):")
+        print("  symbol    side legs      实际净      单次净        差额      分腿价      末次价    护住")
+        for row in sorted(parts, key=lambda x: x["delta"]):
+            side = "多" if row["side"] == "BUY" else "空"
+            held = "是" if row["helped"] else "否"
+            print(f"  {row['sym']:<9} {side:<3} {row['legs']:>4} {row['actual']:>+10.3f} "
+                  f"{row['single_exit']:>+10.3f} {row['delta']:>+10.3f} "
+                  f"{row['partial_px']:>10.4f} {row['final_px']:>10.4f} {held:>6}")
+        if parts:
+            act = sum(r["actual"] for r in parts)
+            hyp = sum(r["single_exit"] for r in parts)
+            helped = sum(1 for r in parts if r["helped"])
+            print(f"  合计: 持仓 {len(parts)} 个 | 实际净 {act:+.3f} | 若一次性离场 {hyp:+.3f} "
+                  f"| 差额 {hyp - act:+.3f} | 分腿护住 {helped}/{len(parts)}")
+            print("  含义: 差额为负=分腿比一次性离场更差; 护住=末次离场价劣于分腿价的那部分持仓数")
+        print("")
     print("income 对账 (REALIZED_PNL/COMMISSION 窗口内)：")
     inc_sym = defaultdict(float)
     for r in income:
