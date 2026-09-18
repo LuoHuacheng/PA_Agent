@@ -29,7 +29,10 @@ MAX_DD = {"R2": 0.25, "R3": 0.30}
 #:   2. 2026-09-18 16:53 UTC+8  limit_fill_timeout_minutes: 30 -> 120        (docs/闸门裁定表.md §7.2)
 #:   3. 2026-09-18 17:26 UTC+8  monitoring.poll_interval_minutes: 120 -> 30  (docs/闸门裁定表.md §7.3)
 #:   4. 2026-09-18 17:47 UTC+8  monitoring.poll_interval_minutes: 30 -> 60   (docs/闸门裁定表.md §7.4)
-GATE_START = "2026-09-18T17:46:54+08:00"
+#:   5. 2026-09-18 20:14 UTC+8  provider 换到本地网关(19:39, 非本会话改动)后
+#:      api_key 为空导致 20:00 轮询全部 "Missing credentials" -> 20:14 补占位 key 并重启
+#:      (docs/闸门裁定表.md §7.5)
+GATE_START = "2026-09-18T20:14:33+08:00"
 
 
 def parse_cutoff(text):
