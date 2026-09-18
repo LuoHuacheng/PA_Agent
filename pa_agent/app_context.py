@@ -107,11 +107,14 @@ class AppContext:
 
         # ── Prompt assembler ──────────────────────────────────────────────────
         exp_reader = ExperienceReader(experience_dir=EXPERIENCE_DIR, logger=app_logger)
+        from pa_agent.trading.binance_env import active_cfg as _active_binance_cfg
+
         assembler = PromptAssembler(
             prompt_dir=PROMPT_DIR,
             experience_reader=exp_reader,
             prompt_settings=settings.prompt,
             feedback_settings=settings.feedback,
+            binance_settings=_active_binance_cfg(settings),
         )
 
         # ── Validator & router ────────────────────────────────────────────────

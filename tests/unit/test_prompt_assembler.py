@@ -362,6 +362,51 @@ def test_stage2_continuation_is_standalone_not_stage1_chat(assembler: PromptAsse
 CONTRACT_MARKER = "请严格按照以下 JSON 格式输出决策结果"
 
 
+def _assembler_with_binance(assembler: PromptAssembler, **over):
+    """Same prompt dir, but with the Binance execution section attached."""
+    from types import SimpleNamespace
+
+    cfg = {
+        "enabled": True,
+        "min_stop_mode": "atr",
+        "min_stop_distance_pct": 0.2,
+        "min_stop_atr_multiple": 1.5,
+        "min_plan_reward_risk": 1.5,
+        "counter_trend_block": True,
+        "counter_trend_min_confidence": 55,
+    }
+    cfg.update(over)
+    return PromptAssembler(
+        prompt_dir=assembler._prompt_dir,
+        experience_reader=assembler._experience_reader,
+        prompt_settings=assembler._prompt_settings,
+        feedback_settings=assembler._feedback_settings,
+        binance_settings=SimpleNamespace(**cfg),
+    )
+
+
+def test_stage2_prompt_states_execution_floors(assembler: PromptAssembler) -> None:
+    """The model must see the stop floor and the implied TP1 floor."""
+    a = _assembler_with_binance(assembler)
+    user = a.build_stage2(_make_frame(), {}, [], [])[1]["content"]
+    assert "程序侧硬约束" in user
+    assert "ATR% = 0.192%" in user          # atr14 5.0 / close 2605.0
+    assert "止损距入场不得小于 0.288%" in user   # max(0.2%, 1.5 x 0.1919%)
+    assert "TP1 距入场不得小于 0.432%" in user   # floor x 1.5
+    assert "trade_confidence ≥ 55" in user
+
+
+def test_stage2_prompt_omits_floors_without_binance_settings(assembler: PromptAssembler) -> None:
+    user = assembler.build_stage2(_make_frame(), {}, [], [])[1]["content"]
+    assert "程序侧硬约束" not in user
+
+
+def test_stage2_prompt_omits_floors_when_execution_disabled(assembler: PromptAssembler) -> None:
+    a = _assembler_with_binance(assembler, enabled=False)
+    user = a.build_stage2(_make_frame(), {}, [], [])[1]["content"]
+    assert "程序侧硬约束" not in user
+
+
 def test_stage1_system_prompt_carries_stage2_output_contract(assembler: PromptAssembler):
     """C: the static reference contract moves into the shared system prefix."""
     messages = assembler.build_stage1(_make_frame())

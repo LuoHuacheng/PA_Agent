@@ -921,11 +921,15 @@ class PromptAssembler:
         *,
         prompt_settings: Any = None,
         feedback_settings: Any = None,
+        binance_settings: Any = None,
     ) -> None:
         self._prompt_dir = prompt_dir
         self._experience_reader = experience_reader
         self._prompt_settings = prompt_settings
         self._feedback_settings = feedback_settings
+        #: Active Binance execution section; supplies the program-side floors that
+        #: the executor enforces (ATR stop floor, min reward:risk, counter-trend).
+        self._binance_settings = binance_settings
         self._txt_cache: dict[str, str] = {}
 
     def _load_full_strategy_library(self) -> bool:
@@ -961,6 +965,60 @@ class PromptAssembler:
         built = "\n\n---\n\n".join(p for p in system_parts if p)
         _SYSTEM_PROMPT_CACHE[key] = built
         return built
+
+    @staticmethod
+    def _frame_atr_pct(frame: KlineFrame) -> float | None:
+        """ATR% of the newest analysed bar, or None when unavailable."""
+        try:
+            atr = float(frame.indicators.atr14[0])
+            close = float(frame.bars[0].close)
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return None
+        if atr != atr or close <= 0 or atr <= 0:  # NaN-safe
+            return None
+        return atr / close * 100.0
+
+    def _render_execution_constraints(self, frame: KlineFrame) -> str:
+        """Program-side execution floors that the prompt must state.
+
+        The executor refuses plans whose stop sits closer than the ATR-based
+        floor and refuses counter-trend plans outright, but neither number used
+        to reach the model: it kept proposing unexecutable entry/stop/TP triples
+        (ZECUSDT 2026-09-18: stop 1.843% vs a 2.877% floor). Stating the floors
+        here lets the model plan a consistent triple instead of getting rejected.
+        """
+        cfg = self._binance_settings
+        if cfg is None or not getattr(cfg, "enabled", False):
+            return ""
+        atr_pct = self._frame_atr_pct(frame)
+        if atr_pct is None:
+            return ""
+        floor_pct = float(getattr(cfg, "min_stop_distance_pct", 0.0) or 0.0)
+        if str(getattr(cfg, "min_stop_mode", "fixed") or "fixed").lower() == "atr":
+            multiple = float(getattr(cfg, "min_stop_atr_multiple", 0.0) or 0.0)
+            floor_pct = max(floor_pct, multiple * atr_pct)
+        if floor_pct <= 0:
+            return ""
+        lines = [
+            "## 程序侧硬约束（执行层校验，违反即拒单、该轮信号作废）",
+            f"- 分析棒 ATR% = {atr_pct:.3f}%",
+            f"- **止损距入场不得小于 {floor_pct:.3f}%**"
+            "（= max(min_stop_distance_pct, min_stop_atr_multiple × ATR%)）",
+        ]
+        min_rr = float(getattr(cfg, "min_plan_reward_risk", 0.0) or 0.0)
+        if min_rr > 0:
+            lines.append(
+                f"- **TP1 距入场不得小于 {floor_pct * min_rr:.3f}%**"
+                f"（= 止损下限 × 最小盈亏比 {min_rr:g}）；止损在下限内但 TP1 过近时，"
+                "程序会保留原方案却拒绝下单，请一并校验"
+            )
+        if bool(getattr(cfg, "counter_trend_block", False)):
+            conf = int(getattr(cfg, "counter_trend_min_confidence", 0) or 0)
+            lines.append(
+                "- **逆势**（与上方日线趋势相反）方案直接拒单；"
+                f"中立趋势下也需 trade_confidence ≥ {conf} 才可能执行"
+            )
+        return "\n".join(lines)
 
     def _build_stage1_system_prompt(self) -> str:
         """Persona + Stage 1 gate subset (§0–§2) for token savings."""
@@ -1738,6 +1796,9 @@ class PromptAssembler:
         transition_block = self._render_transition_guidance(stage1_json)
         planned_limit_block = self._render_planned_limit_hint(stage1_json, frame)
         stage2_parts = [stance_block]
+        exec_constraints = self._render_execution_constraints(frame)
+        if exec_constraints:
+            stage2_parts.append(exec_constraints)
         if include_full_binary_tree:
             tree = self._load("二元决策.txt")
             if tree:
