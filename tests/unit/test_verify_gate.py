@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from scripts.verify_gate import describe, load_records, violations_for
+from scripts.verify_gate import describe, is_entry_attempt, load_records, violations_for
 
 
 def test_short_entry_is_a_violation():
@@ -25,6 +25,19 @@ def test_empty_allowlist_disables_cycle_check():
 
 def test_missing_cycle_is_not_a_violation():
     assert violations_for("做多", None, ("broad_channel",)) == []
+
+
+def test_wait_decision_is_not_an_entry_attempt():
+    """2026-09-18 16:09 SOLUSDT: order_type=不下单, 不该被当成闸门泄漏。"""
+    assert is_entry_attempt("不下单", None) is False
+
+
+def test_missing_direction_is_not_an_entry_attempt():
+    assert is_entry_attempt("限价单", None) is False
+
+
+def test_real_order_is_an_entry_attempt():
+    assert is_entry_attempt("限价单", "做多") is True
 
 
 def test_describe_reads_nested_fields():
