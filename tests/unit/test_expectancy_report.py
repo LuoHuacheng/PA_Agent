@@ -9,6 +9,7 @@ from tools.expectancy_report import (
     filter_since,
     main,
     max_drawdown,
+    max_drawdown_usdt,
     parse_cutoff,
 )
 
@@ -54,6 +55,20 @@ def test_filter_since_drops_unparsable_timestamps():
 def test_max_drawdown_of_losing_streak():
     assert max_drawdown([-1.0, -1.0, -1.0]) == 0.0  # 曲线从未在峰值之上
     assert abs(max_drawdown([10.0, -5.0]) - 0.5) < 1e-9
+
+
+def test_max_drawdown_usdt_matches_absolute_peak_to_trough():
+    assert max_drawdown_usdt([10.0, -5.0]) == 5.0
+    # 纯亏序列: 峰值就是起始权益 0, 谷底 -2 => 回撤 2U。
+    # (比值口径 max_drawdown() 在这种序列上返回 0.0 —— 一直亏却不报回撤, 这是它的盲点。)
+    assert max_drawdown_usdt([-1.0, -1.0]) == 2.0
+    assert max_drawdown([-1.0, -1.0]) == 0.0
+
+
+def test_evaluate_reports_both_drawdown_flavours():
+    res = evaluate([10.0, -5.0] * 15)
+    assert res["dd"] > 0
+    assert res["dd_usdt"] > 0
 
 
 def test_evaluate_empty_is_insufficient():

@@ -51,13 +51,29 @@ def filter_since(rows, cutoff_ms):
 
 
 def max_drawdown(nets):
-    """按时间顺序累计净额的峰值回撤(相对峰值)."""
+    """按时间顺序累计净额的峰值回撤(相对峰值, 计划 T3 原口径).
+
+    ⚠️ 这个比值**不是账户回撤**: 分母是"累计净额的峰值", 不是账户权益。
+    亏损曲线下它可以超过 100%(实盘 73 笔给 758.7%), 因为峰值只有 +24.29U
+    而后续回吐是 184.26U。门槛 "回撤<25%" 按此口径读作"回吐峰值利润的 25%"。
+    绝对口径见 max_drawdown_usdt()。详见 docs/正期望验证规程.md §2.7。
+    """
     peak = equity = worst = 0.0
     for n in nets:
         equity += n
         peak = max(peak, equity)
         if peak > 0:
             worst = max(worst, (peak - equity) / peak)
+    return worst
+
+
+def max_drawdown_usdt(nets):
+    """峰值到谷底的最大绝对回撤(USDT) —— 与账户口径可比的量."""
+    peak = equity = worst = 0.0
+    for n in nets:
+        equity += n
+        peak = max(peak, equity)
+        worst = max(worst, peak - equity)
     return worst
 
 
@@ -73,9 +89,10 @@ def evaluate(nets):
     lo, hi = bootstrap_mean_ci(nets)
     wr = (sum(1 for n in nets if n > 0) / len(nets)) if nets else 0.0
     dd = max_drawdown(nets)
+    dd_usdt = max_drawdown_usdt(nets)
     ok = bool(nets) and stage != "样本不足" and mean > 0 and lo > 0 and dd < MAX_DD[stage]
     return {"n": len(nets), "mean": mean, "lo": lo, "hi": hi,
-            "wr": wr, "dd": dd, "stage": stage, "ok": ok}
+            "wr": wr, "dd": dd, "dd_usdt": dd_usdt, "stage": stage, "ok": ok}
 
 
 def _load_rows(path):
@@ -119,11 +136,13 @@ def main(argv=None):
     if res["stage"] == "样本不足":
         print(f"{prefix}n={res['n']} 均{res['mean']:+.2f}U 胜率{res['wr']:.0%} "
               f"90%CI[{res['lo']:+.2f}, {res['hi']:+.2f}] "
-              f"最大回撤{res['dd']:.1%} -> FAIL(样本不足, 需 n>={MIN_N['R2']})")
+              f"回撤{res['dd_usdt']:.2f}U(峰值口径{res['dd']:.1%}) "
+              f"-> FAIL(样本不足, 需 n>={MIN_N['R2']})")
         return 1
     print(f"{prefix}n={res['n']} 均{res['mean']:+.2f}U 胜率{res['wr']:.0%} "
           f"90%CI[{res['lo']:+.2f}, {res['hi']:+.2f}] "
-          f"最大回撤{res['dd']:.1%} 阶段={res['stage']} -> {'PASS' if res['ok'] else 'FAIL'}")
+          f"回撤{res['dd_usdt']:.2f}U(峰值口径{res['dd']:.1%}) "
+          f"阶段={res['stage']} -> {'PASS' if res['ok'] else 'FAIL'}")
     print(f"门槛({res['stage']}): n>={MIN_N[res['stage']]}, 均>0, CI下界>0, 回撤<{MAX_DD[res['stage']]:.0%}")
     return 0 if res["ok"] else 1
 
