@@ -113,18 +113,29 @@ def fetch_account_data(client, symbols, start_ms, cache_dir):
                 break
             cur = min(x["orderId"] for x in batch) - 1
             time.sleep(0.08)
-        fills, cur = [], None
+        # userTrades needs startTime on the FIRST page: without it Binance returns
+        # only the most recent 1000 fills, which silently truncated history to ~7 of
+        # the requested 15 days (account commission then looked 5x smaller than the
+        # income ledger). Later pages advance by fromId (startTime is ignored then).
+        fills, cur, seen = [], None, set()
         while True:
             p = {"symbol": sym, "limit": 1000}
-            if cur:
+            if cur is None:
+                p["startTime"] = start_ms
+            else:
                 p["fromId"] = cur
             batch = client._request("GET", "/fapi/v1/userTrades", p, signed=True)
             if not batch:
                 break
-            fills += batch
+            fresh = [f for f in batch if f.get("id") not in seen]
+            seen.update(f.get("id") for f in fresh)
+            fills += fresh
             if len(batch) < 1000:
                 break
-            cur = max(x["id"] for x in batch) + 1
+            nxt = max(x["id"] for x in batch) + 1
+            if cur is not None and nxt <= cur:
+                break  # no forward progress: stop instead of spinning
+            cur = nxt
             time.sleep(0.08)
         oa[sym], ut[sym] = orders, fills
     json.dump(oa, open(cache_dir / "orders.json", "w"))
