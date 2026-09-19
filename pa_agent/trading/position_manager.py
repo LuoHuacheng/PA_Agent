@@ -49,6 +49,47 @@ logger = logging.getLogger(__name__)
 _MANAGER_LOCKS: dict[str, threading.Lock] = {}
 _MANAGER_LOCKS_GUARD = threading.Lock()
 
+#: 保护丢失告警的 per-symbol 限流窗口(秒): 同一品种半分钟内只喊一次, 否则
+#: 反复挂单失败会把聊天窗口刷满, 操作者反而看不见真正的新事故。
+_PROTECTION_ALERT_COOLDOWN_S = 1800.0
+_PROTECTION_ALERT_LAST: dict[tuple[str, str], float] = {}
+_PROTECTION_ALERT_LOCK = threading.Lock()
+
+
+def _alert_protection_lost(symbol: str, reason: str, *, kind: str = "protection") -> bool:
+    """Telegram 告警: 交易所侧保护单没能挂上/没能补回, 仓位正在裸扛。
+
+    这里**只负责让人看见** —— 原来的处理是打一行 WARNING 就继续, 等于静默
+    (2026-09-19 现场: -2021 连拒两次后 "original stop stays in place")。
+    告警本身绝不反噬交易线程: 取配置、发消息、限流全部吞异常。
+    """
+    key = (str(symbol or ""), str(kind or "protection"))
+    try:
+        now = time.time()
+        with _PROTECTION_ALERT_LOCK:
+            last = _PROTECTION_ALERT_LAST.get(key, 0.0)
+            if now - last < _PROTECTION_ALERT_COOLDOWN_S:
+                return False
+            _PROTECTION_ALERT_LAST[key] = now
+        text = (
+            "🚨 PA Agent 保护单失效\n\n"
+            f"品种: {symbol}\n"
+            f"原因: {reason}\n\n"
+            f"当前仓位只有原始止损兜底(或无有效保护单), 请人工核对交易所挂单; "
+            f"{int(_PROTECTION_ALERT_COOLDOWN_S // 60)} 分钟内不再重复提醒。"
+        )
+        from pa_agent.config.paths import SETTINGS_JSON_PATH
+        from pa_agent.config.settings import load_settings
+        from pa_agent.notify.telegram_notifier import send_telegram_message
+
+        settings = load_settings(SETTINGS_JSON_PATH)
+        send_telegram_message(text, settings=settings)
+        logger.error("Protection lost alert sent for %s: %s", symbol, reason)
+        return True
+    except Exception as exc:  # 告警失败绝不能打断看护线程
+        logger.warning("Protection-lost alert failed for %s: %s", symbol, exc)
+        return False
+
 
 def _manager_lock(symbol: str) -> threading.Lock:
     """Return the transition lock guarding this symbol's SL/TP swaps."""
@@ -453,6 +494,9 @@ def _breakeven_guard_loop(
                     "original stop stays in place",
                     symbol,
                 )
+                _alert_protection_lost(
+                    symbol, f"保本守护连续 API 失败, 保护单无法核验: {exc}"
+                )
                 return
             time.sleep(poll_seconds)
             continue
@@ -572,6 +616,10 @@ def _breakeven_guard_loop(
                         "Breakeven guard gave up placing breakeven stop for %s after "
                         "repeated errors; original stop stays in place",
                         symbol,
+                    )
+                    _alert_protection_lost(
+                        symbol,
+                        f"保本移动止损连续失败, 只剩原止损兜底: {exc}",
                     )
                     return
                 time.sleep(poll_seconds)
@@ -816,6 +864,10 @@ def _tp_runner_loop(
                             "errors; record kept for restart resume",
                             symbol,
                         )
+                        _alert_protection_lost(
+                            symbol,
+                            f"TP runner 无法核验保护单, 可能裸奔: {runner_note}",
+                        )
                         return
                     time.sleep(poll_seconds)
                     continue
@@ -864,6 +916,10 @@ def _tp_runner_loop(
                             "errors; record kept for restart resume",
                             symbol,
                         )
+                        _alert_protection_lost(
+                            symbol,
+                            f"TP runner 无法核验保护单, 可能裸奔: {runner_note}",
+                        )
                         return
                     time.sleep(poll_seconds)
                     continue
@@ -908,6 +964,10 @@ def _tp_runner_loop(
                                 "TP runner gave up placing breakeven stop for %s after "
                                 "repeated errors; original stop stays in place",
                                 symbol,
+                            )
+                            _alert_protection_lost(
+                                symbol,
+                                f"TP runner 半仓后移保本连续失败, 只剩原止损兜底: {exc}",
                             )
                             return
                         time.sleep(poll_seconds)
@@ -1708,6 +1768,7 @@ def _stop_watchdog_loop(
                     "record kept for restart resume",
                     symbol,
                 )
+                _alert_protection_lost(symbol, f"止损看门狗连续失败, 保护单核验不了: {note}")
                 return
             time.sleep(poll_seconds)
             continue
