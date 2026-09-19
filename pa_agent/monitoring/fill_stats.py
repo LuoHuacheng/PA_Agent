@@ -64,7 +64,7 @@ def notify_timeout(symbol: str) -> None:
 STATE_KEY = "fill_stats"
 
 #: 每个 symbol 下的计数字段。
-FIELDS = ("placed", "fills", "timeouts")
+FIELDS = ("placed", "fills", "timeouts", "breakout_shadow")
 
 #: 低于此成交率视为"策略天然空仓"预警阈值 (只用于展示, 不做任何拦截)。
 LOW_FILL_RATE_ALERT = 0.30

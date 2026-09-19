@@ -62,6 +62,11 @@ class FakeClient:
         self.limit_orders[str(kwargs["client_id"])] = {"status": "NEW"}
         return {"orderId": 456}
 
+    def place_stop_market_order(self, **kwargs: object) -> dict:
+        self.calls.append(("stop_market_entry", kwargs))
+        self.limit_orders[str(kwargs["client_id"])] = {"status": "NEW"}
+        return {"orderId": 789}
+
     def order_status(self, *, symbol: str, client_id: str) -> str:
         self.calls.append(("order_status", client_id))
         queue = self.statuses.get(client_id)
@@ -615,11 +620,16 @@ def test_rejects_invalid_long_protection_prices_before_entry() -> None:
     assert "entry" not in [call[0] for call in client.calls]
 
 
-def test_breakout_plan_still_requires_manual_review() -> None:
+def test_breakout_plan_requires_manual_review_while_disabled() -> None:
+    """开关默认关闭: 突破单仍然只进人工队列, 不碰交易所.
+
+    2026-09-19 起执行层支持突破单(STOP_MARKET), 但默认 breakout_order_enabled
+    = False —— 开关打开后的完整行为见 tests/unit/test_breakout_execution.py。
+    """
     client = FakeClient()
     decision = _long_decision() | {"order_type": "突破单"}
     result = execute_market_signal(decision, _settings(), analysis_symbol="BTCUSDT", client=client)
-    assert result.status == "rejected"
+    assert result.status == "skipped"
     assert "manual review" in result.reason
     assert not client.calls
 

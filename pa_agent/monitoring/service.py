@@ -744,11 +744,15 @@ class MultiSymbolMonitor:
         from pa_agent.monitoring import fill_stats
 
         status = str(getattr(result, "status", "") or "")
+        reason = str(getattr(result, "reason", "") or "")
         if status == "pending":
             fill_stats.bump(self._fill_stats, symbol, "placed")
-        elif status == "skipped" and "Previously filled" in str(
-            getattr(result, "reason", "") or ""
-        ):
+        elif status == "dry_run" and "breakout" in reason:
+            # 突破单影子: dry_run 下会走到执行层, 但被 dry_run 短路没有发请求。
+            # 单独计数, **不混进 placed/成交率** —— 影子单没上交易所, 混进去会
+            # 把成交率稀释成假的低值。
+            fill_stats.bump(self._fill_stats, symbol, "breakout_shadow")
+        elif status == "skipped" and "Previously filled" in reason:
             fill_stats.bump(self._fill_stats, symbol, "fills")
 
     def _bump_fill_timeout(self, symbol: str) -> None:

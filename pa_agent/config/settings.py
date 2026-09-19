@@ -263,6 +263,13 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # 连续性守卫会把一个从未提交的方案当成在场挂单一直等下去。
     # 依据: 回放 45 天, 空单 87 笔胜率 16% 净/风险 -0.77; trending_tr 118 笔
     # 胜率 25% 净/风险 -0.55; 实盘 73 笔中 neutral 诊断单 20 笔胜率 25%。
+    # 2026-09-19 45 天矩阵复跑(修正费用模型后): 全量成交 245 笔 净 -119.45U
+    # 净/风险 -0.12; 单禁 trending_tr 后 146 笔 +25.11U 净/风险 +0.04 —— 这是
+    # 整轮回放里单独一档收益最大的开关, 所以**保持硬拦, 不做软化**。
+    # (原计划把 trending_tr 降级为"缩放仓位"的软控制, 回放证据推翻了它:
+    #  禁 trending_tr 净/风险 +0.043, 而禁 neutral 只有 -0.066、RR>=1.5 只有
+    #  -0.069; 组合 禁空+禁trending_tr+禁该时段 = 净/风险 +0.116, 是矩阵最优。
+    #  同一份回放里"trending_tr 段"成交 99 笔净 -144.56U, 是唯一的净亏大项。)
     block_short_entry: bool = False
     block_trending_tr_entry: bool = False
     block_neutral_diag_entry: bool = False
@@ -284,6 +291,18 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # 低流动性窗口(UTC 小时, 跨零点时 start > end)。
     block_session_utc_start_hour: int = Field(default=20, ge=0, le=23)
     block_session_utc_end_hour: int = Field(default=4, ge=0, le=24)
+
+    # --- 突破单(STOP_MARKET)自动执行 (2026-09-19 新增, 默认关) ---
+    # 动机: 单边行情里模型选对了入场方式却拿不到货。decision_nodes 的周期→方法
+    # 映射里 trending_tr → "11.2 突破单", 但执行层此前只认市价单/限价单, 突破单
+    # 一律 rejected 丢人工队列; 模型退而求其次写限价单, 45 天回放成交率仅 31.2%
+    # (245/786), 单边行情下大量挂单在现价下方被价格走掉。
+    # 触发价取 decision.entry_price —— 归一化层已保证它是依据 K 极值 ±1 tick 且
+    # 严格越过极值, 这里只做跳动的再对齐(多单向上取整)。
+    # 默认 False: 样本只有 45 天/2 条历史突破单, 先落地代码, 由操作者决定何时开。
+    breakout_order_enabled: bool = False
+    # 突破单名义仓位缩放(触发即市价, 有滑点), 灰度期先半仓。
+    breakout_size_scale: float = Field(default=0.5, ge=0.1, le=1.0)
     # 计划盈亏比下限: 低于该值的方案在入口直接拦(0 = 关闭)。require_trader_equation
     # 用的是模型自报的 estimated_win_rate, 一个负边际的计划照样能算过, 只能做粗筛;
     # 45 天回放(2026-09-17, min_stop_atr=1.5 / 超时 30)显示 RR>=1.5 只留 36% 成交

@@ -16,6 +16,19 @@ def test_bump_and_fill_rate():
     assert fill_stats.fill_rate(stats["BTCUSDT"]) == 0.25
 
 
+def test_breakout_shadow_is_counted_separately():
+    """突破单影子样本单独计数: 它没上交易所, 绝不能稀释成交率."""
+    stats: dict = {}
+    fill_stats.bump(stats, "BTCUSDT", "placed")
+    fill_stats.bump(stats, "BTCUSDT", "fills")
+    fill_stats.bump(stats, "BTCUSDT", "breakout_shadow", by=7)
+    # 成交率只看 fills / timeouts: 影子单不参与。
+    assert fill_stats.fill_rate(stats["BTCUSDT"]) == 1.0
+    summary = fill_stats.summarize(stats)
+    assert "成交率100%" in summary
+    assert stats["BTCUSDT"]["breakout_shadow"] == 7
+
+
 def test_bump_ignores_bad_input():
     stats: dict = {}
     fill_stats.bump(stats, "", "placed")
@@ -36,7 +49,9 @@ def test_normalize_drops_junk():
         "ETHUSDT": "not-a-dict",
         "SOLUSDT": {"fills": 0, "timeouts": 0},
     }
-    assert fill_stats.normalize(raw) == {"BTCUSDT": {"placed": 3, "fills": 0, "timeouts": 2}}
+    assert fill_stats.normalize(raw) == {
+        "BTCUSDT": {"placed": 3, "fills": 0, "timeouts": 2, "breakout_shadow": 0}
+    }
 
 
 def test_summarize_text():

@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -762,6 +762,37 @@ class BinanceUSDMTestnetClient:
         )
         return _dict_response(result)
 
+    def place_stop_market_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        stop_price: Decimal,
+        client_id: str,
+    ) -> dict[str, Any]:
+        """Place a STOP_MARKET entry: becomes a MARKET order once price crosses.
+
+        突破单的执行原语。`workingType=MARK_PRICE` 与保护单一致, 避免用最后
+        成交价判定触发(Binance 默认 CONTRACT_PRICE 在插针时更易误触发)。
+        """
+        result = self._request(
+            "POST",
+            "/fapi/v1/order",
+            {
+                "symbol": symbol,
+                "side": side,
+                "type": "STOP_MARKET",
+                "quantity": _decimal_text(quantity),
+                "stopPrice": _decimal_text(stop_price),
+                "workingType": "MARK_PRICE",
+                "newClientOrderId": client_id,
+                "newOrderRespType": "RESULT",
+            },
+            signed=True,
+        )
+        return _dict_response(result)
+
     def open_orders(self, symbol: str) -> list[Any]:
         """List resting (not yet filled/canceled) orders for *symbol*.
 
@@ -1078,16 +1109,27 @@ def execute_market_signal(
     if config.emergency_stop:
         return ExecutionResult("skipped", "Emergency stop enabled")
     if config.dry_run:
-        return ExecutionResult("dry_run", "Dry-run enabled, no API request sent")
+        # 标注方案类型, 让监控层把干跑里的突破单记成独立影子样本
+        # (fill_stats.breakout_shadow), 而不是混进真实挂单成交率。
+        plan = str(decision.get("order_type") or "") if isinstance(decision, dict) else ""
+        kind = "breakout" if plan == "突破单" else "entry"
+        return ExecutionResult(
+            "dry_run", f"Dry-run enabled, no API request sent ({kind} plan)"
+        )
     if not isinstance(decision, dict):
         return ExecutionResult("rejected", "Invalid decision")
     order_type = str(decision.get("order_type") or "")
-    if order_type not in {"市价单", "限价单"}:
+    if order_type not in {"市价单", "限价单", "突破单"}:
         return ExecutionResult(
-            "rejected", "Only 市价单/限价单 is automated; breakout plans require manual review"
+            "rejected", "Only 市价单/限价单/突破单 is automated"
         )
     if order_type == "限价单" and not config.limit_order_enabled:
         return ExecutionResult("skipped", "Limit order automation disabled")
+    if order_type == "突破单" and not config.breakout_order_enabled:
+        return ExecutionResult(
+            "skipped",
+            "Breakout order automation disabled; plan queued for manual review",
+        )
 
     symbol = str(config.symbol or "").upper().strip()
     whitelist = {item.upper().strip() for item in config.symbol_whitelist}
@@ -1251,6 +1293,23 @@ def execute_market_signal(
             return ExecutionResult(
                 "rejected", "Configured margin is below symbol minimum or invalid"
             )
+        if order_type == "突破单":
+            return _execute_breakout_signal(
+                active_client,
+                decision,
+                config,
+                symbol,
+                side,
+                stop,
+                target,
+                quantity,
+                price,
+                info,
+                signal_id,
+                leverage,
+                trend_note,
+                signal_conf,
+            )
         if order_type == "限价单":
             return _execute_limit_signal(
                 active_client,
@@ -1305,6 +1364,178 @@ def execute_market_signal(
             message += " (Hint: check configured API key/secret pair and futures permission.)"
         logger.warning(f"Binance {active_environment().label_en} automatic order rejected: %s", message)
         return ExecutionResult("failed", message, symbol)
+
+
+#: 突破单止损通常离触发价很近(依据 K 的极值外 1 tick), 拿 mark 价量入场距离
+#: 会误判为"止损太近"而拒单 —— 市价单路径的 mark-based 检查保留不变, 突破单
+#: 改用 entry(触发价)锚定的口径。
+def _resolve_breakout_trigger(
+    side: str,
+    *,
+    entry_price: Decimal,
+    mark_price: Decimal,
+    exchange_info: dict[str, Any],
+) -> tuple[Decimal, str]:
+    """把 decision.entry_price 定成 STOP_MARKET 触发价, 返回 (触发价, 说明)。
+
+    entry_price 的语义由归一化层保证: 做多 = 依据 K 的 high + 1 tick(严格越过),
+    做空 = low - 1 tick(price_tick.align_breakout_entry 与 json_validator 双重
+    校验)。这里只做**跳动再对齐**: 模型给的 ±1 tick 落在非 tick 整数倍上时,
+    多单向上取整、空单向下取整, 保证取整后仍严格越过依据 K 极值, 不会退化成
+    "下单即已触发"(那等价于市价单, 且方向判据与实际不符)。
+    """
+    tick = _tick_size(exchange_info)
+    toward_up = side == "BUY"
+    trigger = entry_price
+    if tick is not None and tick > 0:
+        rounding = ROUND_CEILING if toward_up else ROUND_DOWN
+        trigger = (entry_price / tick).to_integral_value(rounding=rounding) * tick
+    # 触发价已越过 mark: STOP_MARKET 会立刻市价成交(等价市价单 + 滑点)。
+    already_crossed = trigger <= mark_price if toward_up else trigger >= mark_price
+    note = (
+        f"trigger={_decimal_text(trigger)} "
+        f"({'above' if toward_up else 'below'} mark {_decimal_text(mark_price)}, "
+        f"{'ALREADY CROSSED - will fill immediately' if already_crossed else 'armed'})"
+    )
+    return trigger, note
+
+
+def _execute_breakout_signal(
+    client: BinanceUSDMTestnetClient,
+    decision: dict[str, Any],
+    config: BinanceUSDMTestnetSettings,
+    symbol: str,
+    side: str,
+    stop: Decimal,
+    target: Decimal,
+    quantity: Decimal,
+    mark_price: Decimal,
+    exchange_info: dict[str, Any],
+    signal_id: str,
+    leverage: int,
+    trend_note: str = "",
+    conf: float | None = None,
+) -> ExecutionResult:
+    """挂 STOP_MARKET 突破入场单, 成交后由 watcher 补挂保护单.
+
+    为什么需要它(2026-09-19): 单边行情里模型给对的入场方式是突破单
+    (decision_nodes._METHOD_NODE: trending_tr → 11.2 突破单), 但执行层此前
+    只认市价单/限价单, 突破单一律 rejected 丢进人工队列; 模型退而求其次改写
+    限价单又常常 no_fill。shadow_replay 45 天: 限价成交率仅 31.2%。
+
+    设计取舍
+    --------
+    - 用 STOP_MARKET 而不是 STOP+MARKET 两腿: 触发即市价成交, 由同一个
+      `_watch_limit_entry` 轮询到 FILLED 后调 `_attach_protection`, 复用限价
+      单已经验证过的"成交后必挂保护、挂不上就平仓"不变量。
+    - 数量按 `breakout_size_scale` 缩减: 突破单在 trend 段才有正期望, 但样本
+      只有 45 天/2 条历史, 先用小仓灰度。
+    - 止损按 entry(触发价)锚定检查下限, 不用 mark —— 理由见上方注释。
+    """
+    if not config.breakout_order_enabled:
+        return ExecutionResult(
+            "skipped", "Breakout order automation disabled; plan queued for manual review", symbol
+        )
+    entry_price = _positive_decimal(decision.get("entry_price"))
+    if entry_price is None:
+        return ExecutionResult("rejected", "Breakout order requires entry_price", symbol)
+    trigger, trigger_note = _resolve_breakout_trigger(
+        side,
+        entry_price=entry_price,
+        mark_price=mark_price,
+        exchange_info=exchange_info,
+    )
+    if trigger is None or trigger <= 0:
+        return ExecutionResult("rejected", "Breakout order trigger price is invalid", symbol)
+    # 三价几何: 多单要求 stop < entry < target(空单镜像)。entry 已由更高层校验,
+    # 这里再校验一次是因为 trigger 可能被依据 K 极值推到 entry 之外。
+    if side == "BUY" and not (stop < trigger < target):
+        return ExecutionResult(
+            "rejected", f"Long breakout requires stop < trigger < target "
+            f"({_decimal_text(stop)} / {_decimal_text(trigger)} / {_decimal_text(target)})", symbol
+        )
+    if side == "SELL" and not (target < trigger < stop):
+        return ExecutionResult(
+            "rejected", f"Short breakout requires target < trigger < stop "
+            f"({_decimal_text(target)} / {_decimal_text(trigger)} / {_decimal_text(stop)})", symbol
+        )
+    if config.dry_run:
+        # 影子模式: 价格校验全部走完, 但不发请求、不落 pending。监控层会把这条
+        # 记进 fill_stats.breakout_shadow, 操作者可以据此判断"开关打开后一天会
+        # 挂多少张突破单", 再决定是否真的启用。
+        return ExecutionResult(
+            "dry_run",
+            f"Dry-run enabled, no API request sent (breakout plan; {trigger_note}, "
+            f"stop={_decimal_text(stop)} target={_decimal_text(target)})",
+            symbol,
+        )
+    # entry-anchored 止损下限: 与限价单同口径(限价单也用 entry 量)。
+    gap = _stop_gap_pct(trigger, stop)
+    stop_floor = _stop_distance_floor_pct(config, decision)
+    if gap < stop_floor:
+        return ExecutionResult(
+            "rejected",
+            f"Breakout stop loss too close to trigger ({gap:.3f}% < {stop_floor:.3f}% minimum)",
+            symbol,
+        )
+    scale = float(getattr(config, "breakout_size_scale", 1.0) or 1.0)
+    if not 0.0 < scale <= 1.0:
+        scale = 1.0
+    if scale < 1.0:
+        scaled = _quantize_quantity(quantity * Decimal(str(scale)), exchange_info)
+        if scaled is None or scaled <= 0:
+            return ExecutionResult(
+                "rejected", "Breakout size scale leaves no valid quantity", symbol
+            )
+        quantity = scaled
+        trend_note = (trend_note or "") + f"; breakout size scaled to {scale:.2f}x"
+    client.set_leverage(symbol, leverage)
+    entry_client_id = _entry_client_id(signal_id)
+    target2 = _positive_decimal(decision.get("take_profit_price_2"))
+    pending_record = {
+        "client_id": entry_client_id,
+        "signal_id": signal_id,
+        "side": side,
+        "quantity": _decimal_text(quantity),
+        "stop": _decimal_text(stop),
+        "target": _decimal_text(target),
+        "target2": "" if target2 is None else _decimal_text(target2),
+        "conf": "" if conf is None else str(conf),
+        "entry": _decimal_text(trigger),
+        "kind": "breakout",
+        "placed_at": time.time(),
+    }
+    _persist_pending(symbol, pending_record)
+    try:
+        order = client.place_stop_market_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            stop_price=trigger,
+            client_id=entry_client_id,
+        )
+    except (BinanceAPIError, ValueError):
+        _drop_pending(symbol, entry_client_id)
+        raise
+    if config is not None:
+        _arm_limit_fill_watcher(client, symbol, pending_record, config)
+    logger.info(
+        f"{active_environment().label_en} breakout entry placed for %s: order=%s {trigger_note} "
+        f"qty=%s stop=%s target=%s",
+        symbol,
+        entry_client_id,
+        _decimal_text(quantity),
+        _decimal_text(stop),
+        _decimal_text(target),
+    )
+    return ExecutionResult(
+        "pending",
+        f"{active_environment().label_en} breakout entry placed; {trigger_note} "
+        f"stop={_decimal_text(stop)} target={_decimal_text(target)}" + trend_note,
+        symbol,
+        _decimal_text(quantity),
+        str(order.get("orderId", "")),
+    )
 
 
 def _execute_limit_signal(
@@ -2171,9 +2402,11 @@ def _cancel_and_settle(
 def _resting_entry_orders(
     client: BinanceUSDMTestnetClient, symbol: str
 ) -> list[dict[str, Any]]:
-    """Resting LIMIT entry orders for *symbol* (empty when unqueryable).
+    """Resting entry orders for *symbol* (empty when unqueryable).
 
-    只认 GTC 限价入场单: 保护腿走 algo 接口, 市价单不会挂着, 都排除在外。
+    涵盖两类仍然"挂着、尚未成交"的入场单: GTC 限价单与突破单(STOP_MARKET)。
+    保护腿走 algo 接口、市价单不会挂着, 都排除在外。突破单必须一起收养 ——
+    漏掉它同样会造成"成交即裸仓"(2026-09-18 ETH 事故的同类风险)。
     """
     list_orders = getattr(client, "open_orders", None)
     if not callable(list_orders):
@@ -2189,7 +2422,8 @@ def _resting_entry_orders(
         order
         for order in orders
         if isinstance(order, dict)
-        and str(order.get("type") or "").strip().upper() == "LIMIT"
+        and str(order.get("type") or "").strip().upper()
+        in ("LIMIT", "STOP_MARKET", "STOP")
     ]
 
 
@@ -2269,7 +2503,12 @@ def _resolve_orphan_limit_entries(
         if status not in ("NEW", "PARTIALLY_FILLED"):
             continue  # 已成交/已撤: 成交由持仓收养兜底
         side = str(entry.get("side") or "").strip().upper()
-        price = _positive_decimal(entry.get("price"))
+        order_type = str(entry.get("type") or "").strip().upper()
+        # 突破单挂在 stopPrice 上, 没有 price 字段。
+        is_breakout = order_type in ("STOP_MARKET", "STOP")
+        price = _positive_decimal(
+            entry.get("stopPrice") if is_breakout else entry.get("price")
+        )
         quantity = _positive_decimal(entry.get("origQty"))
         if side not in ("BUY", "SELL") or price is None or quantity is None or quantity <= 0:
             logger.error(
@@ -2317,6 +2556,7 @@ def _resolve_orphan_limit_entries(
             "target2": "" if target2 is None else _decimal_text(target2),
             "conf": "",
             "entry": _decimal_text(price),
+            "kind": "breakout" if is_breakout else "limit",
             "placed_at": _entry_placed_at(entry),
         }
         _persist_pending(symbol, record)
@@ -2345,8 +2585,9 @@ def _watch_limit_entry(
     conf: float | None = None,
     config: BinanceUSDMTestnetSettings | None = None,
 ) -> None:
-    """Poll a resting limit entry; attach TP/SL on full fill, and protect or
-    roll back any partial fill when the order ends (timeout / cancel).
+    """Poll a resting entry (limit or STOP_MARKET breakout); attach TP/SL on full
+    fill, and protect or roll back any partial fill when the order ends
+    (timeout / cancel). 两类入场单共用同一套"成交后必挂保护"不变量。
     """
     deadline = time.monotonic() + timeout_seconds
     wake = _register_watcher_wake(client_id)
@@ -2906,6 +3147,21 @@ def _quantity_for_notional(
     if quantity * price < Decimal(str(min_notional)):
         return None
     return quantity
+
+
+def _quantize_quantity(quantity: Decimal, exchange_info: dict[str, Any]) -> Decimal | None:
+    """Floor *quantity* to the symbol's LOT_SIZE step (None when unusable)."""
+    if quantity <= 0:
+        return None
+    filters = {item.get("filterType"): item for item in exchange_info.get("filters", [])}
+    lot = filters.get("LOT_SIZE") or filters.get("MARKET_LOT_SIZE")
+    if not isinstance(lot, dict):
+        return None
+    step = Decimal(str(lot["stepSize"]))
+    if step <= 0:
+        return None
+    floored = (quantity / step).to_integral_value(rounding=ROUND_DOWN) * step
+    return floored if floored > 0 else None
 
 
 def _quantity_for_risk(
