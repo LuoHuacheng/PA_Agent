@@ -241,7 +241,13 @@ class SignalPipeline:
                 diag = {}
         cycle = str(diag.get("cycle_position") or "")
         if getattr(cfg, "block_trending_tr_entry", False) and cycle == "trending_tr":
-            reasons.append("trending_tr_block: 回放 118 笔净/风险 -0.55")
+            # 2026-09-19 45 天矩阵复跑(修正费用模型后): 全量成交 245 笔净/风险
+            # -0.122; 单禁 trending_tr → 146 笔 +0.043, 是单独一档收益最大的开关,
+            # 且该段本身成交 99 笔 -144.56U, 是全量里唯一的净亏大项 —— 因此保持
+            # 硬拦, 不做"缩放仓位"软化(原计划被这轮回放推翻)。
+            reasons.append(
+                "trending_tr_block: 回放 45 天该段 99 笔 -144.56U; 禁后 146 笔净/风险 +0.04"
+            )
         if getattr(cfg, "block_neutral_diag_entry", False) and str(diag.get("direction") or "") == "neutral":
             reasons.append("neutral_diag_block: 实盘 neutral 单胜率 25%")
         allow = tuple(getattr(cfg, "block_cycle_allowlist", ()) or ())

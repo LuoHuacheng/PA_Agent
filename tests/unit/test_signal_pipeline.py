@@ -265,10 +265,17 @@ def test_block_short_entry(monkeypatch) -> None:
 
 
 def test_block_trending_tr_entry(monkeypatch) -> None:
+    """trending_tr 保持硬拦: 2026-09-19 45 天矩阵复跑里它是单档收益最大的开关.
+
+    回放证据: 全量成交 245 笔净/风险 -0.122, 单禁 trending_tr 后 146 笔 +0.043;
+    该段本身成交 99 笔 -144.56U, 是全量里唯一的净亏大项。原计划的"软化"方案
+    (降级为缩放仓位)被这轮回放推翻, 故断言原因文案里必须带上证据数字。
+    """
     exec_calls, _ = _patch_io(monkeypatch)
     pipeline = SignalPipeline(_env_settings(block_trending_tr_entry=True))
     result = pipeline.dispatch(_env_signal("做多", "trending_tr", "bullish"))
     assert result.gate_blocked and "trending_tr_block" in result.gate_reasons[0]
+    assert "99 笔 -144.56U" in result.gate_reasons[0]
     assert exec_calls == []
 
 
