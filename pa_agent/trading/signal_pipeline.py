@@ -97,13 +97,31 @@ class DispatchResult:
     notified: bool = False
 
 
-def _session_blocked_now(now_hour: int | None = None) -> bool:
-    """04:00-11:59 UTC+8 低流动性窗口(与回放分桶口径一致)."""
-    if now_hour is None:
-        from datetime import datetime, timedelta, timezone
+def _session_blocked_now(
+    now_hour: int | None = None,
+    *,
+    start_hour_utc: int = 20,
+    end_hour_utc: int = 4,
+) -> bool:
+    """低流动性窗口: 默认 20:00-03:59 UTC.
 
-        now_hour = datetime.now(timezone(timedelta(hours=8))).hour
-    return 4 <= now_hour < 12
+    窗口一律用 UTC 定义, 不再依赖运行机器的本地时区(2026-09-19 改为统一口径):
+    原实现的 04:00-11:59 UTC+8 与现在的 20:00-03:59 UTC 是**同一段墙钟时间**,
+    只是换了坐标系, 所以既有回放证据(45 天 04-12 时 UTC+8, 禁该窗口 +57.59U)
+    继续成立。跨零点时 start > end, 判据取并集。
+    """
+    if now_hour is None:
+        from datetime import UTC, datetime
+
+        now_hour = datetime.now(UTC).hour
+    hour = int(now_hour) % 24
+    start = int(start_hour_utc) % 24
+    end = int(end_hour_utc) % 24
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
 
 
 class SignalPipeline:
@@ -229,8 +247,15 @@ class SignalPipeline:
         allow = tuple(getattr(cfg, "block_cycle_allowlist", ()) or ())
         if allow and cycle and cycle not in allow:
             reasons.append(f"cycle_block: 周期位置 {cycle} 不在白名单({'/'.join(allow)})")
-        if getattr(cfg, "block_session_entry", False) and _session_blocked_now():
-            reasons.append("session_block: 回放 04-12时(UTC+8) 74 笔 -290U")
+        if getattr(cfg, "block_session_entry", False) and _session_blocked_now(
+            start_hour_utc=int(getattr(cfg, "block_session_utc_start_hour", 20)),
+            end_hour_utc=int(getattr(cfg, "block_session_utc_end_hour", 4)),
+        ):
+            reasons.append(
+                "session_block: 回放 04-12时(UTC+8) 74 笔 -290U"
+                f" (= {int(getattr(cfg, 'block_session_utc_start_hour', 20)):02d}:00"
+                f"-{int(getattr(cfg, 'block_session_utc_end_hour', 4)):02d}:59 UTC)"
+            )
         min_rr = float(getattr(cfg, "min_plan_reward_risk", 0.0) or 0.0)
         if min_rr > 0:
             from pa_agent.util.trade_metrics import compute_risk_reward

@@ -311,13 +311,33 @@ def test_block_neutral_diag_entry(monkeypatch) -> None:
     assert exec_calls == []
 
 
+def test_session_window_is_utc_defined() -> None:
+    """窗口用 UTC 定义: 20:00-03:59 UTC 等价原 04:00-11:59 UTC+8 的墙钟时间。"""
+    from pa_agent.trading.signal_pipeline import _session_blocked_now
+
+    # 窗口内, 跨零点两侧
+    assert _session_blocked_now(now_hour=20)
+    assert _session_blocked_now(now_hour=23)
+    assert _session_blocked_now(now_hour=0)
+    assert _session_blocked_now(now_hour=3)
+    # 窗口外
+    assert not _session_blocked_now(now_hour=4)
+    assert not _session_blocked_now(now_hour=19)
+    assert not _session_blocked_now(now_hour=12)
+    # 小时数归一: 负数 / 大于 24
+    assert _session_blocked_now(now_hour=24) and _session_blocked_now(now_hour=-1)
+    # 自定义不跨零点的窗口
+    assert _session_blocked_now(now_hour=9, start_hour_utc=8, end_hour_utc=12)
+    assert not _session_blocked_now(now_hour=13, start_hour_utc=8, end_hour_utc=12)
+    # start == end 视为空窗口, 不会整天误拦
+    assert not _session_blocked_now(now_hour=9, start_hour_utc=8, end_hour_utc=8)
+
+
 def test_block_session_entry(monkeypatch) -> None:
     from pa_agent.trading.signal_pipeline import _session_blocked_now
 
     exec_calls, _ = _patch_io(monkeypatch)
     pipeline = SignalPipeline(_env_settings(block_session_entry=True))
-    assert _session_blocked_now(now_hour=4) and _session_blocked_now(now_hour=11)
-    assert not _session_blocked_now(now_hour=12) and not _session_blocked_now(now_hour=3)
     result = pipeline.dispatch(_env_signal("做多", "normal_channel", "bullish"))
     if _session_blocked_now():  # 实际运行时刻落在窗口内才拦截
         assert result.gate_blocked and "session_block" in result.gate_reasons[0]

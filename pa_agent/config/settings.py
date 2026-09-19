@@ -273,10 +273,17 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # 且可灰度、可回放调参而不改代码。
     block_cycle_allowlist: list[str] = Field(default_factory=list)
 
-    # 禁 04:00-11:59(UTC+8) 自动开仓: 回放 45 天该时段 74 笔亏 -290U(美盘尾段+
-    # 亚盘早段低流动性); 与 trending_tr 仅 51% 交集, 独立有效 — 组合后模型流
-    # 从 -0.40R/笔 收到 ≈0.00R (shadow_replay --matrix 2026-09-13)。
+    # 禁低流动性时段自动开仓: 回放 45 天该时段 74 笔亏 -290U(美盘尾段+亚盘早段
+    # 低流动性); 与 trending_tr 仅 51% 交集, 独立有效 — 组合后模型流从 -0.40R/笔
+    # 收到 ≈0.00R (shadow_replay --matrix 2026-09-13)。
+    # 2026-09-19 起窗口用 UTC 定义, 不再依赖机器本地时区; 默认 20:00-03:59 UTC
+    # 与原 04:00-11:59(UTC+8) 是同一段墙钟时间, 既有证据继续成立。
+    # 2026-09-19 45 天矩阵复跑: 禁该窗口在 gtx/off 下净/风险 +0.09(全部 -0.12),
+    # 仍是现行组合(禁空+禁trending_tr+禁该窗口)里贡献最大的一档。
     block_session_entry: bool = False
+    # 低流动性窗口(UTC 小时, 跨零点时 start > end)。
+    block_session_utc_start_hour: int = Field(default=20, ge=0, le=23)
+    block_session_utc_end_hour: int = Field(default=4, ge=0, le=24)
     # 计划盈亏比下限: 低于该值的方案在入口直接拦(0 = 关闭)。require_trader_equation
     # 用的是模型自报的 estimated_win_rate, 一个负边际的计划照样能算过, 只能做粗筛;
     # 45 天回放(2026-09-17, min_stop_atr=1.5 / 超时 30)显示 RR>=1.5 只留 36% 成交
