@@ -1,6 +1,7 @@
 """Risk/reward and estimated win-rate helpers for trading decisions."""
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -121,8 +122,6 @@ def widen_stop_for_tp1_rr_cap(
 
     Long: lower stop; short: raise stop. Returns None if geometry cannot be fixed.
     """
-    import math
-
     rr = compute_risk_reward(entry, take_profit, stop_loss, direction)
     if rr is None:
         return None
@@ -235,6 +234,122 @@ def adjust_decision_stop_for_tp1_rr_cap(
     if new_sl is None or abs(new_sl - sl) < 1e-12:
         return False
     decision["stop_loss_price"] = new_sl
+    return True
+
+
+def clamp_tp2_for_rr_cap(
+    entry: object,
+    stop_loss: object,
+    take_profit_2: object,
+    direction: object,
+    *,
+    max_rr: float,
+    tick: float | None = None,
+) -> float | None:
+    """Return TP2 pulled in so its reward:risk is <= *max_rr*.
+
+    TP1 is capped by WIDENING the stop (risk grows); TP2 is capped by
+    SHRINKING the target (reward shrinks) — the executed risk never moves, so
+    the risk-sizing quantity stays exactly what the plan asked for.
+
+    Returns the untouched (repr-cleaned) TP2 when it already fits, and None
+    when the inputs cannot be reasoned about (caller then keeps the model
+    value). Alignment always errs toward the entry price, so a tick-rounded
+    result can only be *tighter* than the cap, never looser.
+    """
+    if max_rr is None or float(max_rr) <= 0:
+        return None
+    try:
+        e = float(entry)
+        sl = float(stop_loss)
+        tp2 = float(take_profit_2)
+    except (TypeError, ValueError):
+        return None
+
+    rr = compute_risk_reward(e, tp2, sl, direction)
+    if rr is None:
+        return None
+    risk = float(rr["risk"])
+    if risk <= 0:
+        return None
+    if float(rr["ratio"]) <= float(max_rr) + 1e-9:
+        return _clean_price(tp2, tick)
+
+    long = is_long_direction(direction)
+    if long is None:
+        # compute_risk_reward already accepted the geometry: it is unambiguous.
+        long = tp2 > e and sl < e
+    ideal = e + float(max_rr) * risk if long else e - float(max_rr) * risk
+
+    if tick and tick > 0:
+        scaled = ideal / tick
+        aligned = (
+            math.floor(scaled + 1e-12) * tick
+            if long
+            else math.ceil(scaled - 1e-12) * tick
+        )
+        candidate = _clean_price(aligned, tick)
+    else:
+        candidate = _clean_price(ideal, None)
+
+    probe = compute_risk_reward(e, candidate, sl, direction)
+    if probe is None or float(probe["ratio"]) > float(max_rr) + 1e-9:
+        return None
+    # 对齐后必须仍在入场价的正确一侧, 且确实比模型原目标更近。
+    if (long and not candidate < tp2) or (not long and not candidate > tp2):
+        return None
+    return candidate
+
+
+def adjust_decision_tp2_for_rr_cap(
+    decision: dict[str, Any],
+    *,
+    max_rr: float,
+    kline_frame: Any = None,
+    tick: float | None = None,
+) -> bool:
+    """Pull take_profit_price_2 in-place when its RR exceeds *max_rr*.
+
+    Only the far target moves: entry, stop and TP1 are never touched. Returns
+    False when the cap is off, the decision is not an order, TP2 is missing, or
+    the cap sits at/below TP1 (pulling TP2 inside TP1 would erase the runner
+    stage entirely — that is a configuration mistake, not a silent rewrite).
+    """
+    if max_rr is None or float(max_rr) <= 0:
+        return False
+    if decision.get("order_type") not in ("限价单", "突破单", "市价单"):
+        return False
+    tp2_raw = decision.get("take_profit_price_2")
+    if tp2_raw is None or tp2_raw == "":
+        return False
+    try:
+        entry = float(decision["entry_price"])
+        sl = float(decision["stop_loss_price"])
+        tp1 = float(decision["take_profit_price"])
+        tp2 = float(tp2_raw)
+    except (TypeError, ValueError, KeyError):
+        return False
+
+    if tick is None and kline_frame is not None:
+        from pa_agent.util.price_tick import infer_price_tick_from_frame
+
+        tick = infer_price_tick_from_frame(kline_frame)
+
+    tp1_rr = compute_risk_reward(entry, tp1, sl, decision.get("order_direction"))
+    if tp1_rr is not None and float(tp1_rr["ratio"]) >= float(max_rr) - 1e-9:
+        return False
+
+    new_tp2 = clamp_tp2_for_rr_cap(
+        entry,
+        sl,
+        tp2,
+        decision.get("order_direction"),
+        max_rr=max_rr,
+        tick=tick,
+    )
+    if new_tp2 is None or abs(new_tp2 - tp2) < 1e-12:
+        return False
+    decision["take_profit_price_2"] = new_tp2
     return True
 
 

@@ -22,13 +22,21 @@ class _Res:
 
 
 def _frame(atr: float = 1.5, close: float = 100.0) -> Any:
+    # OHLC 齐全: infer_price_tick_from_frame 需要 open/high/low 才能推出 tick,
+    # 缺字段时 tick 推断静默失败(价格保持原样), 会让 tick 相关断言测了个寂寞。
     return type(
         "Frame",
         (),
         {
             "symbol": "BTCUSDT",
             "timeframe": "15m",
-            "bars": (type("Bar", (), {"close": close})(),),
+            "bars": (
+                type(
+                    "Bar",
+                    (),
+                    {"open": close, "high": close, "low": close - 0.1, "close": close},
+                )(),
+            ),
             "indicators": type("Ind", (), {"atr14": (atr,)})(),
         },
     )()
@@ -425,3 +433,61 @@ def test_rejected_signal_marks_not_working(monkeypatch) -> None:
     SignalPipeline(Settings()).dispatch(signal)
     assert signal.decision["execution"]["status"] == "rejected"
     assert plan_is_working({"stage2_decision": signal.decision}) is False
+
+
+# ── TP2 盈亏比上限 (2026-09-19) ──────────────────────────────────────────────
+# 无上限时 TP2 中位 3.28R / 最高 21.37R, 实际从没兑现, 都落到 12h time-stop。
+# TP1 上限靠"推远止损"; TP2 反过来"拉近目标", 已执行的风险口径完全不动。
+
+def _tp2_signal() -> OrderSignal:
+    decision = {
+        "decision": {
+            "order_type": "市价单",
+            "order_direction": "做多",
+            "trade_confidence": 90,
+            "entry_price": 100,
+            "stop_loss_price": 95,
+            "take_profit_price": 106,
+            "take_profit_price_2": 130,  # RR 6.0 > 3.0
+        }
+    }
+    return OrderSignal(
+        decision=decision,
+        inner=decision["decision"],
+        symbol="BTCUSDT",
+        timeframe="15m",
+        frame=_frame(),
+    )
+
+
+def test_tp2_cap_off_by_default(monkeypatch) -> None:
+    exec_calls, _ = _patch_io(monkeypatch)
+    signal = _tp2_signal()
+    pipeline = SignalPipeline(_env_settings())
+    pipeline.dispatch(signal)
+    assert signal.inner["take_profit_price_2"] == 130  # 默认不改行为
+    assert exec_calls[0]["inner"]["take_profit_price_2"] == 130
+
+
+def test_tp2_cap_pulls_far_target_before_save_and_execution(monkeypatch) -> None:
+    exec_calls, _ = _patch_io(monkeypatch)
+    signal = _tp2_signal()
+    pipeline = SignalPipeline(_env_settings(max_plan_reward_risk_tp2=3.0))
+    pipeline.dispatch(signal)
+    # risk=5 -> 100 + 3*5 = 115, tick 0.1 -> floor 115.0
+    assert signal.inner["take_profit_price_2"] == 115.0
+    assert exec_calls[0]["inner"]["take_profit_price_2"] == 115.0
+    # 风险端与 TP1 一律不动
+    assert signal.inner["stop_loss_price"] == 95
+    assert signal.inner["take_profit_price"] == 106
+    assert signal.inner["entry_price"] == 100
+
+
+def test_tp2_cap_ignores_non_actionable_order_type(monkeypatch) -> None:
+    exec_calls, _ = _patch_io(monkeypatch)
+    signal = _tp2_signal()
+    signal.inner["order_type"] = "不下单"
+    pipeline = SignalPipeline(_env_settings(max_plan_reward_risk_tp2=3.0))
+    pipeline.dispatch(signal)
+    assert signal.inner["take_profit_price_2"] == 130
+    assert exec_calls == []

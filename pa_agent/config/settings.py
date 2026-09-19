@@ -309,6 +309,14 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # 却砍掉 85% 的净亏 (-138.40U -> -20.74U), 比置信度门槛有效得多
     # (trade_conf>=55 反而 -22U)。价格缺失/方向矛盾一律按不合格处理。
     min_plan_reward_risk: float = Field(default=0.0, ge=0.0, le=20.0)
+    # TP2(远端目标)盈亏比上限: 模型的 take_profit_price_2 超出该值时, 在落盘与
+    # 执行之前把**目标拉近**到 entry ± max_rr×risk(0 = 关闭, 默认关闭)。
+    # 与 TP1 的 2.0 上限相反 —— TP1 靠"推远止损"压 RR, TP2 只动 reward, 风险
+    # 口径(定仓数量/止损价)一律不变。之所以需要: 790 份计划里 TP2 中位 3.28R、
+    # p75 4.27R、最高 21.37R, 而实测均 MFE 只有 +0.855R(短线单 0.22R), 这些远端
+    # 目标从未兑现, 实际出场落在 12h time-stop 上 —— 等于用挂号信押一个没人收的
+    # 地址。缺 45 天回放旋钮(见 docs/出场侧实验.md 的口径), 所以先灰度观察。
+    max_plan_reward_risk_tp2: float = Field(default=0.0, ge=0.0, le=20.0)
     # 防护单触发基准(workingType)。默认 MARK_PRICE 保持既有行为; 实测 2026-09-16
     # 20:28 ZEC 标记价一度戳到 1207.33(最新价最低只到 1208.63), 把按计划挂在
     # 1208.15 的止损点掉, 随后价格反转直奔原计划止盈 —— priceProtect=TRUE 并未

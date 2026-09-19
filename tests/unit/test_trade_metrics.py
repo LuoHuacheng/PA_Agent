@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pa_agent.util.trade_metrics import (
     adjust_decision_stop_for_tp1_rr_cap,
+    adjust_decision_tp2_for_rr_cap,
+    clamp_tp2_for_rr_cap,
     compute_risk_reward,
     format_estimated_win_rate,
     format_estimated_win_rate_reasoning,
@@ -130,3 +132,116 @@ def test_format_estimated_win_rate_from_model_field():
     }
     assert format_estimated_win_rate(decision) == "47%"
     assert "47" in format_estimated_win_rate_reasoning(decision)
+
+# --- TP2 RR 上限 (2026-09-19) ------------------------------------------------
+# TP1 用"推远止损"压 RR; TP2 反过来"拉近目标"即可 —— 风险端不动, 纯减 reward。
+# 无上限时 TP2 中位 3.28R / 最高 21.37R, 实际落到 12h time-stop, 收益从未兑现。
+
+
+def test_clamp_tp2_for_rr_cap_long():
+    # risk=1, tp2 RR=10 > 3 -> cap to entry + 3R
+    clamped = clamp_tp2_for_rr_cap(100.0, 99.0, 110.0, "做多", max_rr=3.0, tick=0.01)
+    assert clamped == 103.0
+    rr = compute_risk_reward(100.0, clamped, 99.0, "做多")
+    assert rr is not None
+    assert rr["ratio"] <= 3.0 + 1e-9
+
+
+def test_clamp_tp2_for_rr_cap_short():
+    clamped = clamp_tp2_for_rr_cap(100.0, 101.0, 90.0, "做空", max_rr=3.0, tick=0.01)
+    assert clamped == 97.0
+    rr = compute_risk_reward(100.0, clamped, 101.0, "做空")
+    assert rr is not None
+    assert rr["ratio"] <= 3.0 + 1e-9
+
+
+def test_clamp_tp2_tick_alignment_never_exceeds_cap():
+    # risk=0.7, target=102.1, tick=0.5 -> must floor to 102.0 (never round up past cap)
+    clamped = clamp_tp2_for_rr_cap(100.0, 99.3, 110.0, "做多", max_rr=3.0, tick=0.5)
+    assert clamped == 102.0
+    rr = compute_risk_reward(100.0, clamped, 99.3, "做多")
+    assert rr is not None
+    assert rr["ratio"] <= 3.0 + 1e-9
+
+
+def test_clamp_tp2_within_cap_is_unchanged():
+    # TP2 RR == 2 <= 3: the model's far target survives untouched.
+    clamped = clamp_tp2_for_rr_cap(100.0, 99.0, 102.0, "做多", max_rr=3.0, tick=0.01)
+    assert clamped == 102.0
+
+
+def test_clamp_tp2_invalid_inputs_return_none():
+    assert clamp_tp2_for_rr_cap(100.0, 99.0, 110.0, "做多", max_rr=0.0) is None
+    assert clamp_tp2_for_rr_cap(100.0, 100.0, 110.0, "做多", max_rr=3.0) is None
+    # tp2 on the wrong side of entry: no reward to clamp
+    assert clamp_tp2_for_rr_cap(100.0, 99.0, 98.0, "做多", max_rr=3.0) is None
+    # 非数值入参
+    assert clamp_tp2_for_rr_cap(None, 99.0, 110.0, "做多", max_rr=3.0) is None
+
+
+def test_clamp_tp2_infers_direction_when_blank():
+    # compute_risk_reward 在几何明确时自行推断方向, 这里保持一致。
+    assert clamp_tp2_for_rr_cap(100.0, 99.0, 110.0, "", max_rr=3.0, tick=0.01) == 103.0
+
+
+def test_adjust_decision_tp2_for_rr_cap_mutates_decision():
+    decision = {
+        "order_type": "限价单",
+        "order_direction": "做多",
+        "entry_price": 100.0,
+        "take_profit_price": 101.5,
+        "stop_loss_price": 99.0,
+        "take_profit_price_2": 110.0,
+    }
+    assert adjust_decision_tp2_for_rr_cap(decision, max_rr=3.0, tick=0.01)
+    assert decision["take_profit_price_2"] == 103.0
+    assert decision["entry_price"] == 100.0
+    assert decision["stop_loss_price"] == 99.0
+    assert decision["take_profit_price"] == 101.5
+
+
+def test_adjust_decision_tp2_refuses_when_cap_below_tp1():
+    # max_rr 1.2 < TP1 RR 1.5: pulling TP2 to 1.2R would put it inside TP1.
+    decision = {
+        "order_type": "限价单",
+        "order_direction": "做多",
+        "entry_price": 100.0,
+        "take_profit_price": 101.5,
+        "stop_loss_price": 99.0,
+        "take_profit_price_2": 110.0,
+    }
+    assert not adjust_decision_tp2_for_rr_cap(decision, max_rr=1.2, tick=0.01)
+    assert decision["take_profit_price_2"] == 110.0
+
+
+def test_adjust_decision_tp2_disabled_when_zero():
+    decision = {
+        "order_type": "限价单",
+        "order_direction": "做多",
+        "entry_price": 100.0,
+        "take_profit_price": 101.5,
+        "stop_loss_price": 99.0,
+        "take_profit_price_2": 110.0,
+    }
+    assert not adjust_decision_tp2_for_rr_cap(decision, max_rr=0.0, tick=0.01)
+    assert decision["take_profit_price_2"] == 110.0
+
+
+def test_adjust_decision_tp2_skips_no_order_and_missing_tp2():
+    no_order = {
+        "order_type": "不下单",
+        "order_direction": "做多",
+        "entry_price": 100.0,
+        "take_profit_price": 101.5,
+        "stop_loss_price": 99.0,
+        "take_profit_price_2": 110.0,
+    }
+    assert not adjust_decision_tp2_for_rr_cap(no_order, max_rr=3.0, tick=0.01)
+    missing = {
+        "order_type": "限价单",
+        "order_direction": "做多",
+        "entry_price": 100.0,
+        "take_profit_price": 101.5,
+        "stop_loss_price": 99.0,
+    }
+    assert not adjust_decision_tp2_for_rr_cap(missing, max_rr=3.0, tick=0.01)

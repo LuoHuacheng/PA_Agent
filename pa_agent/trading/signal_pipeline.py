@@ -384,6 +384,9 @@ class SignalPipeline:
         atr_pct = frame_atr_pct(signal.frame)
         if atr_pct is not None:
             signal.inner["atr_pct"] = atr_pct
+        # TP2 盈亏比上限：必须在 _save_record 之前, 记录/通知/下单三处看到同一个
+        # 目标。只在 order_type 是可下单类型且 TP2 存在时生效(函数内部自判)。
+        self._clamp_tp2_reward_risk(signal, cfg)
         if (
             atr_pct is None
             or str(signal.inner.get("order_type") or "") not in ("限价单", "市价单")
@@ -417,6 +420,51 @@ class SignalPipeline:
                 signal.symbol,
                 signal.timeframe,
                 exc,
+            )
+
+    def _clamp_tp2_reward_risk(self, signal: OrderSignal, cfg: Any) -> None:
+        """Pull an over-extended TP2 back to the configured reward:risk cap.
+
+        远端目标只影响 reward, 所以这里改的是 TP2 而不是止损 —— 定仓数量已由
+        |entry − stop| 决定, 风险口径在任何情况下都不动。cap 为 0(默认)或
+        TP2 缺失时是空操作, 保持既有行为。
+        """
+        max_rr = float(getattr(cfg, "max_plan_reward_risk_tp2", 0.0) or 0.0)
+        if max_rr <= 0:
+            return
+        inner = signal.inner
+        if not isinstance(inner, dict):
+            return
+        if str(inner.get("order_type") or "") not in ORDER_OPPORTUNITY_TYPES:
+            return
+        if inner.get("take_profit_price_2") in (None, ""):
+            return
+        try:
+            from pa_agent.util.price_tick import infer_price_tick_from_frame
+            from pa_agent.util.trade_metrics import adjust_decision_tp2_for_rr_cap
+
+            old_tp2 = inner.get("take_profit_price_2")
+            changed = adjust_decision_tp2_for_rr_cap(
+                inner,
+                max_rr=max_rr,
+                tick=infer_price_tick_from_frame(signal.frame),
+            )
+        except Exception as exc:  # 归一化辅助绝不阻断下单主链
+            logger.warning(
+                "TP2 RR clamp failed for %s %s: %s",
+                signal.symbol,
+                signal.timeframe,
+                exc,
+            )
+            return
+        if changed:
+            logger.info(
+                "计划 TP2 按盈亏比上限收窄 %s %s: %s -> %s (max_rr=%g)",
+                signal.symbol,
+                signal.timeframe,
+                old_tp2,
+                inner.get("take_profit_price_2"),
+                max_rr,
             )
 
     def _save_record(self, signal: OrderSignal) -> None:
