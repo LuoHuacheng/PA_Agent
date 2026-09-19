@@ -2818,7 +2818,11 @@ def test_market_signal_partial_enabled_arms_half_tp1_and_runner(monkeypatch) -> 
 
 
 def test_market_signal_partial_without_tp2_falls_back_legacy(monkeypatch) -> None:
-    """decision 缺 take_profit_price_2: 回退全平 TP1, 不起 runner, 不注册。"""
+    """decision 缺 take_profit_price_2: 回退全平 TP1, 不起 runner, 不注册。
+
+    新信号的 conf 由净化层保证非空, 读不到就按旧口径不启用 —— 2026-09-19 的
+    方案 A 只对**收养/恢复**路径放行未知置信度(见 _guard_enabled 的参数)。
+    """
     captured = _capture_threads(monkeypatch)
     client = FakeClient()
     result = execute_market_signal(

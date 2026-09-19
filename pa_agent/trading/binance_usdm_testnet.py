@@ -1919,12 +1919,28 @@ def _enter_and_protect(
 #  partial 相关字段仅在 TP1 部分止盈启用时写入; moved 由保本 guard 或
 #  TP runner 置位, partial_done 由 TP runner 置位。
 
-def _guard_enabled(config: BinanceUSDMTestnetSettings, conf: float | None) -> bool:
-    """True when the breakeven feature applies to a signal with ``conf``."""
+def _guard_enabled(
+    config: BinanceUSDMTestnetSettings,
+    conf: float | None,
+    *,
+    unknown_conf_enabled: bool = False,
+) -> bool:
+    """True when the breakeven feature applies to a signal with ``conf``.
+
+    ``conf is None`` 有两种来路, 必须分开对待:
+
+    * **新信号**: 净化层要求 trade_confidence 非空, 读不到是本不该发生的异常,
+      保持旧口径 (未达门槛即不启用), 不因为一个缺失字段就放宽保护策略。
+    * **收养/恢复**(unknown_conf_enabled=True): 对账时只能读到交易所的持仓与
+      挂单, 模型当轮的置信度在重启后无从还原。旧写法在这里返
+      ``min_confidence <= 0``, 等于"配置了门槛就永远不给收养仓保护"
+      (2026-09-19 复核)。这些记录按"未知置信度"放行。
+    """
     if str(config.breakeven_stop_trigger) == "off":
         return False
     if conf is None:
-        return config.breakeven_min_confidence <= 0
+        # min_confidence=0 本来就是对所有信号(含未知置信度)启用, 保持该口径。
+        return unknown_conf_enabled or config.breakeven_min_confidence <= 0
     return conf >= config.breakeven_min_confidence
 
 

@@ -1309,7 +1309,13 @@ def resume_breakeven_guards(
     ) -> bool:
         if record.get("moved"):
             return False
-        if not _guard_enabled(config, record.get("conf")):
+        # adopted 记录是收养来的(置信度在重启后无从还原) -> 未知置信度放行;
+        # 普通记录仍按门槛筛, 不因为一个缺失字段放宽保护策略。
+        if not _guard_enabled(
+            config,
+            record.get("conf"),
+            unknown_conf_enabled=bool(record.get("adopted")),
+        ):
             return False
         threading.Thread(
             target=_breakeven_guard_loop,
@@ -1865,6 +1871,26 @@ def _arm_adopted_managers(
             daemon=True,
         ).start()
         logger.info("Reconcile: time-stop armed for %s", symbol)
+    record = _read_guard(symbol)
+    if (
+        record is not None
+        and not record.get("moved")
+        and _guard_enabled(config, record.get("conf"), unknown_conf_enabled=True)
+    ):
+        # 收养仓也要有移动止损: 之前这里只 arm watchdog/time-stop/TP runner, 于是
+        # "重启或对账时才被收养"的仓位永远拿不到保本保护(2026-09-19 复核)。
+        threading.Thread(
+            target=_breakeven_guard_loop,
+            kwargs={
+                "client": client,
+                "symbol": symbol,
+                "trigger": str(config.breakeven_stop_trigger),
+                "poll_seconds": poll_seconds,
+                "floor_pct": floor_pct,
+            },
+            daemon=True,
+        ).start()
+        logger.info("Reconcile: breakeven guard armed for %s", symbol)
     if runner:
         threading.Thread(
             target=_tp_runner_loop,
@@ -1877,6 +1903,24 @@ def _arm_adopted_managers(
             daemon=True,
         ).start()
         logger.info("Reconcile: TP partial runner armed for %s", symbol)
+
+
+def _stop_is_at_breakeven(
+    side: str, entry: Decimal | None, stop_price: Decimal | None
+) -> bool:
+    """True when the resting stop already sits at (or beyond) the entry price.
+
+    这是收养仓 moved 的正确口径: moved 的语义是"保本移损已经发生过", 而不是
+    "这个仓位是收养来的"。旧写法无条件写 True, 让收养仓的保本 guard 线程永远
+    不启动(2026-09-19 复核)。
+    """
+    if entry is None or stop_price is None:
+        return False
+    if side == "BUY":
+        return stop_price >= entry
+    if side == "SELL":
+        return stop_price <= entry
+    return False
 
 
 def _adopt_position(
@@ -1936,7 +1980,8 @@ def _adopt_position(
         "side": side,
         "conf": None,
         "ts": time.time(),
-        "moved": True,
+        # 只有止损真的落在入场价或更好时才算"已移损"; 否则交给 breakeven guard。
+        "moved": _stop_is_at_breakeven(side, entry_price, stop_price),
         "qty": _decimal_text(abs(amount)),
         "adopted": True,
     }
