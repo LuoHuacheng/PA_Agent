@@ -32,7 +32,12 @@ MAX_DD = {"R2": 0.25, "R3": 0.30}
 #:   5. 2026-09-18 20:14 UTC+8  provider 换到本地网关(19:39, 非本会话改动)后
 #:      api_key 为空导致 20:00 轮询全部 "Missing credentials" -> 20:14 补占位 key 并重启
 #:      (docs/闸门裁定表.md §7.5)
-GATE_START = "2026-09-18T20:14:33+08:00"
+#:   6. 2026-09-19 20:40 UTC+8  dry_run: true -> false (阶段 1 链路冒烟,
+#:      docs/实盘开闸清单.md §7.1); 该窗口样本按约定作废
+#:   7. 2026-09-20 00:51 UTC+8  block_trending_tr_entry: true -> false 且
+#:      block_cycle_allowlist 加回 trending_tr (放量以攒路 B 样本,
+#:      docs/实盘开闸清单.md §7.2) —— 阶段 2 判定窗口自此起算
+GATE_START = "2026-09-20T00:51:32+08:00"
 
 
 def parse_cutoff(text):
