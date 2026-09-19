@@ -62,19 +62,32 @@ def service_alive():
         return "no"
 
 
+def fill_line():
+    """限价挂单成交率: 单边行情里它飙低就是"策略天然空仓"的报警."""
+    try:
+        from pa_agent.monitoring.fill_stats import STATE_KEY, summarize
+
+        raw = json.loads((REPO / "config" / "monitoring_state.json").read_text(encoding="utf-8"))
+        return summarize(raw.get(STATE_KEY, {}))
+    except Exception as exc:  # 日检绝不因遥测缺失而失败
+        return f"fill_stats: 不可读 ({exc})"
+
+
 def main():
     all_line = _first(_run(["tools/expectancy_report.py"]))
     post = _first(_run(["tools/expectancy_report.py", "--gate-since"]))
     lossb = _last(_run(["tools/expectancy_report.py", "--gate-since", "--loss-bound", "2"]))
     rollback = _last(_run(["tools/expectancy_report.py", "--rollback-check"]))
     gate = _last(_run(["scripts/verify_gate.py"]))
+    fill = fill_line()
     orders = orders_count()
     service = service_alive()
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     row = "\t".join([
         ts, f"全部: {all_line}", f"上线后: {post}", f"路B: {lossb}",
-        f"回滚: {rollback}", f"闸门: {gate}", f"orders={orders}", f"service={service}",
+        f"回滚: {rollback}", f"闸门: {gate}", f"成交率: {fill}",
+        f"orders={orders}", f"service={service}",
     ])
     LOG_DIR.mkdir(exist_ok=True)
     with open(TSV, "a", encoding="utf-8") as fh:
@@ -86,7 +99,8 @@ def main():
     print(f"3) 路B判定 : {lossb}      <- 现行判定目标")
     print(f"4) 回滚检查: {rollback}")
     print(f"5) 闸门    : {gate}")
-    print(f"6) 账本条目: {orders}  (必须 > 0)   服务存活: {service}")
+    print(f"6) 成交率  : {fill}   <- 单边行情天然空仓报警")
+    print(f"7) 账本条目: {orders}  (必须 > 0)   服务存活: {service}")
     return 0
 
 

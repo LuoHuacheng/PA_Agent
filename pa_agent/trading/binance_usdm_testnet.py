@@ -2143,6 +2143,12 @@ def _cancel_and_settle(
         signal_id=signal_id,
     )
     _remember_canceled_entry(symbol, entry_price, reason)
+    if reason == cancel_log.REASON_LIMIT_ENTRY_TIMEOUT:
+        # 成交率遥测：等待窗口内未成交被撤回 = 一条 no_fill 样本。
+        # 执行层不依赖监控层，未注册 sink 时通知静默丢弃。
+        from pa_agent.monitoring import fill_stats
+
+        fill_stats.notify_timeout(symbol)
     logger.info(
         f"{active_environment().label_en} limit entry %s; resting remainder canceled: %s %s", context, symbol, client_id
     )

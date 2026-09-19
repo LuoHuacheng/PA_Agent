@@ -191,6 +191,13 @@ class MultiSymbolMonitor:
         self._light_quiet: dict[str, int] = {}
         #: Direction-gate rejection counters keyed by gate name (G1/G2...).
         self._direction_gate_stats: dict[str, int] = {}
+        #: 限价挂单成交率遥测（placed/fills/timeouts, per symbol）。见
+        #: pa_agent.monitoring.fill_stats 的口径说明。
+        self._fill_stats: dict[str, dict[str, int]] = {}
+        from pa_agent.monitoring import fill_stats as _fill_stats_mod
+
+        #: 成交 watcher 线程报回"限价超时未成交"，计入本进程的遥测。
+        _fill_stats_mod.set_timeout_sink(self._bump_fill_timeout)
         from pa_agent.trading.signal_pipeline import SignalPipeline
 
         #: 统一开仓管线：机会判定/方向闸门/落盘/执行/通知只在这一处。
@@ -696,6 +703,8 @@ class MultiSymbolMonitor:
                 exc,
             )
             return decision
+        if dispatch_result is not None and dispatch_result.exec_result is not None:
+            self._observe_execution(frame.symbol, dispatch_result.exec_result)
         if (
             record is not None
             and dispatch_result is not None
@@ -722,6 +731,31 @@ class MultiSymbolMonitor:
         self._direction_gate_stats[gates_key] = (
             self._direction_gate_stats.get(gates_key, 0) + 1
         )
+
+    def _observe_execution(self, symbol: str, result: Any) -> None:
+        """把执行结果折算成限价挂单成交率样本（遥测, 不参与任何判定）.
+
+        - status="pending"      → placed +1（resting 限价真的挂上交易所）
+        - status="skipped" 且 reason 含 "Previously filled" → fills +1
+          （执行层下单前发现上一单已成交并补挂保护）
+        - 其余状态（rejected/gate_blocked/dry_run/failed）不计入: 它们没有上场。
+        超时样本由成交 watcher 在写成交流水时计入（见 binance_usdm_testnet）。
+        """
+        from pa_agent.monitoring import fill_stats
+
+        status = str(getattr(result, "status", "") or "")
+        if status == "pending":
+            fill_stats.bump(self._fill_stats, symbol, "placed")
+        elif status == "skipped" and "Previously filled" in str(
+            getattr(result, "reason", "") or ""
+        ):
+            fill_stats.bump(self._fill_stats, symbol, "fills")
+
+    def _bump_fill_timeout(self, symbol: str) -> None:
+        """限价单等待成交超时被撤回 → timeouts +1（由成交 watcher 回调）。"""
+        from pa_agent.monitoring import fill_stats
+
+        fill_stats.bump(self._fill_stats, symbol, "timeouts")
 
     def _fetch_htf_context(self, state: _TargetState, symbol: str, timeframe: str) -> str:
         """D1: fetch higher-timeframe bars and summarize them programmatically.
@@ -968,6 +1002,9 @@ class MultiSymbolMonitor:
                 self._direction_gate_stats = {
                     str(k): int(v) for k, v in stats.items() if isinstance(v, (int, float))
                 }
+            from pa_agent.monitoring.fill_stats import STATE_KEY, normalize
+
+            self._fill_stats = normalize(raw.get(STATE_KEY, {}))
         except FileNotFoundError:
             pass
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -983,6 +1020,7 @@ class MultiSymbolMonitor:
                         "last_processed_closed_ts": self._persisted_closed_ts,
                         "structure_exit_streak": self._structure_exit_streak,
                         "direction_gate_stats": self._direction_gate_stats,
+                        "fill_stats": self._fill_stats,
                     },
                     indent=2,
                 ),
