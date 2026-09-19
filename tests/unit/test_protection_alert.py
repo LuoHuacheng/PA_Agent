@@ -134,6 +134,37 @@ def test_different_kinds_have_separate_cooldown_buckets(monkeypatch) -> None:
     assert len(sent) == 3
 
 
+def test_stop_absence_reason_is_readable() -> None:
+    """失活原因必须是可读中文, 而不是让操作者自己去交易所查状态码。"""
+    f = pm._stop_absence_reason
+    assert "撤销" in f("CANCELED")
+    assert "撤销" in f("CANCELLED")
+    assert "触发" in f("FILLED")
+    assert "过期" in f("EXPIRED")
+    assert "查无此单" in f("", missing=True)
+    # 未知状态原样带上, 不吞掉信息
+    assert "WEIRD_STATUS" in f("weird_status")
+
+
+def test_alert_reason_carries_stop_absence_state(monkeypatch) -> None:
+    """真实事故形态: 记录止损已 CANCELED 且无候选可补 -> 原因里带状态。"""
+    sent = _patch_sender(monkeypatch)
+    note = (
+        f"{pm._stop_absence_reason('CANCELED')}; "
+        "no placeable re-hang candidate (mark=80)"
+    )
+    pm._alert_protection_lost(
+        "BTCUSDT",
+        f"TP runner 无法核验保护单, 可能裸奔: {note}",
+        kind="runner-verify",
+        detail="记录止损单 pa-sl-old0001",
+    )
+    text = sent[0]
+    assert "已被撤销" in text
+    assert "no placeable re-hang candidate" in text
+    assert "记录止损单 pa-sl-old0001" in text
+
+
 def test_protection_alert_never_raises(monkeypatch) -> None:
     _patch_sender(monkeypatch, boom=True)
     # 告警失败绝不能反噬交易线程

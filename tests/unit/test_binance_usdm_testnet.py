@@ -3354,6 +3354,51 @@ def test_runner_give_up_alerts_once_on_live_account(monkeypatch) -> None:
     assert "no placeable re-hang candidate (mark=80)" in sent[0]
     assert "阶段: runner-verify" in sent[0]
     assert "记录止损单 pa-sl-old0001" in sent[0]
+    # 记录里的止损是 CANCELED(_DeadStopClient): 告警必须自带失活原因,
+    # 操作者不用再登录交易所翻挂单历史。
+    assert "已被撤销" in sent[0]
+
+
+def test_watchdog_precheck_give_up_now_alerts(
+    _silence_outbound_notifications, monkeypatch
+) -> None:
+    """未移动阶段(保本/TP1 还没触发)的止损核验连续失败此前只打日志 = 静默。
+
+    beb0c83 只接了 6 处, 漏了这条 watchdog 前置复核分支; 2026-09-19 补齐。
+    """
+    captured = _silence_outbound_notifications
+    ticks = binance_usdm_testnet._UNMOVED_STOP_VERIFY_TICKS
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        position_manager, "protection_alerts_enabled", lambda settings: True
+    )
+    position_manager._PROTECTION_ALERT_LAST.clear()
+
+    class DeadUnmovedClient(PartialRunnerClient, _DeadStopClient):
+        def __init__(self) -> None:
+            super().__init__([2] * (ticks * 5 + 2) + [0])
+            self._dead = {"pa-sl-old0001"}
+
+        def mark_price(self, symbol: str) -> Decimal:
+            self.calls.append(("mark_price", symbol))
+            return Decimal("80")  # 低于 stop0 90: 无 floor 时无候选可挂
+
+    _register_tp_record()  # moved=False / partial_done=False
+    binance_usdm_testnet._stop_watchdog_loop(
+        client=DeadUnmovedClient(),
+        symbol="BTCUSDT",
+        poll_seconds=1.0,
+        floor_pct=0.0,
+    )
+    leaked = [
+        t
+        for t in captured
+        if "保护单失效" in t and "阶段: watchdog-precheck" in t
+    ]
+    assert len(leaked) == 1, leaked
+    assert "已被撤销" in leaked[0]
+    assert "尚未进入保本/TP2 阶段" in leaked[0]
 
 
 def test_guard_heals_dead_stop_after_breakeven_rejected(monkeypatch) -> None:

@@ -235,20 +235,54 @@ def _rehang_stop_candidates(
 _REHANG_SKIP_MARKERS = ('"-1111"', '"-2021"', "-1111", "-2021")
 
 
-def _stop_resting_alive(client: BinanceUSDMTestnetClient, client_algo_id: str) -> bool:
+#: 交易所侧"止损已不 resting"的可读原因(告警细节用, 别让人再去交易所查一遍)。
+def _stop_absence_reason(status: str, *, missing: bool = False) -> str:
+    """Human-readable why a stop is no longer resting.
+
+    2026-09-19: 告警只带 algo 句柄, 操作者拿不到"它为什么不在场"就得自己登录
+    交易所翻挂单历史 —— CANCELED(被撤/竞态) / EXPIRED / 已触发 从记录里看不出来。
+    """
+    if missing or not status:
+        return "交易所侧查无此单(Unknown order / 已随仓位清理)"
+    normalized = status.strip().upper()
+    return {
+        "NEW": "仍在挂单中(状态查询与实际挂单不一致)",
+        "CANCELED": "已被撤销(手动撤单/换单竞态/服务端清理)",
+        "CANCELLED": "已被撤销(手动撤单/换单竞态/服务端清理)",
+        "EXPIRED": "已过期",
+        "FILLED": "已触发成交(止损已生效)",
+        "TRIGGERED": "已触发(止损已生效)",
+        "FINISHED": "已结束",
+    }.get(normalized, f"状态={normalized}")
+
+
+def _stop_resting_alive(
+    client: BinanceUSDMTestnetClient,
+    client_algo_id: str,
+    *,
+    detail: list[str] | None = None,
+) -> bool:
     """True when the algo stop really rests on the exchange (NEW).
 
     Terminal/missing states (CANCELED/EXPIRED/triggered/unknown id) return
     False; transient transport/rate-limit errors re-raise for caller retry.
+    Passing *detail* collects a readable reason into that list (告警细节用).
     """
     try:
         payload = client.algo_order_status(client_algo_id=client_algo_id)
         status = payload.get("algoStatus") if isinstance(payload, dict) else None
     except BinanceAPIError as exc:
         if _is_missing_algo_order_error(exc):
+            if detail is not None:
+                detail.append(f"止损核验: {_stop_absence_reason('', missing=True)}")
             return False
+        if detail is not None:
+            detail.append(f"止损核验失败(瞬时/未知): {exc}")
         raise
-    return _algo_status_live(str(status or ""))
+    text = str(status or "")
+    if detail is not None:
+        detail.append(f"止损当前状态 {text or '-'}: {_stop_absence_reason(text)}")
+    return _algo_status_live(text)
 
 
 def _rehang_protective_stop(
@@ -331,15 +365,19 @@ def _ensure_protective_stop(
     current_stop = str(record.get("stop_algo_id") or "")
     if side not in ("BUY", "SELL") or not current_stop:
         return "error", "", "invalid guard record"
+    absence: list[str] = []
     try:
-        alive = _stop_resting_alive(client, current_stop)
+        alive = _stop_resting_alive(client, current_stop, detail=absence)
     except BinanceAPIError as exc:
         return "error", current_stop, f"algo status query failed: {exc}"
     if alive:
         return "alive", current_stop, ""
+    #: 记录里的止损已不在场: 把交易所侧状态("为什么不在")带进 note, 告警原文
+    #: 里就有, 操作者不用再登录交易所翻挂单历史。
+    why = absence[0] if absence else f"止损 {current_stop} 已不在场"
     stop0 = _positive_decimal(record.get("stop0"))
     if stop0 is None:
-        return "error", current_stop, "guard record missing stop0"
+        return "error", current_stop, f"{why}; guard record missing stop0"
     try:
         ok, new_stop, note, _placed_price = _rehang_protective_stop(
             client,
@@ -351,11 +389,11 @@ def _ensure_protective_stop(
             floor_pct=floor_pct,
         )
     except BinanceAPIError as exc:
-        return "error", current_stop, f"re-hang placement failed: {exc}"
+        return "error", current_stop, f"{why}; re-hang placement failed: {exc}"
     if not ok:
-        return "error", current_stop, note
+        return "error", current_stop, f"{why}; {note}"
     _patch_guard(symbol, stop_algo_id=new_stop)
-    return "rehung", new_stop, note
+    return "rehung", new_stop, f"{why}; {note}"
 
 
 def _swap_stop_to_price(
@@ -547,8 +585,8 @@ def _breakeven_guard_loop(
                     f"保本守护连续 API 失败, 保护单无法核验: {exc}",
                     kind="breakeven-poll",
                     detail=(
-                        f"记录止损单 {stop_algo_id or '-'}; 连续 {budget.count} "
-                        "次读盘/核验失败"
+                        f"记录止损单 {stop_algo_id or '-'}; 止损状态未核验"
+                        f"(连续 {budget.count} 次读盘失败)"
                     ),
                 )
                 return
@@ -676,7 +714,8 @@ def _breakeven_guard_loop(
                         f"保本移动止损连续失败: {exc}",
                         kind="breakeven-swap",
                         detail=(
-                            f"记录止损单 {stop_algo_id or '-'}; 原止损是否仍在场未知"
+                            f"记录止损单 {stop_algo_id or '-'} 已核验仍在场(NEW); "
+                            f"剩余仓位 {abs(amount)}"
                         ),
                     )
                     return
@@ -926,7 +965,10 @@ def _tp_runner_loop(
                             symbol,
                             f"TP runner 无法核验保护单, 可能裸奔: {runner_note}",
                             kind="runner-verify",
-                            detail=f"记录止损单 {current_stop or '-'}",
+                            detail=(
+                                f"记录止损单 {current_stop or '-'}; "
+                                f"剩余仓位 {abs(amount)}"
+                            ),
                         )
                         return
                     time.sleep(poll_seconds)
@@ -980,7 +1022,10 @@ def _tp_runner_loop(
                             symbol,
                             f"TP runner 无法核验保护单, 可能裸奔: {runner_note}",
                             kind="runner-verify",
-                            detail=f"记录止损单 {current_stop or '-'}",
+                            detail=(
+                                f"记录止损单 {current_stop or '-'}; "
+                                f"剩余仓位 {abs(amount)}"
+                            ),
                         )
                         return
                     time.sleep(poll_seconds)
@@ -1032,8 +1077,8 @@ def _tp_runner_loop(
                                 f"TP runner 半仓后移保本连续失败: {exc}",
                                 kind="runner-breakeven",
                                 detail=(
-                                    f"记录止损单 {current_stop or '-'}; "
-                                    "原止损是否仍在场未知"
+                                    f"记录止损单 {current_stop or '-'} 已核验仍在场"
+                                    f"(NEW); 剩余仓位 {abs(amount)}"
                                 ),
                             )
                             return
@@ -1783,6 +1828,17 @@ def _stop_watchdog_loop(
                                 "errors before the stop move; record kept for restart resume",
                                 symbol,
                             )
+                            # 2026-09-19 复核: 这条"未移动阶段"的弃守此前只打日志,
+                            # 与 beb0c83 修的另 6 处同类事故一样等于静默 —— 补上告警。
+                            _alert_protection_lost(
+                                symbol,
+                                f"止损看门狗(未移动阶段)连续失败, 保护单核验不了: {note}",
+                                kind="watchdog-precheck",
+                                detail=(
+                                    f"记录止损单 {current_stop or '-'}; "
+                                    f"持仓 {abs(amount)}; 尚未进入保本/TP2 阶段"
+                                ),
+                            )
                             return
                     else:
                         budget.reset()
@@ -1839,7 +1895,10 @@ def _stop_watchdog_loop(
                     symbol,
                     f"止损看门狗连续失败, 保护单核验不了: {note}",
                     kind="watchdog",
-                    detail=f"记录止损单 {current_stop or '-'}",
+                    detail=(
+                        f"记录止损单 {current_stop or '-'}; "
+                        f"持仓 {abs(amount)}"
+                    ),
                 )
                 return
             time.sleep(poll_seconds)
