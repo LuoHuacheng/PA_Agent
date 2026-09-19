@@ -74,6 +74,89 @@ def _isolate_runtime_write_paths(tmp_path, monkeypatch):
     yield
 
 
+#: 被 session 级隔离替换掉的真实发送函数 (只给需要验证发送逻辑的用例取回)。
+_REAL_NOTIFIERS: dict[str, object] = {}
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _silence_outbound_notifications():
+    """禁止单测把任何通知真的发出去 (2026-09-19 假警报事故).
+
+    `_alert_protection_lost` 读的是真实 settings.json(telegram.enabled=true 且有
+    token), 而单测夹具用假价格(entry=100/stop0=90/mark=80)跑"放弃保护"分支 ——
+    每跑一次 `pytest tests/unit` 就往聊天窗口灌一条"仓位裸奔", 与真实事故无法
+    区分。告警本身是对的, 错在没有测试隔离。
+
+    session 级: guard/runner 是 daemon 线程, 用例级 monkeypatch 在 teardown
+    回滚后线程仍可能在跑(同 runtime-write-paths 的教训)。真实发送入口一律
+    替换成记录器; 用例可以通过 `captured_notifications` 读它, 或通过
+    `real_telegram_sender` 取回原函数。
+    """
+    from pa_agent.notify import telegram_notifier
+
+    captured: list[str] = []
+
+    def _record(text, *args, **kwargs):
+        captured.append(str(text))
+        return True
+
+    original = telegram_notifier.send_telegram_message
+    _REAL_NOTIFIERS["send_telegram_message"] = original
+    telegram_notifier.send_telegram_message = _record
+    try:
+        yield captured
+    finally:
+        telegram_notifier.send_telegram_message = original
+
+
+@pytest.fixture
+def captured_notifications(monkeypatch):
+    """本用例期间"发出"的通知文本 (配合 session 级记录器)."""
+    from pa_agent.notify import telegram_notifier
+
+    captured: list[str] = []
+
+    def _record(text, *args, **kwargs):
+        captured.append(str(text))
+        return True
+
+    monkeypatch.setattr(telegram_notifier, "send_telegram_message", _record)
+    return captured
+
+
+@pytest.fixture
+def real_telegram_sender(monkeypatch):
+    """取回真实的 `send_telegram_message` (仅给验证发送逻辑本身的用例).
+
+    tests/unit/test_telegram_notifier.py 需要它; 那些用例自己 patch 了
+    `requests`, 不会真的发出网络请求。
+    """
+    from pa_agent.notify import telegram_notifier
+
+    monkeypatch.setattr(
+        telegram_notifier,
+        "send_telegram_message",
+        _REAL_NOTIFIERS["send_telegram_message"],
+    )
+
+
+@pytest.fixture(autouse=True)
+def _suppress_protection_alerts_by_default(monkeypatch):
+    """干跑环境不推保护告警: 测试默认就该走这条静默路径.
+
+    `_alert_protection_lost` 在真实启用(dry_run=false)的账户上才推送。测试里
+    没有真实仓位, 默认按 dry_run 处理; 专门验证推送的用例显式再 monkeypatch
+    `protection_alerts_enabled`。
+    """
+    try:
+        from pa_agent.trading import position_manager
+    except Exception:
+        return
+    monkeypatch.setattr(
+        position_manager, "protection_alerts_enabled", lambda settings: False
+    )
+
+
 @pytest.fixture(autouse=True)
 def _restore_runtime_environment():
     """用例结束把执行环境复位, 避免测试间串台."""

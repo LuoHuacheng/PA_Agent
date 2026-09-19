@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import time
 from decimal import Decimal
 from http.client import RemoteDisconnected
@@ -14,7 +15,7 @@ import pytest
 
 from pa_agent.config.settings import BinanceUSDMTestnetSettings, Settings
 from pa_agent.records import cancel_log
-from pa_agent.trading import binance_usdm_testnet
+from pa_agent.trading import binance_usdm_testnet, position_manager
 from pa_agent.trading.binance_usdm_testnet import BinanceAPIError, execute_market_signal
 
 
@@ -3273,6 +3274,88 @@ def test_tp_runner_retries_when_no_rehang_candidate(monkeypatch) -> None:
     assert record["stop_algo_id"] == "pa-sl-old0001", "无候选时记录句柄保留供补挂"
 
 
+def test_runner_give_up_never_notifies_in_tests(
+    _silence_outbound_notifications, monkeypatch, caplog
+) -> None:
+    """2026-09-19 假警报回归: 同一 give-up 分支在真实启用账户上才推送。
+
+    现场: `pytest tests/unit` 每跑一次就往 Telegram 发一条"仓位裸奔"
+    (夹具价格 entry=100/stop0=90/mark=80, 与真实事故无法区分)。这里同时钉住
+    两道闸门: (1) 干跑闸门只落日志; (2) 就算闸门被强行打开, session 级记录器
+    也保证一个字节都出不了测试进程。
+    """
+    captured = _silence_outbound_notifications
+    before = [text for text in captured if "保护单失效" in text]
+    position_manager._PROTECTION_ALERT_LAST.clear()
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+
+    class NoFloorClient(PartialRunnerClient, _DeadStopClient):
+        def __init__(self) -> None:
+            super().__init__([2, 1])
+            self._dead = {"pa-sl-old0001"}
+
+        def mark_price(self, symbol: str) -> Decimal:
+            self.calls.append(("mark_price", symbol))
+            return Decimal("80")
+
+    _register_tp_record()
+    with caplog.at_level(logging.ERROR):
+        binance_usdm_testnet._tp_runner_loop(
+            client=NoFloorClient(), symbol="BTCUSDT", poll_seconds=1.0, floor_pct=0.0
+        )
+    assert [t for t in captured if "保护单失效" in t] == before, "测试进程发出了保护告警"
+    assert "alerts are suppressed" in caplog.text
+
+    # 闸门被强行打开时, 发送仍只落在 session 级记录器里(隔离层兜底)。
+    monkeypatch.setattr(
+        position_manager, "protection_alerts_enabled", lambda settings: True
+    )
+    position_manager._PROTECTION_ALERT_LAST.clear()
+    _register_tp_record("ETHUSDT")
+    binance_usdm_testnet._tp_runner_loop(
+        client=NoFloorClient(), symbol="ETHUSDT", poll_seconds=1.0, floor_pct=0.0
+    )
+    leaked = [t for t in captured if "保护单失效" in t and "ETHUSDT" in t]
+    assert len(leaked) == 1, leaked
+    assert "阶段: runner-verify" in leaked[0]
+
+
+def test_runner_give_up_alerts_once_on_live_account(monkeypatch) -> None:
+    """反向回归: 闸门开着(真实启用账户)时同一条路径必须喊一次, 且带阶段标记。"""
+    from pa_agent.notify import telegram_notifier as tg
+
+    sent: list = []
+    monkeypatch.setattr(
+        tg, "send_telegram_message", lambda text, *a, **k: sent.append(text) or True
+    )
+    monkeypatch.setattr(
+        position_manager, "protection_alerts_enabled", lambda settings: True
+    )
+    position_manager._PROTECTION_ALERT_LAST.clear()
+    sleeps: list[float] = []
+    monkeypatch.setattr(binance_usdm_testnet.time, "sleep", sleeps.append)
+
+    class NoFloorClient(PartialRunnerClient, _DeadStopClient):
+        def __init__(self) -> None:
+            super().__init__([2, 1])
+            self._dead = {"pa-sl-old0001"}
+
+        def mark_price(self, symbol: str) -> Decimal:
+            self.calls.append(("mark_price", symbol))
+            return Decimal("80")
+
+    _register_tp_record()
+    binance_usdm_testnet._tp_runner_loop(
+        client=NoFloorClient(), symbol="BTCUSDT", poll_seconds=1.0, floor_pct=0.0
+    )
+    assert len(sent) == 1, sent
+    assert "BTCUSDT" in sent[0]
+    assert "no placeable re-hang candidate (mark=80)" in sent[0]
+    assert "阶段: runner-verify" in sent[0]
+    assert "记录止损单 pa-sl-old0001" in sent[0]
+
+
 def test_guard_heals_dead_stop_after_breakeven_rejected(monkeypatch) -> None:
     """guard 达 1R 挂保本被拒(如 -1111)且原止损已死: 补挂候选价, 不许裸奔退出。"""
     sleeps: list[float] = []
@@ -3796,8 +3879,6 @@ def test_stop_working_type_configurable_to_contract_price(monkeypatch) -> None:
 
 
 # ── 孤儿持仓对账收养 (reconcile, 2026-09-17 ZEC 半平后无人接管事故) ──────────
-
-from pa_agent.trading import position_manager  # noqa: E402
 
 
 def _reconcile_settings(symbols: list[str]) -> Settings:

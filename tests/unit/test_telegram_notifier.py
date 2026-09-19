@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from pa_agent.config.settings import Settings
 from pa_agent.notify.telegram_notifier import (
     _build_order_text,
@@ -9,6 +11,15 @@ from pa_agent.notify.telegram_notifier import (
     send_telegram_message,
     telegram_is_active,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_real_sender(real_telegram_sender):
+    """本文件验证发送逻辑本身, 需要真实函数 (见 tests/conftest.py).
+
+    那里为堵住"单测误发 Telegram"(2026-09-19 假警报事故)在 session 级静音了
+    发送入口; 本文件所有会走到网络的用例都已 monkeypatch `requests`。
+    """
 
 
 def _decision() -> dict:
