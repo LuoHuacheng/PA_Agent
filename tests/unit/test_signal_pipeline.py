@@ -296,10 +296,19 @@ def test_all_entry_gates_off_by_default(monkeypatch) -> None:
 
 
 def test_block_short_entry(monkeypatch) -> None:
+    """文案必须引权威样本口径, 不得再引已作废的"胜率 16%"。
+
+    16% 出自未修正费用模型的 242 笔样本(logs/_variants_exp.txt, 做空 87 笔
+    -267.48U), 已被修正后的回放推翻; 权威口径是 T2 样本
+    logs/shadow_rows_baseline45.csv(闸门裁定表 §4): 做空 22 笔胜率 32%,
+    90%CI [-2.81,+0.32] 跨零。
+    """
     exec_calls, _ = _patch_io(monkeypatch)
     pipeline = SignalPipeline(_env_settings(block_short_entry=True))
     result = pipeline.dispatch(_env_signal("做空", "normal_channel", "bullish"))
     assert result.gate_blocked and "short_block" in result.gate_reasons[0]
+    assert "22 笔胜率 32%" in result.gate_reasons[0]
+    assert "16%" not in result.gate_reasons[0]
     assert exec_calls == []
     # 做多不受影响
     result2 = pipeline.dispatch(_env_signal("做多", "normal_channel", "bullish"))

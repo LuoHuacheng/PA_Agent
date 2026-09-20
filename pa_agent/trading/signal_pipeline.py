@@ -258,7 +258,18 @@ class SignalPipeline:
         reasons: list[str] = []
         direction = str(inner.get("order_direction") or "")
         if getattr(cfg, "block_short_entry", False) and "空" in direction:
-            reasons.append("short_block: 回放 45 天空单胜率 16%")
+            # 2026-09-20 文案订正: 旧串写"回放 45 天空单胜率 16%", 那个数字出自
+            # 未修正费用模型的 242 笔样本(logs/_variants_exp.txt, 做空 87 笔
+            # -267.48U), 已被后续回放推翻。权威口径是 T2 样本
+            # logs/shadow_rows_baseline45.csv(闸门裁定表 §4): 做空 22 笔胜率 32%
+            # 净/风险 -0.33, 90%CI [-2.81,+0.32] **跨零** —— 做空单档没有独立成立
+            # 的证据, 它是随「做多+通道/区间」配方一起上线的。文案按实际证据强度
+            # 写, 免得用一个已作废的数字把拒单说得比证据更硬。
+            reasons.append(
+                "short_block: 45 天回放做空 22 笔胜率 32% 净/风险 -0.33"
+                " (90%CI [-2.81,+0.32], 跨零; 依据 闸门裁定表 §4 组合配方"
+                " n=14 CI [+1.01,+4.90])"
+            )
         diag = {}
         if isinstance(decision, dict):
             diag = decision.get("diagnosis_summary") or {}
