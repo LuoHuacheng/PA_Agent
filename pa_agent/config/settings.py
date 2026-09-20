@@ -210,6 +210,11 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # before automating a market order. Default on for safety.
     require_trader_equation: bool = True
     limit_order_enabled: bool = True
+    # 市价单自动执行。与 limit/breakout 对称的显式开关, 默认开(= 与历史行为一致)。
+    # 注意: 提示词全局硬禁令限制的是「追单式」市价(追尖峰/追第一根突破棒/高潮后追),
+    # 不是市价单本身 —— 趋势线/结构位被触碰且出现拒绝信号 K 之后的顺势市价是允许的,
+    # 见 prompt_engineering/提示词大纲_人设与思维方式.txt 硬禁令 2。
+    market_order_enabled: bool = True
     # Resting limit entries use a fill watcher and attach TP/SL after fill.
     limit_fill_timeout_minutes: int = Field(default=60, ge=1, le=1440)
     limit_poll_interval_seconds: int = Field(default=10, ge=2, le=300)

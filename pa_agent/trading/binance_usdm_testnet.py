@@ -1135,6 +1135,8 @@ def execute_market_signal(
         return ExecutionResult(
             "rejected", "Only 市价单/限价单/突破单 is automated"
         )
+    if order_type == "市价单" and not getattr(config, "market_order_enabled", True):
+        return ExecutionResult("skipped", "Market order automation disabled")
     if order_type == "限价单" and not config.limit_order_enabled:
         return ExecutionResult("skipped", "Limit order automation disabled")
     if order_type == "突破单" and not config.breakout_order_enabled:
