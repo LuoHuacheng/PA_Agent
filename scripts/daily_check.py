@@ -88,13 +88,37 @@ def outcome_merge_line():
     return f"outcome_merge: {_last(lines)}"
 
 
+def account_equity():
+    """账户现有余额(USDT) —— R2/R3 回撤门槛的参照本金.
+
+    2026-09-20 用户裁定: 本金 = 账户现有余额, 且回撤门槛切账户口径。
+    取不到(网络/密钥/权限)返回 None, 此时退回"只打印峰值口径回撤、不切门槛";
+    日检绝不因取余额失败而中断。
+    """
+    try:
+        from pa_agent.config.paths import SETTINGS_JSON_PATH
+        from pa_agent.config.settings import load_settings
+        from pa_agent.trading.binance_usdm_testnet import BinanceUSDMTestnetClient
+
+        cfg = load_settings(SETTINGS_JSON_PATH).binance_usdm_testnet
+        client = BinanceUSDMTestnetClient(cfg.api_key, cfg.api_secret)
+        acct = client._request("GET", "/fapi/v2/account", signed=True)
+        equity = float(acct.get("totalWalletBalance") or 0.0)
+        return equity if equity > 0 else None
+    except Exception:
+        return None
+
+
 def main():
     # 必须先回填再判定: 下面四条 expectancy_report 读的就是 outcomes.csv。
     merged = outcome_merge_line()
-    all_line = _first(_run(["tools/expectancy_report.py"]))
-    post = _first(_run(["tools/expectancy_report.py", "--gate-since"]))
-    lossb = _last(_run(["tools/expectancy_report.py", "--gate-since", "--loss-bound", "2"]))
-    rollback = _last(_run(["tools/expectancy_report.py", "--rollback-check"]))
+    equity = account_equity()
+    # 账户口径回撤: 分母 = 账户现有余额(每次动态取), 缺本金时退回计划口径。
+    dd = ["--capital", f"{equity:.2f}", "--account-dd-gate"] if equity else []
+    all_line = _first(_run(["tools/expectancy_report.py", *dd]))
+    post = _first(_run(["tools/expectancy_report.py", "--gate-since", *dd]))
+    lossb = _last(_run(["tools/expectancy_report.py", "--gate-since", "--loss-bound", "2", *dd]))
+    rollback = _last(_run(["tools/expectancy_report.py", "--rollback-check", *dd]))
     gate = _last(_run(["scripts/verify_gate.py"]))
     fill = fill_line()
     orders = orders_count()
@@ -105,6 +129,7 @@ def main():
         ts, f"全部: {all_line}", f"上线后: {post}", f"路B: {lossb}",
         f"回滚: {rollback}", f"闸门: {gate}", f"成交率: {fill}",
         f"orders={orders}", f"service={service}", f"回填: {merged}",
+        f"权益: {equity:.2f}U" if equity else "权益: 不可读",
     ])
     LOG_DIR.mkdir(exist_ok=True)
     with open(TSV, "a", encoding="utf-8") as fh:
@@ -119,6 +144,10 @@ def main():
     print(f"6) 成交率  : {fill}   <- 单边行情天然空仓报警")
     print(f"7) 账本条目: {orders}  (必须 > 0)   服务存活: {service}")
     print(f"8) 样本回填: {merged}   <- outcomes.csv 自动补新(第 1~4 行判定读它)")
+    if equity:
+        print(f"9) 参照本金: {equity:.2f}U (账户现有余额, 回撤门槛走账户口径)")
+    else:
+        print("9) 参照本金: 不可读 -> 回撤门槛退回峰值口径")
     return 0
 
 
