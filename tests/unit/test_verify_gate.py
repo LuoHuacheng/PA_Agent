@@ -7,13 +7,72 @@ from scripts.verify_gate import (
     describe,
     gate_reason_counts,
     is_entry_attempt,
+    load_live_gates,
     load_records,
+    plan_is_working,
     violations_for,
 )
 
 
 def test_short_entry_is_a_violation():
     assert violations_for("做空", "broad_channel", ("broad_channel",)) == ["做空单未被拦截"]
+
+
+def test_blocked_plan_is_not_a_violation():
+    """2026-09-20: 被正确拦下的做空 spike 单不是泄漏(exec=gate_blocked)。
+
+    旧脚本不看 execution 标记, 对这两条报 VIOLATION 并 exit 1 —— 假阳性。
+    """
+    assert violations_for("做空", "spike", ("broad_channel",), status="gate_blocked") == []
+
+
+def test_withheld_statuses_are_all_not_violations():
+    for status in ("gate_blocked", "rejected", "skipped", "dry_run", "failed", "unknown"):
+        assert violations_for("做空", "spike", ("broad_channel",), status=status) == []
+
+
+def test_submitted_short_is_still_a_violation():
+    assert violations_for("做空", "broad_channel", ("broad_channel",),
+                          status="submitted") == ["做空单未被拦截"]
+
+
+def test_pending_short_is_still_a_violation():
+    assert violations_for("做空", "broad_channel", ("broad_channel",),
+                          status="pending") == ["做空单未被拦截"]
+
+
+def test_short_gate_off_disables_short_check():
+    """线上 block_short_entry=false 时做空本就允许, 不该判违规。"""
+    assert violations_for("做空", "broad_channel", ("broad_channel",),
+                          status="pending", short_gate=False) == []
+
+
+def test_plan_is_working_matches_execution_marker():
+    """未标记 = 旧记录(按已提交处理), 与 execution_marker 口径一致。"""
+    assert plan_is_working("") is True
+    assert plan_is_working(None) is True
+    assert plan_is_working("submitted") is True
+    assert plan_is_working("pending") is True
+    assert plan_is_working("gate_blocked") is False
+    assert plan_is_working("dry_run") is False
+
+
+def test_live_gates_read_config_not_snapshot(tmp_path):
+    """白名单从配置读: 配置里有 trending_tr, 审计就不该再对它报违规。
+
+    旧脚本 DEFAULT_ALLOW 写死三个值, 比 2026-09-20 00:51 的配置旧。
+    """
+    doc = {"binance_usdm_testnet": {
+        "block_short_entry": True,
+        "block_cycle_allowlist": ["broad_channel", "trending_tr"],
+    }}
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    allow, short_gate, source = load_live_gates(path)
+    assert list(allow) == ["broad_channel", "trending_tr"]
+    assert short_gate is True
+    assert str(path) in source
+    assert violations_for("做多", "trending_tr", allow, status="submitted") == []
 
 
 def test_long_in_allowlist_is_clean():
@@ -36,7 +95,8 @@ def test_missing_cycle_is_not_a_violation():
 def test_gate_reason_counts_groups_by_prefix():
     infos = [
         {"gate_reasons": ["rr_block: 计划盈亏比 1.37 < 1.5"]},
-        {"gate_reasons": ["rr_block: 计划盈亏比 1.20 < 1.5", "short_block: 回放 45 天空单胜率 16%"]},
+        {"gate_reasons": ["rr_block: 计划盈亏比 1.20 < 1.5",
+                          "short_block: 45 天回放做空 22 笔胜率 32% 净/风险 -0.33"]},
         {"gate_reasons": []},
         {},
     ]
