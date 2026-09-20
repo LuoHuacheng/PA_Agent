@@ -1,6 +1,12 @@
 # PA Agent AI 策略优化方案（按优先级）Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> ⚠️ **复选框状态（2026-09-20 复核）：正文的 `- [ ]` 全部未回填，但实现已落地** ——
+> `pa_agent/feedback/{outcome_store,rule_stats,base_rate_injector,calibration}.py`、
+> `tools/calibration_report.py`、`pa_agent/ai/htf_summary.py`，以及 `light_mode_*` /
+> `htf_*` / `experience_max_entries` 配置键均存在于 HEAD。**以文件与提交为准**，
+> 不要按未勾选框判断为待办。本计划唯一遗留是 A2 Step 5 的调查项（close algo 可见性，原文已标"不在本任务完成"）。
 
 **Goal:** 给 PA Agent 的"AI 策略产出"装上客观依据闭环与可验证的优化路径：先让策略效果可测、再收权给程序、再降本提速、最后补信息面。
 

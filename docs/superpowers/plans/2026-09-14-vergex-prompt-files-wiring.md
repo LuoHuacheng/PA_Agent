@@ -128,7 +128,7 @@ git commit -m "📝 docs(prompt): 路由白名单补录移植文件 + 48h shadow
 - [x] **Step 1: 全量回归**:`uv run pytest tests/unit` 全 PASS(基线 1099 passed, 1 skipped,允许新增用例)。
 - [x] **Step 2: lint**:`uv run ruff check pa_agent/ai/prompt_assembler.py pa_agent/ai/router.py tests/unit/test_prompt_txt_files.py`。
 - [x] **Step 3: 注入冒烟**(不依赖 GUI):用 prompt_assembler 直接构造一次 `stage2_prompt_txt_files([], direction="bullish")`,确认返回列表含 6 个 base 文件且两移植文件在末尾。
-- [ ] **Step 4: 48h shadow 观察为人工步骤**(未完成:需操作者重启 + 等 48h),按 Task 3 清单执行,不在会话内等待;启动重启动作由操作者执行(GUI 会话)。
+- [x] **Step 4: 48h shadow 观察为人工步骤**(**2026-09-20 23:53 回填完成**:接线自 09-14 11:20 起,在场桶 n=20;`min_samples` 已过;结论=**接线生效但效果不可归因**,见 `docs/vergex移植策略shadow验证清单.md` §6)。重启动作由操作者执行,期间已重启多次(最近 2026-09-20 20:41,pid 85082)。
 
 ## 验收判据
 

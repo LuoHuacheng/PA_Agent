@@ -1,6 +1,13 @@
 # VergeX 策略集成实施计划(代码策略反推 + 提示词策略移植)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> ⚠️ **复选框状态（2026-09-20 复核）：正文 `- [ ]` 全部未回填，但 Task 1–7 产物已落地** ——
+> `tools/vergex_{loader,align,gens,report}.py` + `tests/unit/test_vergex_*.py`（4 个）、
+> `prompt_engineering/文件29-利弗莫尔趋势跟随移植.txt`、`文件30-三层评分趋势移植.txt`、
+> `docs/vergex移植策略shadow验证清单.md`。**以文件与提交为准**。
+> 唯一真未完成项：Task 7 Step 3 的 48h shadow **效果判定** —— 已在 shadow 清单 §6 记为
+> "接线生效、效果不可归因"（无对照臂 + 窗口跨多次配置变更）。
 
 **Goal:** 把 VergeX 平台上已获取的策略(代码策略的成交序列 + 提示词策略的公开全文)转译为 PA_Agent 的 baseline_lab 对照流生成器与策略提示词文件,在滚动样本外验证后,以"还原度矩阵"对照平台公布的收益率与胜率。
 
