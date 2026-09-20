@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 from pa_agent.config.settings import MonitorTarget, Settings
 from pa_agent.data.base import DataSource, KlineBar
@@ -165,13 +166,13 @@ def test_gap_over_two_bars_drops_incremental_context(tmp_path: Path) -> None:
         ctx=object(),
         settings=settings,
         state_path=tmp_path / "state.json",
-        source_factory=lambda _kind: FakeSource(_bars(1_805)),
+        source_factory=lambda _kind: FakeSource(_bars(1_801_800)),  # 锚点后 2 根
         clock=lambda: 1_805_000.0,
         analyze=lambda frame, **kw: calls.append(kw) or None,
         rate_limiter=RateLimitBreaker(),
     )
     state = next(iter(monitor._states.values()))
-    state.previous_record = {"stage1_diagnosis": {"direction": "bullish"}}
+    state.previous_record = SimpleNamespace(kline_data=[{"ts_open": 1_800_000_000}])
     state.last_processed_closed_ts = 1_800_000_000
     monitor._poll_and_analyze(state)
     assert calls and "previous_record" not in calls[0]
@@ -193,7 +194,7 @@ def test_single_bar_gap_keeps_incremental_context(tmp_path: Path) -> None:
         rate_limiter=RateLimitBreaker(),
     )
     state = next(iter(monitor._states.values()))
-    state.previous_record = {"stage1_diagnosis": {"direction": "bullish"}}
+    state.previous_record = SimpleNamespace(kline_data=[{"ts_open": 1_800_000_000}])
     state.last_processed_closed_ts = 1_800_000_000
     monitor._poll_and_analyze(state)
     assert calls and calls[0]["previous_record"] is state.previous_record

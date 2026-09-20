@@ -7,6 +7,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 from pa_agent.config.settings import MonitorTarget, Settings
 from pa_agent.data.base import DataSource, KlineBar
@@ -70,11 +71,11 @@ class FakeSource(DataSource):
         return self.bars
 
 
-def _bars(newest_ts: int) -> list[KlineBar]:
+def _bars(newest_ts: int, *, step: int = 900) -> list[KlineBar]:
     return [
         KlineBar(
             seq=index + 1,
-            ts_open=(newest_ts - index * 900) * 1000,
+            ts_open=(newest_ts - index * step) * 1000,
             open=100,
             high=101,
             low=99,
@@ -84,6 +85,11 @@ def _bars(newest_ts: int) -> list[KlineBar]:
         )
         for index in range(60)
     ]
+
+
+def _prev_record(anchor_ms: int) -> SimpleNamespace:
+    """上一轮记录的最小替身: 增量计数只读 kline_data[0].ts_open 作为锚点。"""
+    return SimpleNamespace(kline_data=[{"ts_open": anchor_ms}])
 
 
 def _settings(*targets: MonitorTarget) -> Settings:
@@ -410,14 +416,14 @@ def test_monitor_reuses_previous_record_for_incremental_analysis(tmp_path: Path)
         analyze=lambda frame, **kw: calls.append((frame, kw)) or None,
     )
     state = next(iter(monitor._states.values()))
-    state.previous_record = {"stage1_diagnosis": {"direction": "bullish"}}
+    # 上一轮最新收盘棒是第一根之后的锚点(bar index 1), 本轮恰好多 1 根。
+    state.previous_record = _prev_record(1_800_000_000)
     state.last_processed_closed_ts = 1_800_000_000
 
     monitor._poll_and_analyze(state)
 
     assert len(calls) == 1
     kw = calls[0][1]
-    # 15m bar: prev close 1_800_900_000, now 1_801_800_000 → exactly 1 new bar.
     assert kw["previous_record"] == state.previous_record
     assert kw["incremental_new_bar_count"] == 1
     assert "record_sink" in kw
@@ -436,12 +442,12 @@ def test_monitor_drops_stale_record_after_multibar_gap(tmp_path: Path) -> None:
         ctx=object(),
         settings=settings,
         state_path=tmp_path / "state.json",
-        source_factory=lambda _kind: FakeSource(_bars(1_805)),
-        clock=lambda: 1_805_000.0,  # prev close + 5 根 15m bar
+        source_factory=lambda _kind: FakeSource(_bars(1_804_500)),  # 锚点后 5 根
+        clock=lambda: 1_805_000.0,
         analyze=lambda frame, **kw: calls.append((frame, kw)) or None,
     )
     state = next(iter(monitor._states.values()))
-    state.previous_record = {"stage1_diagnosis": {"direction": "bullish"}}
+    state.previous_record = _prev_record(1_800_000_000)
     state.last_processed_closed_ts = 1_800_000_000
 
     monitor._poll_and_analyze(state)
@@ -452,6 +458,80 @@ def test_monitor_drops_stale_record_after_multibar_gap(tmp_path: Path) -> None:
     assert "incremental_new_bar_count" not in kw
     assert state.previous_record is None, "stale record must be dropped"
     assert "record_sink" in kw
+
+
+def test_hourly_cadence_reports_both_new_30m_bars(tmp_path: Path) -> None:
+    """每小时一轮 + 30m 棒 ⇒ 本轮实际多 2 根新收盘棒, 必须如实告诉模型 2 根。
+
+    回归 2026-09-20: _incremental_kwargs 把 K 线伪时间戳(ts_open, 真实 +8h)与
+    time.time() 的真实 epoch 混算, 差值恒为负 → max(1, …) 把「新增已收盘K线」
+    永远夹成 1; 提示词每轮只标一根, 模型被迫输出 new_closed_bars=["K1"],
+    且「跨 >=2 根回退全量」的保护再也不会触发。
+
+    夹具复刻同一时基: 锚点 = 上一轮最新收盘棒(伪时间戳), clock 比它晚一轮。
+    """
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="30m"))
+    settings.monitoring.poll_interval_minutes = 60
+    settings.general.analysis_bar_count = 5  # 帧里必须留有上一轮的锚点棒
+    calls: list[tuple[object, dict]] = []
+    anchor_ms = 1_800_000_000
+    newest_ms = anchor_ms + 2 * 1_800_000  # 60 分钟 = 2 根 30m
+    # 伪时间戳 = 真实 + 8h; 本轮真实时刻 = 最新棒收盘 - 8h。
+    real_now_s = (newest_ms + 1_800_000 - 8 * 3_600_000) / 1000
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(
+            _bars(newest_ms // 1000, step=1_800)
+        ),
+        clock=lambda: real_now_s,
+        analyze=lambda frame, **kw: calls.append((frame, kw)) or None,
+    )
+    state = next(iter(monitor._states.values()))
+    state.previous_record = _prev_record(anchor_ms)
+    state.last_processed_closed_ts = anchor_ms
+
+    monitor._poll_and_analyze(state)
+
+    assert len(calls) == 1
+    kw = calls[0][1]
+    assert kw["incremental_new_bar_count"] == 2, "每小时一轮就是 2 根新 30m 棒"
+    assert kw["previous_record"] is state.previous_record
+
+
+def test_hourly_cadence_drops_context_when_a_whole_round_is_missed(
+    tmp_path: Path,
+) -> None:
+    """漏掉整轮(限流暂停/停机)后本轮会有 >2 根新棒: 增量上下文已过期, 回退全量。"""
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="30m"))
+    settings.monitoring.poll_interval_minutes = 60
+    settings.general.analysis_bar_count = 10  # 帧里留有锚点, 走"超预期"分支
+    calls: list[tuple[object, dict]] = []
+    anchor_ms = 1_800_000_000
+    newest_ms = anchor_ms + 6 * 1_800_000  # 漏掉 2 轮
+    real_now_s = (newest_ms + 1_800_000 - 8 * 3_600_000) / 1000
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(
+            _bars(newest_ms // 1000, step=1_800)
+        ),
+        clock=lambda: real_now_s,
+        analyze=lambda frame, **kw: calls.append((frame, kw)) or None,
+    )
+    state = next(iter(monitor._states.values()))
+    state.previous_record = _prev_record(anchor_ms)
+    state.last_processed_closed_ts = anchor_ms
+
+    monitor._poll_and_analyze(state)
+
+    assert len(calls) == 1
+    kw = calls[0][1]
+    assert "previous_record" not in kw
+    assert "incremental_new_bar_count" not in kw
+    assert state.previous_record is None
 
 
 def test_monitor_without_prior_record_uses_full_pipeline(tmp_path: Path) -> None:

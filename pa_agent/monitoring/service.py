@@ -21,6 +21,7 @@ from typing import Any
 from pa_agent.config.settings import MonitorTarget, Settings
 from pa_agent.data.base import DataSource
 from pa_agent.data.snapshot import INDICATOR_WARMUP_BARS, build_analysis_frame
+from pa_agent.records.analysis_history import count_new_bars_since_record
 
 logger = logging.getLogger(__name__)
 
@@ -531,7 +532,7 @@ class MultiSymbolMonitor:
             )
             if trend_line:
                 htf_block = f"{trend_line}\n{htf_block}" if htf_block else trend_line
-            call_kwargs = self._incremental_kwargs(state, now)
+            call_kwargs = self._incremental_kwargs(state, frame)
             call_kwargs["record_sink"] = state
             if htf_block:
                 call_kwargs["htf_block"] = htf_block
@@ -625,25 +626,54 @@ class MultiSymbolMonitor:
         except Exception:
             logger.exception("Monitor status callback failed")
 
-    def _incremental_kwargs(self, state: _TargetState, now: float) -> dict[str, object]:
+    def _expected_bars_per_poll(self, timeframe: str) -> int:
+        """本轮节拍下"应有"的新收盘 K 线根数。
+
+        自然收盘节拍(interval=0)每轮 1 根; 固定节拍下 = interval / K 线周期
+        (60 分钟档 + 30m 棒 = 2 根)。超过它就是漏了整轮(限流暂停/停机/断网),
+        增量上下文已过期。
+        """
+        interval_minutes = int(getattr(self._cfg, "poll_interval_minutes", 0) or 0)
+        if interval_minutes <= 0:
+            return 1
+        return max(1, round(interval_minutes * 60 / timeframe_seconds(timeframe)))
+
+    def _incremental_kwargs(self, state: _TargetState, frame: Any) -> dict[str, object]:
         """Return kwargs enabling incremental Stage-1 when a prior record exists.
 
         Incremental re-analysis reuses the previous Stage-1 prompt chain (K-line
         table stays in the cached prefix) and only asks about the bars closed
-        since the last poll. Without a prior record this returns empty, so the
-        full two-stage pipeline runs unchanged.
+        since the last poll. Without a prior record (or when it can no longer be
+        anchored) this returns empty, so the full two-stage pipeline runs
+        unchanged.
+
+        新收盘根数一律按**同一时间基**数: 锚点 = 上一轮记录的 kline_data[0]
+        (K 线时间戳), 绝不与 time.time() 的真实 epoch 混算 —— ts_open 是"北京时间
+        当 epoch"的伪时间戳(真实 +8h), 混算会让差值恒为负, 被 max(1, ...) 夹成
+        常量 1(2026-09-20 现场: 每小时实际进 2 根 30m, 提示词却一直告诉模型
+        "新增 1 根", 连带"跨多轮回退全量"的保护也失效)。
         """
         if state.previous_record is None or state.last_processed_closed_ts is None:
             return {}
-        bar_s = timeframe_seconds(state.target.timeframe)
-        prev_close_ms = state.last_processed_closed_ts + int(bar_s * 1000)
-        new_bars = max(1, round((int(now * 1000) - prev_close_ms) / (bar_s * 1000)))
-        if new_bars >= 2:
-            # 跨 >=2 根收盘 K 线（限流暂停/停机/断网恢复）：基于过期 previous_record
-            # 的增量上下文不可靠，丢弃并回退全量分析。
+        try:
+            new_bars = count_new_bars_since_record(frame, state.previous_record)
+        except (AttributeError, TypeError, KeyError, ValueError) as exc:
+            # 记录结构异常(缺 kline_data 等): 增量上下文不可用, 退回全量分析。
+            logger.warning(
+                "Incremental bar count failed for %s %s: %s; using full analysis",
+                state.target.symbol,
+                state.target.timeframe,
+                exc,
+            )
+            new_bars = None
+        if new_bars is None or new_bars < 1:
+            # 锚点已滚出窗口 / 无新增: 增量上下文不可靠, 交给全量管线。
             state.previous_record = None
             return {}
-        if new_bars < 1:
+        if new_bars > self._expected_bars_per_poll(state.target.timeframe):
+            # 跨了不止一轮(限流暂停/停机/断网恢复): 基于过期 previous_record 的
+            # 增量上下文不可靠, 丢弃并回退全量分析。
+            state.previous_record = None
             return {}
         return {
             "previous_record": state.previous_record,
