@@ -3979,6 +3979,17 @@ class OrphanPositionClient(FakeClient):
         return list(self.algo_orders)
 
 
+def _recent_record_time(hours_ago: float = 1.0) -> str:
+    """trade_records CSV 的 record_time 格式, 取相对现在的时刻。
+
+    写死日期会随时间漂出 _ADOPTION_PLAN_LOOKBACK_DAYS 窗口, 用例静默变成
+    "没有可恢复计划" —— 而这两种情形的正确行为相反(2026-09-20 实际发生)。
+    """
+    return time.strftime(
+        "%Y-%m-%d %H:%M:%S", time.localtime(time.time() - hours_ago * 3600.0)
+    )
+
+
 def _write_plan_csv(directory, symbol: str, rows: list[list[str]]) -> None:
     header = [
         "record_time", "symbol", "timeframe", "order_direction", "order_type",
@@ -4008,7 +4019,7 @@ def test_reconcile_adopts_orphan_position_and_hangs_missing_tp2(
     _write_plan_csv(
         records,
         "ZECUSDT",
-        [["2026-09-17 02:37:11", "ZECUSDT", "做多", "限价单",
+        [[_recent_record_time(), "ZECUSDT", "做多", "限价单",
           "1275.0", "1219.0", "1385.65", "1497.81"]],
     )
     monkeypatch.setattr(position_manager, "_TRADE_RECORDS_DIR", records)
@@ -4068,6 +4079,45 @@ def test_reconcile_without_recoverable_plan_warns_and_stays_stop_only(
     assert "target2" not in record
     assert _protections(client) == []
     assert "无" in caplog.text or "no take-profit" in caplog.text.lower()
+
+
+def test_reconcile_ignores_plan_older_than_lookback_window(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """计划行漂出 _ADOPTION_PLAN_LOOKBACK_DAYS 后不算"可恢复计划"。
+
+    这正是收养用例曾写死日期踩到的坑: 同一条计划行, 落在窗口内要补挂 TP2, 落在
+    窗口外必须只保留止损并告警 —— 两种正确行为相反, 所以窗口边界要单独钉住, 免得
+    将来又靠"日期恰好还没过期"来通过。
+    """
+    _capture_threads(monkeypatch)
+    records = tmp_path / "trade_records"
+    _write_plan_csv(
+        records,
+        "ZECUSDT",
+        [[_recent_record_time(hours_ago=24 * 4), "ZECUSDT", "做多", "限价单",
+          "1275.0", "1219.0", "1385.65", "1497.81"]],
+    )
+    monkeypatch.setattr(position_manager, "_TRADE_RECORDS_DIR", records)
+    client = OrphanPositionClient(
+        algo_orders=[{
+            "clientAlgoId": "pa-sl-a72f78d3",
+            "orderType": "STOP_MARKET",
+            "closePosition": True,
+            "triggerPrice": "1275.0",
+            "algoStatus": "NEW",
+        }],
+    )
+    with caplog.at_level("WARNING"):
+        result = binance_usdm_testnet.reconcile_positions(
+            _reconcile_settings(["ZECUSDT"]), client=client
+        )
+    assert result["adopted"] == 1
+    record = binance_usdm_testnet._read_guard("ZECUSDT")
+    assert record is not None
+    assert record["stop_algo_id"] == "pa-sl-a72f78d3"
+    assert "target2" not in record, "过期计划不得拿来补止盈位"
+    assert _protections(client, "TAKE_PROFIT_MARKET") == []
 
 
 def test_reconcile_hangs_breakeven_stop_when_exchange_has_none(
