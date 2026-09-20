@@ -2274,6 +2274,21 @@ def test_tp_runner_with_breakeven_already_moved_places_tp2_only(monkeypatch) -> 
     assert record["stop_algo_id"] == "pa-sl-entry1"  # 原保本单保留
 
 
+def test_tp_runner_ignores_stale_amount_drift_before_tp1(monkeypatch) -> None:
+    """建仓碎成多笔时的滞后持仓快照, 不得被当成 TP1 已半平。
+
+    回归 2026-09-20 LINKUSDT: 入场 26.49 由 59 笔碎片成交, 持仓快照还停在
+    25.03(未到 TP1 后的剩余量 13.25), runner 见到 amount != qty 就判 TP1 触发,
+    建仓 3 秒后即在 entry(=当时 mark)挂保本止损 → 交易所 -2021 拒单。
+    """
+    _register_tp_record(extra={"qty": "26.49", "partial_qty": "13.24"})
+    # 现场三个观测值: 快照 25.03 -> 成交补齐 26.49 -> TP1 后应有 13.25
+    client = PartialRunnerClient([25.03, 26.49, 13.25])
+    sleeps = _run_tp_runner(client, monkeypatch)
+    assert len(sleeps) == 2, "仓位没减到 TP1 后的剩余量时必须等待, 不得撤 TP1/移损"
+    assert _tp_cancels(client)[0]["client_algo_id"] == "pa-tp-part0001"
+
+
 def test_tp_runner_tolerates_missing_stop_on_swap(monkeypatch) -> None:
     """撤原 SL 遇 -2011(已被撤): 视为已撤, 桥接+正式保本+TP2 照常落地。"""
     _register_tp_record()

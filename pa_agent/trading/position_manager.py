@@ -191,6 +191,25 @@ def _algo_status_live(status: str) -> bool:
     return status in _ALGO_LIVE_STATUSES
 
 
+#: TP1 半仓判定容差: 交易所拆分成交/精度取整后, 剩余量与 qty-partial_qty 可能差
+#: 最后一位小数。
+_TP1_AMOUNT_REL_TOLERANCE = Decimal("0.0001")
+
+
+def _tp1_partial_filled(*, amount: Decimal, qty: Decimal, partial_qty: Decimal) -> bool:
+    """True 仅当剩余仓位真的缩到 TP1 半仓之后的应有量。
+
+    不能再用 amount != qty 判定: 建仓被交易所拆成几十笔碎片成交时, 持仓快照会短暂
+    停在中间量(2026-09-20 LINKUSDT: 已成交 25.03 / 记录 26.49), 于是 runner 在 TP1
+    根本没成交时就把止损挪到 entry(=当时市价) → 交易所 -2021 拒单。手工减仓等其它
+    缩量同理, 都不该被当成 TP1 已成交。
+    """
+    expected = qty - partial_qty
+    if expected <= 0:
+        return False
+    return abs(amount) <= expected + qty * _TP1_AMOUNT_REL_TOLERANCE
+
+
 def _rehang_stop_candidates(
     *,
     side: str,
@@ -854,7 +873,9 @@ def _tp_runner_loop(
             return  # 无法取得入场价, 保本价格无从谈起
         # positionRisk 返回带符号 positionAmt(空单为负), qty 记的是正数量:
         # 必须比绝对值, 否则空单永远不等, 首轮就误判 TP1 已半平(2026-09-10 事故)。
-        if abs(amount) == qty:
+        # 半仓判定还要比"TP1 之后的应有量"而不是 != qty: 建仓碎片成交期间快照会
+        # 停在中间量, != qty 会在 TP1 未成交时误撤 TP1 并移损(2026-09-20 事故)。
+        if not _tp1_partial_filled(amount=amount, qty=qty, partial_qty=partial_qty):
             budget.reset()
             time.sleep(poll_seconds)
             continue
