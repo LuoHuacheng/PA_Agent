@@ -33,6 +33,7 @@ if str(ROOT / "tools") not in sys.path:
 from k2_materiality_gate import DEFAULT_SYMBOLS, load_rounds  # noqa: E402
 
 from pa_agent.ai.client_factory import create_ai_client  # noqa: E402
+from pa_agent.ai.json_validator import JsonValidator  # noqa: E402
 from pa_agent.ai.prompt_assembler import PromptAssembler  # noqa: E402
 from pa_agent.config.paths import EXPERIENCE_DIR, PROMPT_DIR  # noqa: E402
 from pa_agent.config.settings import load_settings  # noqa: E402
@@ -195,6 +196,122 @@ def json_body(text: str) -> str:
     return body[start:end + 1] if start >= 0 and end > start else body
 
 
+def _usage_dict(reply: Any) -> Any:
+    usage = getattr(reply, "usage", None)
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return usage
+    for attr in ("model_dump", "to_dict", "__dict__"):
+        value = getattr(usage, attr, None)
+        if callable(value):
+            try:
+                return value()
+            except Exception:  # noqa: BLE001
+                continue
+        if isinstance(value, dict):
+            return value
+    return str(usage)
+
+
+def call_stage(
+    client: Any, settings: Any, messages: list[dict], *, label: str
+) -> dict[str, Any]:
+    """一次模型调用 + 宽松 JSON 解析(不做重试, 失败也落盘)。"""
+    import time as _time
+
+    started = _time.time()
+    try:
+        reply = client.stream_chat(
+            messages,
+            cancel_token=CancelToken(),
+            thinking=bool(settings.provider.thinking),
+            reasoning_effort=settings.provider.reasoning_effort,
+        )
+    except Exception as exc:  # noqa: BLE001 - 单次失败不该中断整批
+        return {"label": label, "error": str(exc), "elapsed_s": round(_time.time() - started, 1)}
+    out: dict[str, Any] = {
+        "label": label,
+        "content": reply.content or "",
+        "usage": _usage_dict(reply),
+        "elapsed_s": round(_time.time() - started, 1),
+        "content_chars": len(reply.content or ""),
+    }
+    try:
+        out["parsed"] = json.loads(json_body(out["content"]))
+    except Exception as exc:  # noqa: BLE001
+        out["parse_error"] = str(exc)
+    return out
+
+
+def run_one_round(
+    row: dict,
+    *,
+    settings: Any,
+    assembler: PromptAssembler,
+    client: Any,
+    validator: Any,
+    noise: bool,
+) -> dict[str, Any]:
+    """跑一轮: B 臂(2 根) + 可选噪声地板臂(A 臂原样重跑)。"""
+    meta = row["meta"]
+    prev_record = _record_for(row)
+    frame = _frame_for(row)
+    sent = list(row["cur"].get("stage1_messages") or [])[:-1]
+    if len(sent) < 4 or sent[3].get("role") != "user":
+        raise ValueError(f"stored 增量链结构异常: {[m.get('role') for m in sent]}")
+    stored_inc = str(sent[3].get("content") or "")
+    rendered_b = assembler.build_incremental_stage1(frame, prev_record, 2)
+    arm_b_user = splice_arm_b(stored_inc, str(rendered_b[-1].get("content") or ""))
+    record: dict[str, Any] = {
+        "symbol": meta.get("symbol"),
+        "ts": meta.get("timestamp_local_ms"),
+        "path": str(row["path"]),
+        "prev_path": str(row["prev_path"]),
+        "stored_inc_chars": len(stored_inc),
+        "arm_b_inc_chars": len(arm_b_user),
+        "runs": {},
+    }
+    for arm, user_text, reps in (("B", arm_b_user, 1), ("A_noise", stored_inc, 2 if noise else 0)):
+        for rep in range(reps):
+            messages = sent[:3] + [{"role": "user", "content": user_text}]
+            key = arm if reps == 1 else f"{arm}#{rep + 1}"
+            s1 = call_stage(client, settings, messages, label=f"{key}:stage1")
+            entry: dict[str, Any] = {"stage1": s1}
+            if s1.get("parsed"):
+                try:
+                    valid = validator.validate(
+                        "stage1", s1["content"], kline_frame=frame,
+                        incremental_new_bar_count=2 if arm == "B" else 1,
+                    )
+                    entry["stage1_valid"] = not str(type(valid).__name__).endswith("ValidationError")
+                except Exception as exc:  # noqa: BLE001
+                    entry["stage1_valid"] = False
+                    entry["stage1_valid_error"] = str(exc)[:200]
+                try:
+                    messages_s2 = assembler.build_stage2_continuation(
+                        frame=frame,
+                        stage1_messages=messages,
+                        stage1_reply_content=s1["content"],
+                        stage1_json=s1["parsed"],
+                        strategy_files=list(row["cur"].get("strategy_files_used") or []),
+                        experience_entries=list(row["cur"].get("experience_loaded") or []),
+                        decision_stance=str(meta.get("decision_stance") or ""),
+                        previous_record=prev_record,
+                        provider_settings=settings.provider,
+                        structure_flip_cooldown_bars=int(
+                            getattr(settings.general, "structure_flip_cooldown_bars", 3) or 3
+                        ),
+                    )
+                    entry["stage2"] = call_stage(
+                        client, settings, messages_s2, label=f"{key}:stage2"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    entry["stage2_build_error"] = str(exc)[:300]
+            record["runs"][key] = entry
+    return record
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -238,6 +355,7 @@ def main() -> int:
             stored = stored[:-1]
         same, why = compare_prompts(rendered_a, stored)
         ok += 1 if same else 0
+        row["fidelity_ok"] = same
         print(f"  {label}: 保真={'OK' if same else 'MISMATCH'} {why}")
         results.append({"symbol": meta["symbol"], "ts": meta.get("timestamp_local_ms"),
                         "path": str(row["path"]), "prev_path": str(row["prev_path"]),
@@ -246,8 +364,45 @@ def main() -> int:
     print(f"\n保真通过率: {ok}/{len(results)} = {rate * 100:.1f}%")
     print("判定:", "可以直接跑 B 臂" if rate >= 0.8 else
           "通过率 <80% —— 应退化为直接编辑 stored messages 的新增块方案")
-    if args.run:
-        print("\n--run 尚未实现: 先确认保真通过率与调用预算, 再补 B 臂执行。")
+    if not args.run:
+        return 0
+    runnable = [r for r in rows if r.get("fidelity_ok")]
+    print(f"\n--run: 保真通过的轮次 {len(runnable)}/{len(rows)}")
+    if not runnable:
+        print("没有可跑的轮次")
+        return 1
+    client = create_ai_client(settings.provider)
+    validator = JsonValidator(settings)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    noise_every = max(1, int(round(1.0 / args.noise_frac))) if args.noise_frac > 0 else 0
+    done = 0
+    with open(args.out, "a", encoding="utf-8") as fh:
+        for i, row in enumerate(runnable):
+            meta = row["meta"]
+            label = f"{meta.get('symbol')} {str(meta.get('timestamp_local_iso'))[11:19]}"
+            noise = bool(noise_every) and (i % noise_every == 0)
+            try:
+                rec = run_one_round(
+                    row, settings=settings, assembler=assembler,
+                    client=client, validator=validator, noise=noise,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{i + 1}/{len(runnable)}] {label}: 失败 {exc}", flush=True)
+                continue
+            rec["noise"] = noise
+            fh.write(json.dumps(rec, ensure_ascii=False) + chr(10))
+            fh.flush()
+            done += 1
+            b = rec["runs"].get("B", {})
+            s1, s2 = b.get("stage1", {}), b.get("stage2", {})
+            print(
+                f"[{i + 1}/{len(runnable)}] {label}: "
+                f"s1 {s1.get('elapsed_s')}s {'ok' if s1.get('parsed') else 'FAIL'} | "
+                f"s2 {s2.get('elapsed_s')}s {'ok' if s2.get('parsed') else 'FAIL'}"
+                + ("  [noise]" if noise else ""),
+                flush=True,
+            )
+    print(f"\n完成 {done} 轮 -> {args.out}")
     return 0
 
 
