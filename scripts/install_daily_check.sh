@@ -24,11 +24,15 @@ DOMAIN="gui/$(id -u)"
 STALE_COPY="$HOME/.local/bin/pa-daily-bash"
 ACTION="${1:-install}"
 
-# 解析要授权的 Python: 优先环境变量, 其次 .venv(解析到真实路径), 最后 PATH 里的 python3
+# 解析要跑日检的 Python: 优先环境变量, 其次 .venv, 最后 PATH 里的 python3
 resolve_py() {
   if [ -n "${PA_DAILY_PY:-}" ]; then echo "${PA_DAILY_PY}"; return; fi
   if [ -x "$REPO/.venv/bin/python" ]; then
-    python3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$REPO/.venv/bin/python"
+    # 必须原样用 .venv/bin/python, 不能 realpath: 那会解析成 uv 的裸解释器,
+    # 它的 site-packages 里没有 pa_agent 的依赖。2026-09-20 实测: 日检第 5/6 行
+    # 报 ModuleNotFoundError: No module named 'pydantic' 与 No module named 'pa_agent'
+    # —— 解释器对了、环境丢了。
+    echo "$REPO/.venv/bin/python"
     return
   fi
   command -v python3 || echo /usr/bin/python3
@@ -38,8 +42,9 @@ PY="$(resolve_py)"
 
 case "$ACTION" in
   install)
-    mkdir -p "$HOME/Library/LaunchAgents" "$REPO/logs"
-    sed -e "s|__REPO__|$REPO|g" -e "s|__PY__|$PY|g" "$TEMPLATE" > "$TARGET"
+    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs" "$REPO/logs"
+    sed -e "s|__REPO__|$REPO|g" -e "s|__PY__|$PY|g" -e "s|__HOME__|$HOME|g" \
+      "$TEMPLATE" > "$TARGET"
     plutil -lint "$TARGET"
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
     launchctl bootstrap "$DOMAIN" "$TARGET"
@@ -66,7 +71,8 @@ case "$ACTION" in
     echo "--- 解释器 ---"
     echo "interp = $PY"
     echo "--- 最近一次 err ---"
-    tail -3 "$REPO/logs/daily_check.err" 2>/dev/null || echo "(无)"
+    tail -3 "$HOME/Library/Logs/pa-agent-daily.err" 2>/dev/null \
+      || tail -3 "$REPO/logs/daily_check.err" 2>/dev/null || echo "(无)"
     ;;
   *)
     echo "usage: $0 {install|uninstall|status}" >&2

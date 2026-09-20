@@ -30,9 +30,13 @@
   <key>RunAtLoad</key>
   <true/>
 
+  <!-- 日志不能落在 __REPO__/logs: 仓库在 ~/Documents 下, 受 macOS TCC 保护。
+       launchd 在 bootstrap 时就要打开这两个文件, 打不开会直接报
+       "Bootstrap failed: 5: Input/output error"(2026-09-20 实测), 任务根本装不上。
+       放 ~/Library/Logs 是 LaunchAgent 的常规位置, 不受 TCC 约束。 -->
   <key>StandardOutPath</key>
-  <string>__REPO__/logs/daily_check.out</string>
+  <string>__HOME__/Library/Logs/pa-agent-daily.out</string>
   <key>StandardErrorPath</key>
-  <string>__REPO__/logs/daily_check.err</string>
+  <string>__HOME__/Library/Logs/pa-agent-daily.err</string>
 </dict>
 </plist>
