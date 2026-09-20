@@ -37,7 +37,13 @@ MAX_DD = {"R2": 0.25, "R3": 0.30}
 #:   7. 2026-09-20 00:51 UTC+8  block_trending_tr_entry: true -> false 且
 #:      block_cycle_allowlist 加回 trending_tr (放量以攒路 B 样本,
 #:      docs/实盘开闸清单.md §7.2) —— 阶段 2 判定窗口自此起算
-GATE_START = "2026-09-20T00:51:32+08:00"
+#:   8. 2026-09-20 14:09 UTC+8  组合决策(甲+乙, 用户批准): min_stop_atr_multiple: 1.5 -> 1.2
+#:      (回放成交 97 -> 167/45 天 = 1.72x; 增量区间跨零, 属"量的杠杆"而非期望杠杆) 且
+#:      block_trending_tr_entry: false -> true、block_cycle_allowlist 去掉 trending_tr
+#:      (退出已知负期望段: trending_tr 成交 21 笔 -31.29U, CI[-2.79,-0.08] 全负;
+#:      见 docs/下单量与胜率提升评估.md, docs/实盘开闸清单.md §7.3)
+#:      ⇒ 变更 #7 的窗口(00:51:32 起, 1 笔成交)作废
+GATE_START = "2026-09-20T14:09:32+08:00"
 
 
 def parse_cutoff(text):
