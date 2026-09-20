@@ -73,7 +73,24 @@ def fill_line():
         return f"fill_stats: 不可读 ({exc})"
 
 
+def outcome_merge_line():
+    """样本回填: outcomes.csv 是手工 CLI(tools/outcome_merge.py)的产物.
+
+    不跑就断链 —— 2026-09-20 实测断了 10 天(09-10 ~ 09-20)。后果比看上去严重:
+    本脚本第 1~4 行的判定**全部**读 trade_records/outcomes.csv
+    (expectancy_report.py 的默认入参), 所以那几天日检报的 n 全是停滞值。
+    uid 幂等, 重复跑只补新增。失败不阻塞日检, 只如实记一行。
+    """
+    lines = _run(["tools/outcome_merge.py", "--days", "7"])
+    for ln in lines:
+        if "新 OutcomeRows" in ln:
+            return ln.strip()
+    return f"outcome_merge: {_last(lines)}"
+
+
 def main():
+    # 必须先回填再判定: 下面四条 expectancy_report 读的就是 outcomes.csv。
+    merged = outcome_merge_line()
     all_line = _first(_run(["tools/expectancy_report.py"]))
     post = _first(_run(["tools/expectancy_report.py", "--gate-since"]))
     lossb = _last(_run(["tools/expectancy_report.py", "--gate-since", "--loss-bound", "2"]))
@@ -87,7 +104,7 @@ def main():
     row = "\t".join([
         ts, f"全部: {all_line}", f"上线后: {post}", f"路B: {lossb}",
         f"回滚: {rollback}", f"闸门: {gate}", f"成交率: {fill}",
-        f"orders={orders}", f"service={service}",
+        f"orders={orders}", f"service={service}", f"回填: {merged}",
     ])
     LOG_DIR.mkdir(exist_ok=True)
     with open(TSV, "a", encoding="utf-8") as fh:
@@ -101,6 +118,7 @@ def main():
     print(f"5) 闸门    : {gate}")
     print(f"6) 成交率  : {fill}   <- 单边行情天然空仓报警")
     print(f"7) 账本条目: {orders}  (必须 > 0)   服务存活: {service}")
+    print(f"8) 样本回填: {merged}   <- outcomes.csv 自动补新(第 1~4 行判定读它)")
     return 0
 
 

@@ -59,9 +59,13 @@ audit: logs/outcome_audit_20260920.json
 
 ## 5. 遗留
 
-1. **`outcome_merge` 仍未挂定时任务** —— 不补的话还会再断一次。
-   建议把 `.venv/bin/python tools/outcome_merge.py --days 7` 加进 launchd 日检
-   （或 `scripts/daily_check.py` 的一步）。
+1. **`outcome_merge` 已接进日检（2026-09-20 15:59 修复）** ——
+   `scripts/daily_check.py` 与 `scripts/daily_check.sh` 都在**判定之前**跑
+   `.venv/bin/python tools/outcome_merge.py --days 7`，输出记为「样本回填」一行。
+
+   **顺序是硬要求**：第 1~4 行的 `expectancy_report.py` 默认入参就是
+   `trade_records/outcomes.csv` —— 先判定后回填等于永远看滞后值。
+   `--days 7` 配合 6 小时一次的节拍，uid 幂等，重复跑只补新增；失败不阻塞日检。
 2. `outcomes.csv` 同时是 `tools/shadow_replay.py` 的**费率校准源**
    （`fee_rate_from_outcomes`）—— 它停更期间，回放用的是旧费率。
 
