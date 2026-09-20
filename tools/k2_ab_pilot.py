@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -73,6 +74,70 @@ def select_rounds(rows: list[dict], limit: int) -> list[dict]:
             if len(picked) >= limit:
                 break
     return picked
+
+
+#: 增量消息里两张"新增棒"表的章节前缀(顺序即插入顺序)。
+NEW_BAR_SECTIONS = ("## 新增 K线数据", "## 新增 K线几何特征")
+
+
+def section_block(text: str, header_prefix: str) -> str:
+    """取以 *header_prefix* 开头、到下一个 '## ' 或文末为止的文本块。"""
+    lines = text.split(chr(10))
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith(header_prefix):
+            start = i
+            break
+    if start is None:
+        raise ValueError(f"section not found: {header_prefix}")
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].startswith("## "):
+            end = j
+            break
+    return chr(10).join(lines[start:end])
+
+
+def data_rows(block: str) -> list[str]:
+    """块内以序号开头的表格数据行(形如 '1    | ...')。"""
+    return [ln for ln in block.split(chr(10)) if re.match(r"^\s*\d+\s*\|", ln)]
+
+
+def _row_identity(row: str, *, fields: int = 2) -> tuple[str, ...]:
+    """表格行的身份字段(序号 + 时间/类型)。
+
+    渲染臂的 EMA20/ATR14 及派生列存在预热重算漂移(实测 16.2011 vs 16.3145),
+    所以只能按"同一根棒"校验, 不能整行比。
+    """
+    return tuple(part.strip() for part in row.split("|")[:fields])
+
+
+def splice_arm_b(
+    stored: str, rendered: str, *, sections: tuple[str, ...] = NEW_BAR_SECTIONS
+) -> str:
+    """把 rendered(2 根新增) 里 K2 的行拼进 stored(1 根新增)。
+
+    stored 是生产实际发出的增量用户消息(逐字节), 因此拼接后 arm B 与 arm A 的
+    差异被限制在: 两处 (共N根) + 一处 新增已收盘K线:N + 两张表各多一行。
+    K1 行必须两边一致, 否则拒绝拼接(说明渲染口径已漂移)。
+    """
+    out = stored
+    for header in sections:
+        s_rows = data_rows(section_block(out, header))
+        r_rows = data_rows(section_block(rendered, header))
+        if len(s_rows) != 1 or len(r_rows) != 2:
+            raise ValueError(
+                f"{header}: 期望 stored 1 行 / rendered 2 行, 实际 {len(s_rows)}/{len(r_rows)}"
+            )
+        if _row_identity(s_rows[0]) != _row_identity(r_rows[0]):
+            raise ValueError(
+                f"{header}: K1 不是同一根棒 "
+                f"({_row_identity(s_rows[0])} vs {_row_identity(r_rows[0])}), 拒绝拼接"
+            )
+        out = out.replace(s_rows[0] + chr(10), s_rows[0] + chr(10) + r_rows[1] + chr(10), 1)
+    out = out.replace("新增已收盘K线:1", "新增已收盘K线:2")
+    out = out.replace("(共1根", "(共2根")
+    return out
 
 
 def _norm(messages: list[dict]) -> list[tuple[str, str]]:
