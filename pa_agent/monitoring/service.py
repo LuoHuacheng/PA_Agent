@@ -880,7 +880,7 @@ class MultiSymbolMonitor:
         cached = self._daily_trend_cache.get(symbol)
         if cached is not None and cached[0] == today:
             return cached[1]
-        want = max(days, 30) + 2
+        want = max(days, 30) + 3  # +1 for the unclosed bar that is dropped below
         try:
             source.subscribe(symbol, "1d")
             bars = source.latest_snapshot(want + 5)
@@ -900,6 +900,8 @@ class MultiSymbolMonitor:
                 value = float(bar.close)
             except (AttributeError, TypeError, ValueError):
                 continue
+            if getattr(bar, "closed", True) is False:
+                continue  # unclosed daily bar: tag would drift with intraday price
             if value > 0:
                 closes.append(value)
         if len(closes) < days + 1:

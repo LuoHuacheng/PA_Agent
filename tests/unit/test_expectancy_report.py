@@ -37,9 +37,9 @@ def test_parse_cutoff_accepts_epoch_ms():
 
 
 def test_gate_start_is_a_valid_iso_string():
-    # GATE_START = 最近一次配置变更时刻(2026-09-20 14:09:32+08:00, 甲+乙组合改动后重启)。
+    # GATE_START = 最近一次变更时刻(2026-09-20 14:57:31+08:00, 趋势窗口一致性修复后重启)。
     # 改线上配置时必须同步更新这里 —— 判定口径不能跨配置混样本。
-    assert parse_cutoff(GATE_START) == 1789884572000
+    assert parse_cutoff(GATE_START) == 1789887451000
 
 
 def test_filter_since_keeps_only_newer_rows():

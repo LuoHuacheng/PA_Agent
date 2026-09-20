@@ -419,19 +419,60 @@ def _fetch_daily_closes(symbol, limit=60):
     return [(int(row[0]), float(row[4])) for row in rows]
 
 
+def _closed_window(closes, ms, days):
+    """决策时刻可见的最近 days+1 根**已收盘**日线; 不足返回 None.
+
+    2026-09-20 修正: 旧实现取 past[-days:] 且不过滤未收盘 bar, 于是回放的
+    "7 天趋势"是 7 根含当日的收盘价(6 天跨度), 而线上执行层同时期取的是
+    days+2 根含当日的首尾(8 天跨度) —— 回放验证的门与线上跑的门并不是同一个.
+    """
+    past = [(ts, close) for ts, close in closes if ts + 86_400_000 <= ms and close > 0]
+    if len(past) < days + 1:
+        return None
+    return past[-(days + 1):]
+
+
 def _trend_pct_at(closes, ms, days):
-    """决策时刻往回 days 根日线的涨跌幅(%); 数据不足返回 None."""
-    past = [close for ts, close in closes if ts <= ms]
-    if len(past) < 2:
+    """决策时刻往回 days 个已收盘日的涨跌幅(%), 首尾两点法."""
+    window = _closed_window(closes, ms, days)
+    if window is None:
         return None
-    window = past[-days:] if len(past) >= days else past
-    if len(window) < 2 or window[0] <= 0:
+    first = window[0][1]
+    if first <= 0:
         return None
-    return (window[-1] - window[0]) / window[0] * 100
+    return (window[-1][1] - first) / first * 100
 
 
-def attach_trends(plans, days):
+def _trend_slope_pct_at(closes, ms, days):
+    """最小二乘斜率换算的等价涨跌幅(%), 与首尾法同量纲.
+
+    对窗口收盘价 y[0..n-1] 拟合 y = a + b*i, 返回 b*(n-1)/mean(y)*100 ——
+    "回归意义上的总变化百分比", 不用改中性带即可直接替换首尾法。
+    动机: 首尾法只采窗口两端两个收盘价, 中间 days-1 根完全不参与,
+    最后一天暴涨/暴跌会直接翻转标签。
+    """
+    window = _closed_window(closes, ms, days)
+    if window is None:
+        return None
+    ys = [close for _, close in window]
+    n = len(ys)
+    mean_x = (n - 1) / 2.0
+    mean_y = sum(ys) / n
+    if mean_y <= 0:
+        return None
+    sxx = sum((i - mean_x) ** 2 for i in range(n))
+    if sxx <= 0:
+        return None
+    sxy = sum((i - mean_x) * (y - mean_y) for i, y in enumerate(ys))
+    return (sxy / sxx) * (n - 1) / mean_y * 100
+
+
+TREND_METHODS = {"endpoint": _trend_pct_at, "slope": _trend_slope_pct_at}
+
+
+def attach_trends(plans, days, method="endpoint"):
     """给每条计划单贴上决策时刻的日线趋势(%), 键为 pending 文件名."""
+    fn = TREND_METHODS.get(method) or _trend_pct_at
     by_symbol = {}
     for plan in plans:
         if plan.symbol in by_symbol:
@@ -442,7 +483,7 @@ def attach_trends(plans, days):
             print("  日线拉取失败 %s: %s" % (plan.symbol, exc))
             by_symbol[plan.symbol] = []
     return {
-        os.path.basename(plan.path): _trend_pct_at(
+        os.path.basename(plan.path): fn(
             by_symbol.get(plan.symbol) or [], plan.record_ms, days)
         for plan in plans
     }
@@ -811,11 +852,13 @@ def run_replay(args):
     print("K 线时间线:", {k[0] + "/" + k[1]: len(v) for k, v in sorted(timelines.items())})
     fee_rate = args.fee_rate if args.fee_rate is not None else fee_rate_from_outcomes(OUTCOMES_CSV)
     print("手续费率(往返, 名义占比): %.5f" % fee_rate)
-    trends = attach_trends(plans, args.trend_days) if args.trend_days > 0 else {}
+    trend_method = getattr(args, "trend_method", "endpoint")
+    trends = (attach_trends(plans, args.trend_days, trend_method)
+              if args.trend_days > 0 else {})
     if trends:
         tagged = sum(1 for v in trends.values() if v is not None)
-        print("日线趋势标签: %d 天, 覆盖 %d/%d 条计划单" % (
-            args.trend_days, tagged, len(plans)))
+        print("日线趋势标签: %d 天 (%s), 覆盖 %d/%d 条计划单" % (
+            args.trend_days, trend_method, tagged, len(plans)))
 
     if getattr(args, "matrix", False):
         maker_fee = args.maker_fee if args.maker_fee is not None else maker_fee_rate(fee_rate)
@@ -952,6 +995,8 @@ def main():
     ap.add_argument("--variants", action="store_true", help="输出过滤变体对比表")
     ap.add_argument("--trend-days", type=int, default=0,
                     help="变体表贴日线趋势标签的回看天数(0=不拉日线)")
+    ap.add_argument("--trend-method", choices=sorted(TREND_METHODS), default="endpoint",
+                    help="趋势标签算法: endpoint=首尾两点(线上口径); slope=最小二乘斜率")
     ap.add_argument("--trend-neutral", default="3.0",
                     help="逆势判定中性带(%%)列表, 如 1,2,3")
     ap.add_argument("--risk-usdt", type=float, default=DEFAULT_RISK_USDT)

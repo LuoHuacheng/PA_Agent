@@ -687,23 +687,35 @@ class BinanceUSDMTestnetClient:
         return prices
 
     def daily_close_series(self, symbol: str, days: int) -> list[float]:
-        """Daily close prices (oldest first) covering the last ``days`` days."""
-        start_ms = self._now_ms() - (days + 2) * 86_400_000
+        """Daily closes (oldest first) covering the last ``days`` **closed** days.
+
+        Returns ``days + 1`` values so the oldest and the newest are exactly
+        ``days`` apart, and drops the still-forming daily bar. Before 2026-09-20
+        this fetched ``days + 2`` bars including today's unclosed one, so the
+        "7-day trend" was really an 8-day span ending at whatever price the
+        first analysis of the local day happened to see -- and neither the
+        replay tagger nor the prompt line used the same window.
+        """
+        start_ms = self._now_ms() - (days + 3) * 86_400_000
         result = self._request(
             "GET",
             "/fapi/v1/klines",
-            {"symbol": symbol, "interval": "1d", "startTime": start_ms, "limit": days + 2},
+            {"symbol": symbol, "interval": "1d", "startTime": start_ms, "limit": days + 3},
         )
         closes: list[float] = []
         if isinstance(result, list):
+            now = self._now_ms()
             for row in result:
                 try:
-                    closes.append(float(row[4]))
+                    open_ms, close = int(row[0]), float(row[4])
                 except (TypeError, ValueError, IndexError):
                     continue
+                if open_ms + 86_400_000 > now:
+                    continue  # still-forming daily bar
+                closes.append(close)
         if len(closes) < 2:
             raise BinanceAPIError(f"Binance returned no daily klines for {symbol}")
-        return closes
+        return closes[-(days + 1):]
 
     def one_way_mode(self) -> bool:
         result = self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
