@@ -679,6 +679,32 @@ def _order_decision() -> dict:
     }
 
 
+def test_dispatch_marked_execution_covers_skipped() -> None:
+    """pending 落盘发生在 dispatch 之前, 管线条只要写了 execution 标记就必须重写记录;
+    漏掉 skipped 分支会让"有计划但被置信度门槛刷掉"在磁盘上完全无痕(2026-09-20 现场)。"""
+    from pa_agent.monitoring.service import _dispatch_marked_execution
+    from pa_agent.trading.signal_pipeline import DispatchResult
+
+    assert _dispatch_marked_execution(None) is False
+    assert _dispatch_marked_execution(DispatchResult(opportunity=False)) is False
+    assert (
+        _dispatch_marked_execution(DispatchResult(opportunity=False, skipped=True))
+        is True
+    )
+    assert (
+        _dispatch_marked_execution(
+            DispatchResult(opportunity=True, gate_blocked=True)
+        )
+        is True
+    )
+    assert (
+        _dispatch_marked_execution(
+            DispatchResult(opportunity=True, exec_result=object())
+        )
+        is True
+    )
+
+
 def test_monitor_auto_execution_calls_executor_and_logger(tmp_path: Path, monkeypatch) -> None:
     """When enabled, _save_order_opportunity wires through to the executor."""
     settings = _settings(MonitorTarget(symbol="BTCUSDT", timeframe="15m"))

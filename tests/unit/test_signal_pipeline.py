@@ -114,6 +114,40 @@ def test_user_floor_raisess_threshold_above_stance() -> None:
     assert pipeline.evaluate(_decision(conf=70)["decision"]).opportunity is True
 
 
+def test_dispatch_below_confidence_marks_skipped(monkeypatch) -> None:
+    """有计划但被置信度门槛刷掉, 记录必须能回答"为什么没下"。
+
+    回归 2026-09-20 ZECUSDT: 02:01 出限价空单(trade_confidence=52 < 保守档 55)
+    未提交, execution 键缺失 → 与"本来就没计划"的 47 轮无法区分。
+    """
+    settings = Settings()
+    settings.general.decision_stance = "conservative"  # floor 55
+    exec_calls, notified = _patch_io(monkeypatch)
+    pipeline = SignalPipeline(settings)
+    decision = _decision(conf=52)
+    result = pipeline.dispatch(_signal(decision, frame=_frame()))
+    assert result.opportunity is False
+    assert result.skipped is True
+    assert exec_calls == [] and notified == []
+    assert decision["execution"] == {
+        "status": "skipped",
+        "gate_reasons": ["confidence_below_threshold: 52 < 55"],
+    }
+
+
+def test_dispatch_plain_wait_leaves_no_execution_marker(monkeypatch) -> None:
+    """本来就不下单的轮次没有可提交的方案, 不写 execution 标记。"""
+    settings = Settings()
+    settings.general.decision_stance = "conservative"
+    _patch_io(monkeypatch)
+    pipeline = SignalPipeline(settings)
+    decision = _decision(order_type="不下单", conf=0)
+    result = pipeline.dispatch(_signal(decision, frame=_frame()))
+    assert result.opportunity is False
+    assert result.skipped is False
+    assert "execution" not in decision
+
+
 def test_dispatch_injects_atr_pct_from_frame(monkeypatch) -> None:
     settings = Settings()
     exec_calls, _ = _patch_io(monkeypatch)

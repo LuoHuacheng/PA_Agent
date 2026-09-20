@@ -137,6 +137,22 @@ class _TargetState:
     previous_record: Any = None
 
 
+def _dispatch_marked_execution(dispatch_result: Any) -> bool:
+    """True when the pipeline wrote an execution marker into the record.
+
+    pending 记录在 dispatch 之前就落盘(orchestrator.submit), 所以管线条只要写了
+    execution 标记就必须回写一次。漏掉 skipped 分支会让"有计划但被置信度门槛刷掉"
+    在磁盘上完全无痕(2026-09-20 ZECUSDT 现场)。
+    """
+    if dispatch_result is None:
+        return False
+    return bool(
+        getattr(dispatch_result, "gate_blocked", False)
+        or getattr(dispatch_result, "skipped", False)
+        or getattr(dispatch_result, "exec_result", None) is not None
+    )
+
+
 class MultiSymbolMonitor:
     """Poll configured targets only after their respective K-line closes.
 
@@ -705,12 +721,8 @@ class MultiSymbolMonitor:
             return decision
         if dispatch_result is not None and dispatch_result.exec_result is not None:
             self._observe_execution(frame.symbol, dispatch_result.exec_result)
-        if (
-            record is not None
-            and dispatch_result is not None
-            and (dispatch_result.gate_blocked or dispatch_result.exec_result is not None)
-        ):
-            # 管线给记录打了 execution 标记（门控拦截 / 已提交 / 被拒 / 失败）。
+        if record is not None and _dispatch_marked_execution(dispatch_result):
+            # 管线给记录打了 execution 标记（门控拦截 / 门槛刷掉 / 已提交 / 被拒 / 失败）。
             # 内存里的 previous_record 已经带着它（与记录共享同一个 stage2_decision
             # dict），重写一次是为了让磁盘上的 pending 记录也能回答"这一轮下了没下、
             # 为什么没下"，与 trade_records CSV 的口径对齐。

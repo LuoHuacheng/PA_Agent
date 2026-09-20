@@ -92,6 +92,8 @@ class Evaluation:
 class DispatchResult:
     opportunity: bool = False
     gate_blocked: bool = False
+    #: 有计划但没过执行端门槛(记录会带 execution.status="skipped")。
+    skipped: bool = False
     gate_reasons: tuple[str, ...] = field(default_factory=tuple)
     exec_result: Any = None
     notified: bool = False
@@ -170,6 +172,29 @@ class SignalPipeline:
         except (TypeError, ValueError):
             return False
         return confidence >= self.confidence_threshold()
+
+    def below_threshold_reason(self, inner: Any) -> str:
+        """有计划却没有提交时的可读原因; 本来就没计划则返回空串。
+
+        记录必须能回答"这一轮为什么没下": 计划被置信度门槛刷掉要留
+        execution.status="skipped"(2026-09-20 ZECUSDT 现场: 02:01 限价空单
+        trade_confidence=52 < 保守档 55, 记录里没有任何标记, 与"本来就不下单"的
+        47 轮长得一模一样, 只能靠订单账本反推)。没计划的轮次没有可提交的方案,
+        不写标记, 否则两者又混成同一个样子。
+        """
+        if not isinstance(inner, dict):
+            return ""
+        if str(inner.get("order_type") or "") not in ORDER_OPPORTUNITY_TYPES:
+            return ""
+        raw = inner.get("trade_confidence")
+        try:
+            confidence = int(float(str(raw)))
+        except (TypeError, ValueError):
+            return f"confidence_missing: {raw!r}"
+        threshold = self.confidence_threshold()
+        if confidence >= threshold:
+            return ""
+        return f"confidence_below_threshold: {confidence} < {threshold}"
 
     # ── 评估（纯判定，无副作用，UI 可在主线程调用） ─────────────────────
 
@@ -315,7 +340,16 @@ class SignalPipeline:
             decision=signal.decision,
         )
         if not evaluation.opportunity:
-            return DispatchResult(opportunity=False)
+            # 有计划但没提交同样要留痕: 否则磁盘上的记录分不出"没机会"和"被门槛刷掉",
+            # 连续性守卫与事后复盘都只能靠猜(见 below_threshold_reason)。
+            skip_reason = self.below_threshold_reason(signal.inner)
+            if skip_reason:
+                mark_execution(
+                    signal.decision,
+                    status="skipped",
+                    gate_reasons=(skip_reason,),
+                )
+            return DispatchResult(opportunity=False, skipped=bool(skip_reason))
         self._prepare_execution_prices(signal)
         if evaluation.gate_mode == "on":
             # 门控只拦"下单"：记录与推送照发。否则被拦的信号对操作者完全不可见
