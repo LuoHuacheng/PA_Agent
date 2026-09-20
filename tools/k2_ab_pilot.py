@@ -366,11 +366,26 @@ def main() -> int:
           "通过率 <80% —— 应退化为直接编辑 stored messages 的新增块方案")
     if not args.run:
         return 0
-    runnable = [r for r in rows if r.get("fidelity_ok")]
-    print(f"\n--run: 保真通过的轮次 {len(runnable)}/{len(rows)}")
-    if not runnable:
+    # 渲染保真只是参考: arm A 用 stored 逐字节, arm B 靠 splice 只补 K2 两行,
+    # 因此 [1] 的指标漂移不影响实验。真正的前置条件是"splice 能不能拼出来"。
+    precheck: list[dict] = []
+    for row in rows:
+        try:
+            sent = list(row["cur"].get("stage1_messages") or [])[:-1]
+            stored_inc = str(sent[3].get("content") or "")
+            rendered = assembler.build_incremental_stage1(
+                _frame_for(row), _record_for(row), 2
+            )
+            splice_arm_b(stored_inc, str(rendered[-1].get("content") or ""))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  拼接预检失败 {row['meta'].get('symbol')}: {exc}")
+            continue
+        precheck.append(row)
+    print(f"\n--run: 拼接预检通过 {len(precheck)}/{len(rows)} 轮")
+    if not precheck:
         print("没有可跑的轮次")
         return 1
+    runnable = precheck
     client = create_ai_client(settings.provider)
     validator = JsonValidator(settings)
     args.out.parent.mkdir(parents=True, exist_ok=True)
