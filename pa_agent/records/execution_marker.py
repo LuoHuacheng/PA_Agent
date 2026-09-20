@@ -29,12 +29,23 @@ def mark_execution(
     *,
     status: str,
     gate_reasons: tuple[str, ...] | list[str] = (),
+    reason: str = "",
 ) -> dict[str, Any]:
-    """把执行结果原地写进 *decision*（即记录的 stage2_decision）并返回 marker。"""
+    """把执行结果原地写进 *decision*（即记录的 stage2_decision）并返回 marker。
+
+    reason 是执行层自己的文案（ExecutionResult.reason），与入口门控的
+    gate_reasons 互补：门控拦的单原因在 gate_reasons，而执行层拒绝的单
+    （notional 超限 / 重复持仓 / 逆势 / 止损过近…）此前只落 status、不落原因，
+    事后无法归因。2026-09-20 补：docs/被拦订单反事实分析.md 第 6 节发现 89 条
+    rejected 记录无原因，而它们恰是净额最大的那批。
+    """
     marker: dict[str, Any] = {"status": str(status or "unknown")}
     reasons = [str(r) for r in gate_reasons if str(r)]
     if reasons:
         marker["gate_reasons"] = reasons
+    text = str(reason or "").strip()
+    if text:
+        marker["reason"] = text
     if isinstance(decision, dict):
         decision[EXECUTION_KEY] = marker
     return marker

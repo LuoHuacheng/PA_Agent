@@ -62,7 +62,11 @@ def blocked_status(days=45):
         ex = ((doc.get("stage2_decision") or {}).get("execution") or {})
         st = ex.get("status")
         if st in BLOCKED:
-            out[os.path.basename(path)] = (st, tuple(ex.get("gate_reasons") or []))
+            # 归因优先用门控原因; 门控为空时退回执行层自己写的 reason
+            # (2026-09-20 起 mark_execution 会落 reason; 更早的记录没有).
+            gr = tuple(ex.get("gate_reasons") or [])
+            rs = str(ex.get("reason") or "").strip()
+            out[os.path.basename(path)] = (st, gr if gr else ((rs,) if rs else ()))
     return out
 
 
@@ -106,7 +110,12 @@ def main():
         by_reason = collections.defaultdict(list)
         for (st, gr), o in items:
             by_status[st].append((st, o))
-            key = str(gr[0]).split(":")[0] if gr else "(execute 层拒绝, 记录未存原因)"
+            if not gr:
+                key = "(execute 层拒绝, 记录未存原因)"
+            elif ":" in str(gr[0]):
+                key = str(gr[0]).split(":")[0]   # 门控原因: "short_block: ..."
+            else:
+                key = str(gr[0])[:36]            # 执行层文案: 截断成标签
             by_reason[key].append((st, o))
         return by_status, by_reason
 

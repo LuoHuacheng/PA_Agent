@@ -387,7 +387,9 @@ class SignalPipeline:
         result = self._execute(signal)
         # 执行结果写回记录：被拒/跳过/失败同样没有在场挂单, 连续性守卫不该等它。
         mark_execution(
-            signal.decision, status=str(getattr(result, "status", "") or "unknown")
+            signal.decision,
+            status=str(getattr(result, "status", "") or "unknown"),
+            reason=str(getattr(result, "reason", "") or ""),
         )
         notified = self._notify_signal(signal, result)
         return DispatchResult(
