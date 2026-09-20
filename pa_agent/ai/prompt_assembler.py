@@ -1796,9 +1796,14 @@ class PromptAssembler:
         transition_block = self._render_transition_guidance(stage1_json)
         planned_limit_block = self._render_planned_limit_hint(stage1_json, frame)
         stage2_parts = [stance_block]
+        # 每轮变动的块必须排在**静态块之后**: 只要它们位置靠前, 后面所有静态内容的
+        # KV 前缀就全部失效。2026-09-20 实测: exec_constraints / continuity / conflict /
+        # transition / planned_limit 原先插在二元决策树与规则文件群之前, 使约 53k 字符的
+        # 静态块永远命中不了缓存(stage2 命中率仅 46.9%, stage1 为 70.4%)。
+        dynamic_parts: list[str] = []
         exec_constraints = self._render_execution_constraints(frame)
         if exec_constraints:
-            stage2_parts.append(exec_constraints)
+            dynamic_parts.append(exec_constraints)
         if include_full_binary_tree:
             tree = self._load("二元决策.txt")
             if tree:
@@ -1806,19 +1811,19 @@ class PromptAssembler:
                     "【阶段二决策依据：完整二元决策树（§3–§14 策略路由与执行）】\n" + tree
                 )
         stage2_parts.extend(
+            self._load(name)
+            for name in stage2_user_task_txt_files(
+                strategy_files,
+                direction=str(stage1_json.get("direction", "") or ""),
+                load_full_strategy_library=self._load_full_strategy_library(),
+            )
+        )
+        dynamic_parts.extend(
             [
                 continuity_block,
                 conflict_block,
                 transition_block,
                 planned_limit_block,
-                *(
-                    self._load(name)
-                    for name in stage2_user_task_txt_files(
-                        strategy_files,
-                        direction=str(stage1_json.get("direction", "") or ""),
-                        load_full_strategy_library=self._load_full_strategy_library(),
-                    )
-                ),
             ]
         )
         if experience_entries:
@@ -1831,7 +1836,7 @@ class PromptAssembler:
                         400,
                     )
                 )
-            stage2_parts.append(
+            dynamic_parts.append(
                 self._render_experience(
                     experience_entries,
                     max_chars_per_entry=max_chars,
@@ -1846,7 +1851,9 @@ class PromptAssembler:
         stage2_parts.append(
             _build_next_cycle_prediction_instruction(enable_next_bar=enable_next_bar_prediction)
         )
-        # Static strategy / contract blocks first → better KV prefix reuse across runs.
+        # 静态块(stance/二元决策树/规则文件群/输出说明)在前, 每轮变动的块在后 ——
+        # 这样 KV 前缀能覆盖到整段静态内容, 提升跨轮缓存复用。
+        stage2_parts.extend(p for p in dynamic_parts if p)
         stage2_context = "\n\n---\n\n".join(p for p in stage2_parts if p)
 
         from pa_agent.util.price_tick import format_breakout_tick_hint
