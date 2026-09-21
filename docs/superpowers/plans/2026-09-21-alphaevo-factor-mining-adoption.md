@@ -57,7 +57,7 @@
   - 实测坑：本仓库 ruff 把 `tools` 与 `pa_agent` 判为**不同** import 段（`tools` 视为 first-party），所以 `from pa_agent...` 与 `from tools...` 之间**必须有一个空行**；同段内则**不得**有空行。
 - 测试放 `tests/unit/`，命名 `test_*.py`；工具模块以 `from tools.<module> import ...` 导入（`tools/` 是命名空间包，无 `__init__.py`）
 - 提交信息格式固定：`<emoji> <type>(scope): 中文描述`，例：`✨ feat(tools): 加时序因子审计`
-- **向已有测试文件追加用例时**：新增的 `import` 必须**合并进文件顶部已有的 import 区**，只有测试函数追加到文件末尾。整块贴在文件中间会触发 `E402`（ruff 不会自动修这一条）。新建测试文件不受此限。
+- **向任何已有 .py 文件追加代码块时**（源文件与测试文件同理）：代码块里的新增 `import` 必须**合并进该文件顶部已有的 import 区**，只把函数/常量追加到文件末尾。整块贴在文件中间会触发 `E402 Module level import not at top of file`，而 `ruff check --fix` **不会**自动修这一条。新建文件不受此限。
 - **只读约束**：本计划新增的工具在测试与运行中都**不得写入** `records/` 与 `trade_records/`。因子库默认落在 `~/.pa_agent/factors.db`（用户目录），避开仓库根 conftest 的进程级 fs 闸门
 - 术语：前视 = look-ahead；IC = Spearman rank IC；IR = IC 均值 / IC 标准差；方向性 IC = IC 均值 × 预期方向符号
 - 所有新增数值函数必须是**纯函数**（输入 list/序列，输出 float），便于 TDD 与复现
