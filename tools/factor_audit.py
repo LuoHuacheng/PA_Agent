@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
+
+from pa_agent.ai.kline_features import compute_kline_geometry_features
+from pa_agent.data.base import KlineFrame
+from pa_agent.data.snapshot import compute_indicators
 
 #: 秩相关系数退化判定阈值
 RANK_EPSILON = 1e-12
@@ -33,6 +37,7 @@ class BarFact:
     ts_ms: int
     factor: float
     forward_return: float
+    history: int = 0  # 该观测可用到的历史 bar 数; 跨快照去重时用来挑最深的一条
 
 
 @dataclass(frozen=True)
@@ -183,3 +188,135 @@ def ic_stats(
         passed=not reasons,
         reasons=tuple(reasons),
     )
+
+
+#: KlineGeometryFeature 里可作因子输入的数值字段
+GEOMETRY_NUMERIC_FIELDS = (
+    "body_ratio",
+    "upper_wick_ratio",
+    "lower_wick_ratio",
+    "close_position",
+    "range_atr_ratio",
+    "overlap_prev_ratio",
+)
+
+Extractor = Callable[[KlineFrame], "float | None"]
+
+
+def dedupe_facts(facts: Iterable[BarFact]) -> list[BarFact]:
+    """同一根 bar 会被多份滚动快照反复覆盖, 按 (symbol, ts_ms) 只保留历史最深的一条.
+
+    实测(2026-09-21, BTCUSDT 15m): 616 份记录里只有 1417 根不同的 bar, 99.4% 的 bar
+    被多份记录覆盖, 单根最多出现 90 次 —— 不去重会把样本量虚增约 43 倍, 让 min_obs
+    门槛与月度胜率全部失真。同一根 bar 在不同快照里能看到的**历史长度**不同(旧快照更短),
+    特征值因此可能不同; 取历史最深的一条, 与生产路径(历史充足)的语义一致。
+    """
+    best: dict[tuple[str, int], BarFact] = {}
+    for fact in facts:
+        key = (fact.symbol, fact.ts_ms)
+        current = best.get(key)
+        if current is None or fact.history > current.history:
+            best[key] = fact
+    return sorted(best.values(), key=lambda f: (f.symbol, f.ts_ms))
+
+
+def forward_return_at(frame: KlineFrame, idx: int) -> float | None:
+    """bar idx 之后一根 bar 的收盘收益.
+
+    bars 是新到旧, 所以"下一根"是 idx - 1; 最新那根(idx=0)没有未来.
+    """
+    if idx <= 0 or idx >= len(frame.bars):
+        return None
+    current = float(frame.bars[idx].close)
+    following = float(frame.bars[idx - 1].close)
+    if current <= 0:
+        return None
+    return following / current - 1.0
+
+
+def _window_frame(frame: KlineFrame, idx: int) -> KlineFrame:
+    """只保留 bars[idx:] 的子 frame, 指标同步重算(按新到旧对齐)."""
+    bars = list(frame.bars[idx:])
+    return KlineFrame(
+        symbol=frame.symbol,
+        timeframe=frame.timeframe,
+        bars=tuple(bars),
+        indicators=compute_indicators(bars),
+        snapshot_ts_local_ms=frame.snapshot_ts_local_ms,
+    )
+
+
+def bar_facts_for(
+    frame: KlineFrame,
+    name: str,
+    extractor: Extractor,
+    *,
+    min_history: int = 20,
+    max_bars: int = 200,
+) -> list[BarFact]:
+    """在 frame 上逐 bar 取"当时可知的特征值"与其后一根 bar 的收益."""
+    del name  # 仅用于调用方可读性; 观测本身不携带因子名
+    facts: list[BarFact] = []
+    bars = frame.bars
+    for idx in range(min(len(bars) - 1, max_bars)):
+        if len(bars) - idx < min_history:
+            continue
+        forward = forward_return_at(frame, idx)
+        if forward is None:
+            continue
+        value = extractor(_window_frame(frame, idx))
+        if value is None:
+            continue
+        facts.append(
+            BarFact(
+                symbol=frame.symbol,
+                ts_ms=int(bars[idx].ts_open * 1000),
+                factor=float(value),
+                forward_return=forward,
+                history=len(bars) - idx,
+            )
+        )
+    return facts
+
+
+def geometry_extractors() -> dict[str, Extractor]:
+    """把单 bar 几何特征的数值字段映射成"取最新 bar 该字段"的抽取函数."""
+
+    def make(field: str) -> Extractor:
+        def extractor(frame: KlineFrame) -> float | None:
+            rows = compute_kline_geometry_features(frame, limit=1)
+            if not rows:
+                return None
+            value = getattr(rows[0], field)
+            return None if value is None else float(value)
+
+        return extractor
+
+    return {f"geometry.{field}": make(field) for field in GEOMETRY_NUMERIC_FIELDS}
+
+
+def audit_frames(
+    frames: Iterable[KlineFrame],
+    extractors: dict[str, Extractor],
+    *,
+    expected_direction: ExpectedDirection = "positive",
+    thresholds: AuditThresholds | None = None,
+) -> list[FactorStats]:
+    """对每个抽取函数跑一遍全样本, 返回按 IR 降序的审计结论."""
+    frame_list = list(frames)
+    results: list[FactorStats] = []
+    for name, extractor in extractors.items():
+        rows: list[BarFact] = []
+        for frame in frame_list:
+            rows.extend(bar_facts_for(frame, name, extractor))
+        rows = dedupe_facts(rows)
+        results.append(
+            ic_stats(
+                name,
+                rows,
+                expected_direction=expected_direction,
+                thresholds=thresholds,
+            )
+        )
+    results.sort(key=lambda s: (-abs(s.ir), s.name))
+    return results
