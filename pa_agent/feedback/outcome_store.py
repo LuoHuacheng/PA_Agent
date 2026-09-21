@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from pa_agent.feedback.contamination import contamination_summary
 from pa_agent.trading.replay_pairing import (
     attach_decisions,
     cid_variants,
@@ -765,6 +766,8 @@ def build_audit_summary(
     rows: list[dict] | None = None,
     strategy_symbols: list[str] | None = None,
     orders_by_symbol: dict | None = None,
+    analyzed_symbols: set | None = None,
+    notional_ceiling: float = 0.0,
 ) -> dict:
     """Merge the attribution audit with cross-source drift and income diff."""
     pending_set = _variant_set(pending_rows)
@@ -787,6 +790,12 @@ def build_audit_summary(
             "csv_only": len(csv_set - pending_set),
         },
     }
+    if attached is not None and (analyzed_symbols or notional_ceiling > 0):
+        summary['contamination'] = contamination_summary(
+            attached,
+            analyzed=analyzed_symbols,
+            ceiling=notional_ceiling,
+        )
     if attached is not None:
         summary["coverage"] = account_coverage(
             income_rows,
@@ -807,6 +816,8 @@ def merge_all(
     days: int = 30,
     now_ms: int | None = None,
     join_hours: int = 48,
+    analyzed_symbols: set | None = None,
+    notional_ceiling: float = 0.0,
 ) -> tuple[list[dict], dict]:
     """End-to-end merge: S1 cache + S2/S3 decisions -> (OutcomeRows, audit).
 
@@ -850,6 +861,8 @@ def merge_all(
         rows=rows,
         strategy_symbols=symbols,
         orders_by_symbol=orders,
+        analyzed_symbols=analyzed_symbols,
+        notional_ceiling=notional_ceiling,
     )
     audit["rows_outcome"] = len(rows)
     return rows, audit

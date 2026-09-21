@@ -5,6 +5,7 @@ S1 account cache -> S2 pending JSON -> S3 CSV fallback; uid idempotency;
 outcome classification (net==0 -> loss); close_reason best-effort prefix
 attribution; audit counts incl. cross-source drift.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -139,10 +140,28 @@ def _orders(close_cid: str = "pa-sl-close1") -> dict[str, list[dict]]:
 def _fills() -> dict[str, list[dict]]:
     return {
         SYM: [
-            {"symbol": SYM, "orderId": 1, "id": 1, "time": 1000, "side": "BUY",
-             "qty": "1.0", "price": "100.0", "realizedPnl": "0", "commission": "0.02"},
-            {"symbol": SYM, "orderId": 2, "id": 2, "time": 2000, "side": "SELL",
-             "qty": "1.0", "price": "110.0", "realizedPnl": "10.0", "commission": "0.02"},
+            {
+                "symbol": SYM,
+                "orderId": 1,
+                "id": 1,
+                "time": 1000,
+                "side": "BUY",
+                "qty": "1.0",
+                "price": "100.0",
+                "realizedPnl": "0",
+                "commission": "0.02",
+            },
+            {
+                "symbol": SYM,
+                "orderId": 2,
+                "id": 2,
+                "time": 2000,
+                "side": "SELL",
+                "qty": "1.0",
+                "price": "110.0",
+                "realizedPnl": "10.0",
+                "commission": "0.02",
+            },
         ]
     }
 
@@ -164,14 +183,26 @@ def _decision_row(ts_ms: int, *, sym: str = SYM) -> dict:
     }
 
 
-def _attached_matched(decision_idx: int = 0, *, opened_at: int = 2500,
-                      closed_at: int | None = 3000) -> dict:
+def _attached_matched(
+    decision_idx: int = 0, *, opened_at: int = 2500, closed_at: int | None = 3000
+) -> dict:
     return {
-        "sym": SYM, "side": 1, "qty": 1.0, "entry": 100.0, "realized": 10.0,
-        "fees": -0.04, "cid": "pa-entry-" + "a" * 27, "opened_at": opened_at,
-        "closed_at": closed_at, "close_px": 110.0, "close_order_id": 2,
-        "status": "matched", "decision_idx": decision_idx,
-        "conf": 60, "stop": 99.0, "target": 103.0,
+        "sym": SYM,
+        "side": 1,
+        "qty": 1.0,
+        "entry": 100.0,
+        "realized": 10.0,
+        "fees": -0.04,
+        "cid": "pa-entry-" + "a" * 27,
+        "opened_at": opened_at,
+        "closed_at": closed_at,
+        "close_px": 110.0,
+        "close_order_id": 2,
+        "status": "matched",
+        "decision_idx": decision_idx,
+        "conf": 60,
+        "stop": 99.0,
+        "target": 103.0,
     }
 
 
@@ -211,8 +242,8 @@ def test_load_decision_records_prefilters_by_date_symbol_and_type(tmp_path):
     root = tmp_path / "pending"
     root.mkdir()
     fresh = _write_pending(root, _ms(1), sym=SYM)  # 1 day old: inside window
-    _write_pending(root, _ms(40), sym=SYM)         # 40 days old: excluded
-    _write_pending(root, _ms(1), sym="ETHUSDT")    # other symbol: excluded
+    _write_pending(root, _ms(40), sym=SYM)  # 40 days old: excluded
+    _write_pending(root, _ms(1), sym="ETHUSDT")  # other symbol: excluded
     # 不下单 record: excluded (distinct ts so it does not overwrite fresh)
     no_trade = _pending_record(_ms(2), inner={**_inner(), "order_type": "不下单"})
     (root / _name(_ms(2), sym=SYM)).write_text(json.dumps(no_trade), encoding="utf-8")
@@ -278,9 +309,9 @@ def test_build_outcome_rows_closed_win_and_open(tmp_path):
     assert open_row["outcome"] == "open"
     assert open_row["close_reason"] is None
     # uid is deterministic and idempotent
-    assert win["uid"] == hashlib.sha256(
-        ("pa-entry-" + "a" * 27 + "|2000|3000").encode()
-    ).hexdigest()
+    assert (
+        win["uid"] == hashlib.sha256(("pa-entry-" + "a" * 27 + "|2000|3000").encode()).hexdigest()
+    )
 
 
 def test_build_outcome_rows_zero_net_counts_loss_and_close_reason_variants():
@@ -293,9 +324,9 @@ def test_build_outcome_rows_zero_net_counts_loss_and_close_reason_variants():
         return {SYM: base}
 
     cases = [
-        (0.0, "pa-tp-x"),            # exact zero net -> loss (Q3); close via TP
-        (-2.0, ""),                  # close order present without pa- prefix
-        (-2.0, None),                # closing order not found at all
+        (0.0, "pa-tp-x"),  # exact zero net -> loss (Q3); close via TP
+        (-2.0, ""),  # close order present without pa- prefix
+        (-2.0, None),  # closing order not found at all
     ]
     built = []
     for i, (net, close_cid) in enumerate(cases):
@@ -337,6 +368,7 @@ def test_write_outcome_csv_is_uid_idempotent(tmp_path):
     second = fp.read_text(encoding="utf-8")
     assert first == second
     import csv as _csv
+
     data_rows = list(_csv.DictReader(first.splitlines()))
     assert len(data_rows) == 1
     assert data_rows[0]["outcome"] == "win"
@@ -378,15 +410,25 @@ def test_build_audit_summary_counts_drift(tmp_path):
     pending = [_decision_row(1000)]
     csv_rows = [_decision_row(1000)]
     csv_rows[0]["source"] = "csv"
-    attach_audit = {"matched": 1, "manual": 0, "missing_decision": 1,
-                    "ambiguous": 1, "ambiguous_rows": [{"cid": "y", "candidates": 1}]}
-    income = [{"symbol": SYM, "incomeType": "REALIZED_PNL", "income": 10.0},
-              {"symbol": SYM, "incomeType": "COMMISSION", "income": -0.04}]
+    attach_audit = {
+        "matched": 1,
+        "manual": 0,
+        "missing_decision": 1,
+        "ambiguous": 1,
+        "ambiguous_rows": [{"cid": "y", "candidates": 1}],
+    }
+    income = [
+        {"symbol": SYM, "incomeType": "REALIZED_PNL", "income": 10.0},
+        {"symbol": SYM, "incomeType": "COMMISSION", "income": -0.04},
+    ]
     summary = build_audit_summary(
-        attach_audit, pending, csv_rows,
+        attach_audit,
+        pending,
+        csv_rows,
         trades=[{"sym": SYM, "realized": 10.0, "fees": -0.04}],
         income_rows=income,
-        csv_only=3, pending_only=2,
+        csv_only=3,
+        pending_only=2,
     )
     assert summary["matched"] == 1
     assert summary["ambiguous"] == 1
@@ -395,7 +437,6 @@ def test_build_audit_summary_counts_drift(tmp_path):
     assert summary["pending_only_materials"] == 2
     assert summary["income_diff_by_symbol"][SYM] == pytest.approx(0.0)
     assert summary["decisions_pending"] == 1 and summary["decisions_csv"] == 1
-
 
 
 def test_export_experience_cases_writes_success_and_failure(tmp_path):
@@ -454,7 +495,6 @@ def test_export_prunes_old_entries(tmp_path):
     assert len(files) == 1  # the oldest was pruned
 
 
-
 # ---------------------------------------------------------------------------
 # source preference
 # ---------------------------------------------------------------------------
@@ -504,10 +544,28 @@ def test_merge_all_end_to_end(tmp_path):
         },
         "user_trades": {
             SYM: [
-                {"symbol": SYM, "orderId": 1, "id": 1, "time": open_ts, "side": "BUY",
-                 "qty": "1.0", "price": "100.0", "realizedPnl": "0", "commission": "0.02"},
-                {"symbol": SYM, "orderId": 2, "id": 2, "time": close_ts, "side": "SELL",
-                 "qty": "1.0", "price": "103.0", "realizedPnl": "3.0", "commission": "0.02"},
+                {
+                    "symbol": SYM,
+                    "orderId": 1,
+                    "id": 1,
+                    "time": open_ts,
+                    "side": "BUY",
+                    "qty": "1.0",
+                    "price": "100.0",
+                    "realizedPnl": "0",
+                    "commission": "0.02",
+                },
+                {
+                    "symbol": SYM,
+                    "orderId": 2,
+                    "id": 2,
+                    "time": close_ts,
+                    "side": "SELL",
+                    "qty": "1.0",
+                    "price": "103.0",
+                    "realizedPnl": "3.0",
+                    "commission": "0.02",
+                },
             ]
         },
         "income": [
@@ -516,8 +574,12 @@ def test_merge_all_end_to_end(tmp_path):
         ],
     }
     rows, audit = merge_all(
-        cache, records_root=root, csv_dir=_csv_dir(tmp_path),
-        symbols=[SYM], days=30, now_ms=NOW,
+        cache,
+        records_root=root,
+        csv_dir=_csv_dir(tmp_path),
+        symbols=[SYM],
+        days=30,
+        now_ms=NOW,
     )
     assert audit["matched"] == 1
     assert audit["missing_decision"] == 0 and audit["ambiguous"] == 0
@@ -647,10 +709,22 @@ def test_build_audit_summary_without_attached_has_no_coverage():
 
 
 def test_dedupe_income_rows_collapses_repeated_fetch():
-    row = {"symbol": SYM, "incomeType": "REALIZED_PNL", "income": -10.0,
-           "time": 1000, "tranId": 7, "asset": "USDT"}
-    other = {"symbol": SYM, "incomeType": "COMMISSION", "income": -0.04,
-             "time": 1001, "tranId": 8, "asset": "USDT"}
+    row = {
+        "symbol": SYM,
+        "incomeType": "REALIZED_PNL",
+        "income": -10.0,
+        "time": 1000,
+        "tranId": 7,
+        "asset": "USDT",
+    }
+    other = {
+        "symbol": SYM,
+        "incomeType": "COMMISSION",
+        "income": -0.04,
+        "time": 1001,
+        "tranId": 8,
+        "asset": "USDT",
+    }
     assert dedupe_income_rows([row, other, row, other]) == [row, other]
 
 
@@ -658,3 +732,53 @@ def test_dedupe_income_rows_falls_back_to_row_tuple():
     row = {"symbol": SYM, "incomeType": "REALIZED_PNL", "income": -10.0, "time": 1000}
     twin = dict(row)
     assert dedupe_income_rows([row, twin]) == [row]
+
+
+# ---------------------------------------------------------------------------
+# 污染诊断接进审计 (2026-09-21)
+# ---------------------------------------------------------------------------
+
+
+def test_build_audit_summary_includes_contamination_when_bounds_given():
+    attached = [
+        {
+            "sym": "HEMIUSDT",
+            "status": "manual",
+            "realized": -10.0,
+            "fees": 0.0,
+            "opened_at": 1,
+            "qty": 1000.0,
+            "entry": 10.0,
+        }
+    ]
+    summary = build_audit_summary(
+        {"matched": 0, "manual": 1, "missing_decision": 0, "ambiguous": 0},
+        [],
+        [],
+        trades=[],
+        income_rows=[],
+        csv_only=0,
+        pending_only=0,
+        attached=attached,
+        analyzed_symbols={"BTCUSDT"},
+        notional_ceiling=5000.0,
+    )
+    con = summary["contamination"]
+    assert con["flagged_count"] == 1
+    assert con["clean_count"] == 0
+    assert con["flagged_net"] == pytest.approx(-10.0)
+    assert set(con["by_reason"]) == {"unanalyzed_symbol", "oversized_notional"}
+
+
+def test_build_audit_summary_omits_contamination_without_bounds():
+    summary = build_audit_summary(
+        {"matched": 0, "manual": 0, "missing_decision": 0, "ambiguous": 0},
+        [],
+        [],
+        trades=[],
+        income_rows=[],
+        csv_only=0,
+        pending_only=0,
+        attached=[_leg(SYM, "matched", -1.0, 1)],
+    )
+    assert "contamination" not in summary

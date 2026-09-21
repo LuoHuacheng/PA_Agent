@@ -6,14 +6,13 @@ import json
 
 import pytest
 
-from tools.account_contamination import (
-    analyzed_symbols,
-    contamination_report,
+from pa_agent.feedback.contamination import (
+    contamination_summary,
     flag_reasons,
     leg_net,
     leg_notional,
-    strategy_bounds,
 )
+from tools.account_contamination import analyzed_symbols, strategy_bounds
 
 
 def leg(sym, qty=10.0, entry=100.0, realized=-1.0, fees=-0.05):
@@ -50,7 +49,7 @@ def test_report_splits_and_totals():
         leg("BTCUSDT", qty=1.0, entry=100.0, realized=5.0, fees=-0.1),
         leg("HEMIUSDT", qty=1_779_986.0, entry=0.0165, realized=-1654.18, fees=-13.85),
     ]
-    report = contamination_report(legs, analyzed={"BTCUSDT"}, ceiling=5000.0)
+    report = contamination_summary(legs, analyzed={"BTCUSDT"}, ceiling=5000.0, include_flagged=True)
     assert report["legs_total"] == 2
     assert report["clean_count"] == 1
     assert report["clean_net"] == pytest.approx(4.9)
@@ -64,7 +63,7 @@ def test_report_splits_and_totals():
 
 
 def test_report_without_criteria_flags_nothing():
-    report = contamination_report([leg("WHATEVERUSDT")], ceiling=0.0)
+    report = contamination_summary([leg("WHATEVERUSDT")], ceiling=0.0)
     assert report["flagged_count"] == 0
     assert report["clean_count"] == 1
 

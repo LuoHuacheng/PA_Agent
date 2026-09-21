@@ -13,6 +13,7 @@ Usage:
     python tools/outcome_merge.py --days 30
     python tools/outcome_merge.py --days 90 --symbols BTCUSDT,ETHUSDT
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,6 +28,7 @@ if str(ROOT) not in sys.path:
 sys.path.insert(0, str(ROOT / "tools"))
 
 from _pa_sim_common import DEFAULT_SYMBOLS, fetch_account_data, make_client  # noqa: E402
+from account_contamination import analyzed_symbols, strategy_bounds  # noqa: E402
 
 from pa_agent.config.settings import load_settings  # noqa: E402
 from pa_agent.feedback.outcome_store import (  # noqa: E402
@@ -40,27 +42,32 @@ TZ8 = datetime.timezone(datetime.timedelta(hours=8))
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--days", type=int, default=30)
-    ap.add_argument("--hours", type=int, default=0,
-                    help="rolling window of the last N hours (overrides --days)")
+    ap.add_argument(
+        "--hours", type=int, default=0, help="rolling window of the last N hours (overrides --days)"
+    )
     ap.add_argument("--symbols", default="", help="comma list; default whitelist + CSV")
-    ap.add_argument("--export-experience", action="store_true",
-                    help="export |win_r|>=1R closed cases into experience/ (D2)")
+    ap.add_argument(
+        "--export-experience",
+        action="store_true",
+        help="export |win_r|>=1R closed cases into experience/ (D2)",
+    )
     args = ap.parse_args()
 
     settings = load_settings()
     whitelist = list(getattr(settings.binance_usdm_testnet, "symbol_whitelist", None) or [])
     csv_dir = ROOT / "trade_records"
-    symbols = symbols_scope(
-        whitelist or None, csv_dir=csv_dir, default=list(DEFAULT_SYMBOLS)
-    )
+    symbols = symbols_scope(whitelist or None, csv_dir=csv_dir, default=list(DEFAULT_SYMBOLS))
     if args.symbols:
         wanted = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
         symbols = [s for s in symbols if s in wanted] or wanted
 
-    if not getattr(settings.binance_usdm_testnet, "api_key", "") or             not getattr(settings.binance_usdm_testnet, "api_secret", ""):
+    if not getattr(settings.binance_usdm_testnet, "api_key", "") or not getattr(
+        settings.binance_usdm_testnet, "api_secret", ""
+    ):
         print("Testnet API key/secret missing: 无法拉取成交源, outcomes 保持为空。")
         return 0
 
@@ -102,20 +109,35 @@ def main() -> int:
         symbols = [s for s in symbols if s not in {k.split("(")[0] for k in skipped}]
         if skipped:
             print("跳过无法拉取的币种:", ", ".join(skipped))
+    contamination_symbols = analyzed_symbols(ROOT / "records" / "pending", days=args.days)
+    bounds = strategy_bounds()
     rows, audit = merge_all(
         account,
         records_root=ROOT / "records" / "pending",
         csv_dir=csv_dir,
         symbols=symbols,
         days=args.days,
+        analyzed_symbols=contamination_symbols,
+        notional_ceiling=bounds["notional_ceiling"],
     )
     write_outcome_csv(rows, csv_dir / "outcomes.csv")
     audit_path = ROOT / "logs" / f"outcome_audit_{datetime.date.today():%Y%m%d}.json"
     write_audit_json(audit, audit_path)
     print(f"币种: {', '.join(symbols)}")
     print(f"决策记录: pending={audit['decisions_pending']} csv={audit['decisions_csv']}")
-    print(f"归属: matched={audit['matched']} manual={audit['manual']} "
-          f"missing={audit['missing_decision']} ambiguous={audit['ambiguous']}")
+    print(
+        f"归属: matched={audit['matched']} manual={audit['manual']} "
+        f"missing={audit['missing_decision']} ambiguous={audit['ambiguous']}"
+    )
+    con = audit.get("contamination") or {}
+    if con:
+        print(
+            f"污染诊断(上限 {bounds['notional_ceiling']:.0f}U): 策略可能"
+            f" {con['clean_count']} 条 {con['clean_net']:+.2f}U"
+            f" | 不可能 {con['flagged_count']} 条 {con['flagged_net']:+.2f}U"
+        )
+        for reason, stat in sorted((con.get("by_reason") or {}).items()):
+            print(f"  {reason:<20} {stat['count']:>5} 条 {stat['net']:>12.2f}U")
     cov = audit.get("coverage") or {}
     if cov:
         print(
@@ -123,9 +145,7 @@ def main() -> int:
             f" | 策略范围 {cov['strategy_income_net']:.2f}U"
             f" | 策略外 {cov['off_scope_net']:.2f}U"
         )
-        worst = sorted(
-            (cov.get("off_scope_symbols") or {}).items(), key=lambda kv: kv[1]
-        )[:5]
+        worst = sorted((cov.get("off_scope_symbols") or {}).items(), key=lambda kv: kv[1])[:5]
         if worst:
             print("  策略外最大 5 项:", ", ".join(f"{s}={v:.2f}U" for s, v in worst))
         print(
