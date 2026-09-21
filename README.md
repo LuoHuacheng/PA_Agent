@@ -78,15 +78,24 @@ make uv-run
 
 ## 详细说明
 
-完整操作界面说明见 [`PA_Agent使用文档.md`](PA_Agent使用文档.md)，配置字段说明见 [`config/README.md`](config/README.md)。
+完整操作界面说明见 [`docs/Agent使用文档.md`](docs/Agent使用文档.md)，配置字段说明见 [`config/README.md`](config/README.md)。
 
 ### Binance U 本位 Futures 自动交易（默认测试网，可一键切换实盘）
 
-默认关闭，运行于测试网（`binance_usdm_environment: "testnet"`）。同一套代码已支持 Live 实盘一键切换（切换与验证见下）。自动处理 `市价单` 与 `限价单`（`limit_order_enabled` 可关限价；`突破单` 需人工复核）。测试网配置在 `config/settings.json` 的 `binance_usdm_testnet` 中，确认：
+默认关闭（`binance_usdm_testnet.enabled`），运行于测试网（`binance_usdm_environment: "testnet"`）。同一套代码已支持 Live 实盘一键切换（切换与验证见下）。
+
+**按入场方式三个独立开关**：`market_order_enabled`（市价）、`limit_order_enabled`（限价：先挂单，成交后再挂止损/止盈保护单，`limit_fill_timeout_minutes` 超时撤单）、`breakout_order_enabled`（突破 STOP_MARKET，触发即市价，默认按 `breakout_size_scale` 半仓）。三者默认全开，可分别关闭。
+
+**下单前依次过校验**：品种白名单与一致性、交易所数量步长与最小名义、单向持仓模式、保护价方向；最小止损距离（`min_stop_mode`：`fixed` 用 `min_stop_distance_pct`，`atr` 取 `max(min_stop_distance_pct, min_stop_atr_multiple × 分析周期 ATR%)`）；计划盈亏比下限 `min_plan_reward_risk`；交易者方程 `require_trader_equation`；入口门控 `block_short_entry` / `block_trending_tr_entry` / `block_neutral_diag_entry` / `block_cycle_allowlist` / `block_session_entry`（04:00-12:00 本地）；方向质量闸门 `direction_gates_mode`。被拦的方案不下单但照常推送，并在记录里写 `execution.status = "gate_blocked"`。持仓侧另有 `tp_partial_close_pct`（TP1 部分止盈）、`breakeven_stop_trigger`（保本移损）、`time_stop_minutes`（超时平仓）、`structure_exit_mode`（结构否定离场）、`daily_loss_limit_usdt`（日亏熔断）。
+
+测试网配置在 `config/settings.json` 的 `binance_usdm_testnet` 中，确认：
 
 1. `enabled: true`，`emergency_stop: false`，先保持 `dry_run: true` 验证流程。
 2. 分析品种与 `symbol` 完全一致，且在 `symbol_whitelist` 内。
-3. 仅完成 dry-run 验证后，才将 `dry_run` 改为 `false`。
+3. 仓位口径合理：`risk_per_trade_usdt`（单笔风险金，按 |入场-止损| 反推数量）、`max_notional_usdt`、`leverage`。
+4. 仅完成 dry-run 验证后，才将 `dry_run` 改为 `false`。
+
+全部字段（含默认值、取值范围与本机现值）见 [`config/README.md`](config/README.md)。
 
 **实盘(Live)切换**：只在配置层面操作，不切实盘单之前零风险——把 `binance_usdm_environment` 改为 `"live"`，将主网 API Key 填入同构的 `binance_usdm_live` 节并设 `enabled: true`。live 节默认全安全（`dry_run: true`、`emergency_stop: true`、密钥为空）；网关/WS/运行时状态文件随环境自动切换，与测试网完全隔离。两节不可同时 `enabled`（启动即拒绝）。实盘先 `dry_run` 全链路跑通，再用 `python tools/probe_binance_env.py --env live` 冒烟，最后才小仓位实弹。详见 `config/README.md`。
 
@@ -107,7 +116,9 @@ pa-monitor pnl --days 30 --csv pnl.csv   # 自定义天数 / 导出 CSV
 
 后台进程的 stdout/stderr 追加写入 `logs/monitor.out`（启动失败时其新增输出会直接回显到终端）；结构化日志仍在 `logs/pa_agent.log`。`python run.py --monitor` 与 `pa-monitor start` 等价，同样默认后台。
 
-监控品种来自 `config/settings.json` → `monitoring.targets`（静态）或 `auto_discover`（按成交额自动选 Binance U 本位 Top N）。每个 K 线收盘时点自动拉取数据并做两阶段分析：信号达标（类型为市价/限价/突破单且置信度 ≥ `decision_confidence_threshold`）时推送 Telegram 通知，并在启用时于 Binance U 本位 Testnet 自动下单（限价单含止损止盈保护）。日志见 `logs/pa_agent.log`，数据源为 TradingView（可在 `general` 配置登录凭据缓解匿名限流）。
+监控品种来自 `config/settings.json` → `monitoring.targets`（静态）或 `monitoring.auto_discover`（按 24h 成交额 / 涨跌幅 / 市值选 Binance U 本位 Top N）。每个 K 线收盘（或 `poll_interval_minutes` 整点节拍）拉取一次数据并做两阶段分析：给出市价/限价/突破单方案时推送 Telegram 通知，并在启用时自动下单（限价单成交后补挂止损止盈）。
+
+**执行端置信度门槛** = `max(stance 档位门槛, general.decision_confidence_threshold)`：`decision_stance` 分档门槛为 保守 55 / 均衡 45 / 激进 35 / 极度激进 25；`general.decision_confidence_threshold` 是运营侧再抬高的下限（GUI 弹窗提示也用它）。节拍与并发由 `monitoring.poll_interval_minutes` / `monitoring.max_concurrent_analyses` 控制；`monitoring.light_mode_enabled`（连续安静 N 根跳过阶段二）与 `monitoring.htf_context_enabled`（注入高周期背景）是两个省 token 的开关。日志见 `logs/pa_agent.log`，数据源为 TradingView（可在 `general` 配置登录凭据缓解匿名限流）。
 
 ### 复盘分析 CLI 工具（`tools/`）
 

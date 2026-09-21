@@ -22,3 +22,8 @@ jobs:
 
       - name: Verify install
         run: python -c "import pa_agent; print('OK')"
+
+      - name: Verify config assets in sync
+        run: |
+          python scripts/sync_config_json.py --check
+          python scripts/gen_config_readme.py --check-fields
