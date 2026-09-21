@@ -201,11 +201,15 @@ def test_dedupe_keeps_the_deepest_history_for_a_repeated_bar():
     assert got[0].factor == 0.9
 
 
-def test_build_extractors_defaults_to_both_spaces():
+def test_build_extractors_defaults_to_all_spaces():
     names = set(build_extractors())
-    assert len(names) == 15
+    # 23 = 6 geometry + 9 market + 8 structural
+    assert len(names) == 23
     assert len([n for n in names if n.startswith("geometry.")]) == 6
     assert len([n for n in names if n.startswith("market.")]) == 9
+    # structural 空间的键名按语义前缀分组: trend. / channel. / structure.
+    structural = [n for n in names if n.startswith(("trend.", "channel.", "structure."))]
+    assert len(structural) == 8
 
 
 def test_build_extractors_can_select_a_single_space():

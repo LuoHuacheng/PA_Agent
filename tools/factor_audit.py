@@ -322,12 +322,13 @@ def geometry_extractors() -> dict[str, Extractor]:
 
 
 #: 默认审计的因子空间; 逗号分隔, 见 build_extractors
-DEFAULT_SPACES = "geometry,market"
+DEFAULT_SPACES = "geometry,market,structural"
 
 #: 空间名 -> 抽取函数工厂
 SPACE_CATALOG: dict[str, Callable[[], dict[str, Extractor]]] = {
     "geometry": lambda: geometry_extractors(),
     "market": lambda: market_extractors(),
+    "structural": lambda: _structural_extractors(),
 }
 
 
@@ -335,7 +336,8 @@ def build_extractors(spaces: str = DEFAULT_SPACES) -> dict[str, Extractor]:
     """按逗号分隔的空间名组装抽取函数集合.
 
     空间名未知时抛 ValueError, 由 CLI 转成退出码 2。
-    market_extractors 在本模块后段定义, 这里只做延迟引用, 模块导入完成后才被调用。
+    market_extractors 与 _structural_extractors 在本模块后段定义, 这里只做延迟引用,
+    模块导入完成后才被调用。
     """
     wanted = [item.strip() for item in spaces.split(",") if item.strip()]
     unknown = [item for item in wanted if item not in SPACE_CATALOG]
@@ -885,6 +887,17 @@ def market_extractors(*, lookback: int = 40) -> dict[str, Extractor]:
         return extractor
 
     return {f"market.{field}": make(field) for field in MARKET_NUMERIC_FIELDS}
+
+
+def _structural_extractors(*, lookback: int = 40) -> dict[str, Extractor]:
+    """structural 空间的尺度无关特征(实现在 tools/structural_features.py).
+
+    延迟导入: structural_features 需要从本模块导入 Extractor 类型, 顶层互相 import
+    会在"先导入 factor_audit"的顺序下命中半初始化的模块。
+    """
+    from tools.structural_features import structural_extractors
+
+    return structural_extractors(lookback=lookback)
 
 
 if __name__ == "__main__":
