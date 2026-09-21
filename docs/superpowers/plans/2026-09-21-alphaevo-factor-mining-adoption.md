@@ -1215,6 +1215,68 @@ CLI 新增 `--calibrate` / `--rounds` / `--seed`。`--calibrate` 的文本输出
 
 ---
 
+## Phase 1.7：因子相关性去重 + 族级(FWER)零分布
+
+来源：Phase 1.6 完成后暴露的方法学问题。17 个因子**高度相关**（`invalidation_long/short`、`dist_to_high/low`、`price_position`、`range_width_atr`、`overlap_mean_10`、`overlap_prev_ratio` 基本是同一族的不同切法），所以**有效独立检验数远小于 17**，"17 个里 4 个通过"这句话虚高。
+
+### 关键设计判断：不要把 BH 校正叠上去，要把零分布改成族级
+
+单个因子的置换零分布（Phase 1.6 已有）回答的是"**这一个**因子纯噪声能刷多高"。但真实问题是"**17 个**因子里最高的那个能刷多高"。
+
+正确构造：**每轮只打乱一次**，用同一份打乱后的收益评估**全部因子**，取当轮 `max|IC|` 与 `max|IR|` 作为一条样本。其 95 分位即 **FWER 控制**下的阈值。
+
+这个构造自动处理相关性 —— 相关的因子在同一份打乱下会同向移动，max 分布天然反映了它们不是 17 次独立抽签。因此**不需要**额外的 Bonferroni / BH。
+
+现有 `permutation_null` 是"每个因子各自打乱、样本汇总"，**不能**用来做族级推断。
+
+### 新增接口（`tools/factor_audit.py`）
+
+1. `factor_correlation_matrix(facts_by_name, *, min_common: int = 30) -> dict[tuple[str, str], float]`
+   —— 在公共网格 `(symbol, timeframe, ts_ms)` 上算两两 Spearman；公共观测不足 `min_common` 的对记为 `None`（不参与去重判断）。
+2. `RepresentativeReport(kept: tuple[str, ...], redundant: tuple[tuple[str, str], ...])`
+   —— `redundant` 是 `(被丢弃因子, 与之冗余的已保留因子)`。
+3. `select_representatives(corr, *, ic_by_name, threshold=0.7) -> RepresentativeReport`
+   —— 按 `|IC|` 降序贪心：与**已保留**因子的最大 `|corr|` < `threshold` 才保留，否则记为与那个因子的冗余。0.7 沿用 alphaevo 的 `max_cross_correlation` 约定。
+4. `permutation_null(..., family_wise: bool = False)`
+   —— `family_wise=True` 时走族级构造；`family_wise=False` 保持现有单因子行为（向后兼容，现有测试不受影响）。
+
+### CLI
+
+- `--calibrate` 同时输出**单因子**与**族级**两份零分布；"建议阈值"改用**族级**那份
+- 新增 `--corr-threshold`（默认 `0.7`）
+- 新增 `--representatives`：打印冗余分组（保留哪些、谁与谁冗余）
+
+族级输出示例：
+
+```
+置换检验零分布 (rounds=200, 样本 3400 次)
+  单因子  |IC| p95 = 0.0xxxx  |IR| p95 = 0.xxxx
+  族级    |IC| p95 = 0.0xxxx  |IR| p95 = 0.xxxx   <- 17 个因子里最高的那个
+建议阈值 (族级 p95): min_ic_abs=0.0xxxx  min_ir=0.xxxx
+代表性因子: 9 个 (冗余 8 个)
+  market.invalidation_short  <- market.dist_to_low_atr, market.price_position
+  ...
+```
+
+### 新增测试
+
+1. `test_correlation_matrix_is_symmetric_with_unit_diagonal`
+2. `test_select_representatives_drops_identical_twins` —— 两个完全相同的因子只保留 |IC| 大的那个，另一个进 `redundant`
+3. `test_select_representatives_keeps_uncorrelated_factors` —— 独立因子全部保留
+4. `test_family_wise_null_is_at_least_single_factor_null` —— **族级 p95 ≥ 单因子 p95**（max over N ≥ 单个）。这条是正确性判据，必须过
+5. `test_family_wise_null_is_deterministic_for_a_seed`
+6. `test_permutation_null_default_stays_single_factor` —— 不传 `family_wise` 时行为与 Phase 1.6 完全一致（向后兼容）
+
+### 验收
+
+```bash
+.venv/bin/python -m pytest tests/unit/test_factor_audit.py          # 期望 >= 46 passed
+.venv/bin/python -m ruff check tools/factor_audit.py tests/unit/test_factor_audit.py
+.venv/bin/python tools/factor_audit.py --records records/pending --limit 40 --calibrate --rounds 100 --representatives
+```
+
+---
+
 ## Phase 2：SQLite 因子库（P1）
 
 产出：审计通过的因子成为可检索资产，失败的留档但不参与后续。
