@@ -1,3 +1,5 @@
+# ruff: noqa: RUF001 - Chinese product copy
+
 """时序因子审计: 逐个特征算 rank IC / IR / 月度胜率, 判断它是否真的预测下一根 bar.
 
 移植自 alphaevo(https://github.com/ZhuLinsen/alphaevo, Apache-2.0) 的
@@ -9,11 +11,15 @@ validator.py / AlphaFactory, 但口径改写为**单品种逐 bar 时序** —�
 
 from __future__ import annotations
 
+import argparse
+import json
 import math
 import statistics
+import sys
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 
 from pa_agent.ai.kline_features import compute_kline_geometry_features
@@ -320,3 +326,114 @@ def audit_frames(
         )
     results.sort(key=lambda s: (-abs(s.ir), s.name))
     return results
+
+
+def load_frames(paths: Iterable[Path]) -> list[KlineFrame]:
+    """把落盘的分析记录读成 KlineFrame; 坏文件跳过而不是中断."""
+    from pa_agent.demo.record_loader import frame_from_record_klines, try_load_analysis_record
+
+    frames: list[KlineFrame] = []
+    for path in paths:
+        record = try_load_analysis_record(Path(path))
+        if record is None or not record.kline_data:
+            continue
+        frames.append(
+            frame_from_record_klines(
+                record.kline_data,
+                symbol=record.meta.symbol,
+                timeframe=record.meta.timeframe,
+                snapshot_ts_local_ms=record.meta.timestamp_local_ms,
+            )
+        )
+    return frames
+
+
+def _fmt(value: float, digits: int = 4) -> str:
+    return f"{value:.{digits}f}"
+
+
+def render_markdown(
+    stats: Sequence[FactorStats],
+    *,
+    frames: int,
+    observations: int,
+    source: str,
+) -> str:
+    """把审计结论渲染成可归档的 Markdown 报告."""
+    passed = [s for s in stats if s.passed]
+    lines = [
+        "# 因子审计报告",
+        "",
+        f"- 记录源：{source}",
+        f"- 样本：{frames} 份记录 / {observations} 次观测",
+        f"- 结论：{len(passed)} / {len(stats)} 个因子通过准入",
+        "",
+        "| 因子 | 观测 | 分组 | IC 均值 | IR | 月度胜率 | 结论 |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for item in stats:
+        verdict = "通过" if item.passed else "未通过"
+        lines.append(
+            f"| {item.name} | {item.n_obs} | {item.group_count} | "
+            f"{_fmt(item.ic_mean)} | {_fmt(item.ir)} | "
+            f"{item.monthly_win_rate:.0%} | {verdict} |"
+        )
+    rejected = [s for s in stats if not s.passed]
+    if rejected:
+        lines.extend(["", "## 未通过原因", ""])
+        for item in rejected:
+            lines.append(f"### {item.name}")
+            lines.append("")
+            for reason in item.reasons:
+                lines.append(f"- direction IC / IR 检查：{reason}")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="factor_audit",
+        description="时序因子审计: 算 rank IC / IR / 月度胜率(只读)",
+    )
+    parser.add_argument("--records", help="分析记录目录或单个 JSON 路径")
+    parser.add_argument("--limit", type=int, default=300, help="最多读入多少份记录")
+    parser.add_argument("--direction", choices=("positive", "negative"), default="positive")
+    parser.add_argument("--out", help="Markdown 报告输出路径")
+    parser.add_argument("--json", action="store_true", help="以 JSON 输出结论")
+    args = parser.parse_args(argv)
+
+    if not args.records:
+        parser.print_usage(sys.stderr)
+        return 2
+
+    root = Path(args.records)
+    if not root.exists():
+        print(f"路径不存在: {root}", file=sys.stderr)
+        return 2
+    paths = sorted(root.rglob("*.json"))[: args.limit] if root.is_dir() else [root]
+
+    frames = load_frames(paths)
+    if not frames:
+        print("没有可用的分析记录", file=sys.stderr)
+        return 2
+
+    stats = audit_frames(frames, geometry_extractors(), expected_direction=args.direction)
+    observations = sum(s.n_obs for s in stats) // max(len(stats), 1)
+
+    if args.json:
+        print(json.dumps([asdict(s) for s in stats], ensure_ascii=False, indent=2))
+    else:
+        print(
+            render_markdown(stats, frames=len(frames), observations=observations, source=str(root))
+        )
+
+    if args.out:
+        Path(args.out).write_text(
+            render_markdown(stats, frames=len(frames), observations=observations, source=str(root)),
+            encoding="utf-8",
+        )
+    return 0 if any(s.passed for s in stats) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

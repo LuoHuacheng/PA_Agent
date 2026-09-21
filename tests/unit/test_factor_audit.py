@@ -11,12 +11,15 @@ from pa_agent.data.snapshot import compute_indicators
 from tools.factor_audit import (
     AuditThresholds,
     BarFact,
+    FactorStats,
     audit_frames,
     bar_facts_for,
     dedupe_facts,
     forward_return_at,
     geometry_extractors,
     ic_stats,
+    main,
+    render_markdown,
     spearman_ic,
 )
 
@@ -193,3 +196,43 @@ def test_audit_frames_dedupes_bars_shared_by_two_snapshots():
     doubled = audit_frames([first, second], extractors)[0].n_obs
     assert single > 0
     assert doubled == single
+
+
+def test_render_markdown_lists_factors_with_verdict():
+    stats = [
+        FactorStats(
+            name="geometry.body_ratio",
+            n_obs=120,
+            group_count=3,
+            ic_mean=0.05,
+            ic_std=0.04,
+            ir=1.25,
+            monthly_win_rate=0.75,
+            passed=True,
+            reasons=(),
+        ),
+        FactorStats(
+            name="geometry.range_atr_ratio",
+            n_obs=120,
+            group_count=3,
+            ic_mean=-0.01,
+            ic_std=0.05,
+            ir=-0.2,
+            monthly_win_rate=0.4,
+            passed=False,
+            reasons=("方向性 IC -0.0100 < 0.02",),
+        ),
+    ]
+    text = render_markdown(stats, frames=2, observations=240, source="records/pending")
+    assert "# 因子审计报告" in text
+    assert "geometry.body_ratio" in text
+    assert "direction IC" in text
+    assert "通过" in text and "未通过" in text
+
+
+def test_cli_returns_two_for_missing_directory(tmp_path):
+    assert main(["--records", str(tmp_path / "nope")]) == 2
+
+
+def test_cli_returns_two_without_records_argument():
+    assert main([]) == 2
