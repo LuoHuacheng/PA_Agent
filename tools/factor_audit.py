@@ -314,6 +314,32 @@ def geometry_extractors() -> dict[str, Extractor]:
     return {f"geometry.{field}": make(field) for field in GEOMETRY_NUMERIC_FIELDS}
 
 
+#: 默认审计的因子空间; 逗号分隔, 见 build_extractors
+DEFAULT_SPACES = "geometry,market"
+
+#: 空间名 -> 抽取函数工厂
+SPACE_CATALOG: dict[str, Callable[[], dict[str, Extractor]]] = {
+    "geometry": lambda: geometry_extractors(),
+    "market": lambda: market_extractors(),
+}
+
+
+def build_extractors(spaces: str = DEFAULT_SPACES) -> dict[str, Extractor]:
+    """按逗号分隔的空间名组装抽取函数集合.
+
+    空间名未知时抛 ValueError, 由 CLI 转成退出码 2。
+    market_extractors 在本模块后段定义, 这里只做延迟引用, 模块导入完成后才被调用。
+    """
+    wanted = [item.strip() for item in spaces.split(",") if item.strip()]
+    unknown = [item for item in wanted if item not in SPACE_CATALOG]
+    if unknown:
+        raise ValueError(f"未知因子空间 {unknown}; 允许: {sorted(SPACE_CATALOG)}")
+    extractors: dict[str, Extractor] = {}
+    for item in wanted:
+        extractors.update(SPACE_CATALOG[item]())
+    return extractors
+
+
 def audit_frames(
     frames: Iterable[KlineFrame],
     extractors: dict[str, Extractor],
@@ -420,10 +446,22 @@ def main(argv: list[str] | None = None) -> int:
         default=300,
         help="最多读入多少份记录; 按路径字典序截断, 取的是时间上最早的一段, 不含最新行情",
     )
+    parser.add_argument(
+        "--spaces",
+        default=DEFAULT_SPACES,
+        help=f"逗号分隔的因子空间, 可选 {sorted(SPACE_CATALOG)}; 默认 {DEFAULT_SPACES}",
+    )
     parser.add_argument("--direction", choices=("positive", "negative"), default="positive")
     parser.add_argument("--out", help="Markdown 报告输出路径")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出结论")
     args = parser.parse_args(argv)
+
+    # 先把参数校验做完再读盘: 这样 --spaces 写错时立刻返回 2, 不必先扫一遍记录
+    try:
+        extractors = build_extractors(args.spaces)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     if not args.records:
         parser.print_usage(sys.stderr)
@@ -440,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
         print("没有可用的分析记录", file=sys.stderr)
         return 2
 
-    stats = audit_frames(frames, geometry_extractors(), expected_direction=args.direction)
+    stats = audit_frames(frames, extractors, expected_direction=args.direction)
     observations = sum(s.n_obs for s in stats) // max(len(stats), 1)
 
     if args.json:

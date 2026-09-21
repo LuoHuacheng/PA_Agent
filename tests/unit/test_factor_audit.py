@@ -14,6 +14,7 @@ from tools.factor_audit import (
     FactorStats,
     audit_frames,
     bar_facts_for,
+    build_extractors,
     dedupe_facts,
     forward_return_at,
     geometry_extractors,
@@ -189,6 +190,23 @@ def test_dedupe_keeps_the_deepest_history_for_a_repeated_bar():
     assert got[0].factor == 0.9
 
 
+def test_build_extractors_defaults_to_both_spaces():
+    names = set(build_extractors())
+    assert len(names) == 19
+    assert len([n for n in names if n.startswith("geometry.")]) == 6
+    assert len([n for n in names if n.startswith("market.")]) == 13
+
+
+def test_build_extractors_can_select_a_single_space():
+    names = set(build_extractors("geometry"))
+    assert names == set(geometry_extractors())
+
+
+def test_build_extractors_rejects_unknown_space():
+    with pytest.raises(ValueError):
+        build_extractors("geometry,nope")
+
+
 def test_dedupe_does_not_merge_across_timeframes():
     same_ts = 1000
     m5 = BarFact("BTCUSDT", same_ts, 0.5, 0.01, history=5, timeframe="5m")
@@ -275,6 +293,17 @@ def test_render_markdown_lists_factors_with_verdict():
 
 def test_cli_returns_two_for_missing_directory(tmp_path):
     assert main(["--records", str(tmp_path / "nope")]) == 2
+
+
+def test_cli_rejects_unknown_space(tmp_path, capsys):
+    # --spaces 未注册时 argparse 会 SystemExit(2) 而不是返回 2, 所以这条能抓住漏注册
+    assert main(["--records", str(tmp_path), "--spaces", "nope"]) == 2
+    assert "未知因子空间" in capsys.readouterr().err
+
+
+def test_cli_accepts_a_known_space(tmp_path):
+    # 空目录 -> 返回 2; 但参数已被受理, 说明 --spaces 真的注册了
+    assert main(["--records", str(tmp_path), "--spaces", "geometry"]) == 2
 
 
 def test_cli_returns_two_without_records_argument():
