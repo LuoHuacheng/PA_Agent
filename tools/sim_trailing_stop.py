@@ -274,9 +274,7 @@ def replay(t, rule, klines):
         for b in bars:
             _ts, _o, h, l, _c = b
             peak = max(peak, h)
-            if rule == "be05r" and peak >= entry + 0.5 * risk:
-                sl = max(sl, entry)
-            elif rule == "be1r" and peak >= entry + risk:
+            if (rule == "be05r" and peak >= entry + 0.5 * risk) or (rule == "be1r" and peak >= entry + risk):
                 sl = max(sl, entry)
             elif rule == "trail05r":
                 sl = max(sl, peak - 0.5 * risk)
@@ -293,9 +291,7 @@ def replay(t, rule, klines):
         for b in bars:
             _ts, _o, h, l, _c = b
             trough = min(trough, l)
-            if rule == "be05r" and trough <= entry - 0.5 * risk:
-                sl = min(sl, entry)
-            elif rule == "be1r" and trough <= entry - risk:
+            if (rule == "be05r" and trough <= entry - 0.5 * risk) or (rule == "be1r" and trough <= entry - risk):
                 sl = min(sl, entry)
             elif rule == "trail05r":
                 sl = min(sl, trough + 0.5 * risk)
@@ -320,6 +316,8 @@ def main() -> None:
     ap.add_argument("--big-win-usdt", type=float, default=8.0,
                     help="net-usdt threshold defining big winners (default 8)")
     ap.add_argument("--out", default="", help="optional json output path for per-rule summary")
+    ap.add_argument("--detail-json", default="",
+                    help="optional json path for per-trade diffs (needed for paired significance)")
     ap.add_argument("--detail", action="store_true", help="print per-trade diffs (first 12)")
     args = ap.parse_args()
 
@@ -355,10 +353,12 @@ def main() -> None:
               % (actual_total, args.big_win_usdt, big_total))
         print()
         rows = []
+        pairs_by_rule = {}
         print("%-9s %10s %5s %5s %5s %5s %10s" % ("rule", "net", "tp", "sl", "miss", "kept", "vs-actual"))
         for rule in rules:
             net = tp_n = sl_n = miss = kept = 0
             diffs = []
+            pairs = []
             for t in trades:
                 res = replay(t, rule, klines)
                 if res is None:
@@ -371,13 +371,17 @@ def main() -> None:
                     sl_n += 1
                 sim = (px - t["entry"]) * t["qty"] * t["side"] + t["fees"]
                 net += sim
-                diffs.append(sim - (t["realized"] + t["fees"]))
+                diff = sim - (t["realized"] + t["fees"])
+                diffs.append(diff)
+                pairs.append({"key": "%s@%s" % (t.get("sym"), t.get("opened_at")),
+                              "diff": diff, "actual": t["realized"] + t["fees"]})
                 if (t["realized"] + t["fees"]) > args.big_win_usdt and sim > 0:
                     kept += 1
             print("%-9s %+10.2f %5d %5d %5d %5d %+10.2f"
                   % (rule, net, tp_n, sl_n, miss, kept, net - actual_total))
             rows.append({"rule": rule, "net": net, "tp": tp_n, "sl": sl_n,
                          "miss": miss, "big_kept": kept, "vs_actual": net - actual_total})
+            pairs_by_rule[rule] = pairs
             if args.detail and diffs:
                 ds = sorted(diffs)
                 print("   mean-diff %+6.2f | worse>1 %d | better>1 %d | worst %+7.2f | best %+7.2f"
@@ -390,6 +394,13 @@ def main() -> None:
                        "trades": len(trades), "rules": rows}
             Path(args.out).write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
             print("summary written:", args.out)
+        if args.detail_json:
+            detail = {"window_days": args.days, "symbols": symbols, "interval": args.interval,
+                      "actual_net": actual_total, "trades": len(trades),
+                      "pairs": pairs_by_rule}
+            Path(args.detail_json).write_text(
+                json.dumps(detail, ensure_ascii=False, indent=1), encoding="utf-8")
+            print("per-trade diffs written:", args.detail_json)
 
 
 if __name__ == "__main__":
