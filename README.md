@@ -112,6 +112,7 @@ pa-monitor stop       # 停止（优雅关停，超时兜底强退）
 pa-monitor start --foreground   # 前台运行：实时输出、Ctrl+C 停止，排障用
 pa-monitor pnl        # 每日实现盈亏只读统计
 pa-monitor pnl --days 30 --csv pnl.csv   # 自定义天数 / 导出 CSV
+pa-monitor doctor     # AI 凭据/网关只读自检（起服时也会自动跑一次，失败只告警不拦启动）
 ```
 
 后台进程的 stdout/stderr 追加写入 `logs/monitor.out`（启动失败时其新增输出会直接回显到终端）；结构化日志仍在 `logs/pa_agent.log`。`python run.py --monitor` 与 `pa-monitor start` 等价，同样默认后台。

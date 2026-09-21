@@ -366,6 +366,14 @@ def run_monitor() -> int:
     if not enabled_targets and not settings.monitoring.auto_discover.enabled:
         logger.error("monitoring.targets 中没有启用的品种，且 auto_discover 未开启。")  # noqa: RUF001
         return 2
+    # 起服前置自检: 坏 key 不会自己喊(2026-09-21 网关换 proxyKey, 401 连打 4 轮零信号)。
+    # 只告警不拦启动 —— monitor 还担着持仓保护, 拦下会连带丢止损/止盈/超时平仓。
+    from pa_agent.ai.provider_preflight import run_startup_preflight
+
+    run_startup_preflight(
+        settings,
+        notify=lambda text: _notify_monitor_owner(text, settings),
+    )
     # --- Binance 执行环境 (testnet/live) ---
     # environment 决定 REST/WS 网关、运行时状态文件与通知标签。
     # 配置冲突(双环境同开 / 实盘缺密钥)直接拒绝启动, 不留半启动进程。
@@ -738,7 +746,7 @@ def run_monitor() -> int:
 
 
 _FOREGROUND_FLAG = "--foreground"
-_USAGE = "用法: pa-monitor [start [--foreground]|stop|status|pnl]"
+_USAGE = "用法: pa-monitor [start [--foreground]|stop|status|pnl|doctor]"
 
 
 def _start_command(args: list[str]) -> int:
@@ -778,8 +786,42 @@ def main(argv: list[str] | None = None) -> int:
         return monitor_status(MONITORING_PID_PATH)
     if command == "pnl":
         return _pnl_command(args[1:])
+    if command == "doctor":
+        return _doctor_command(args[1:])
     print(_USAGE, file=sys.stderr)
     return 2
+
+
+def _notify_monitor_owner(text: str, settings: Any) -> None:
+    """Best-effort Telegram push to the monitor owner."""
+    from pa_agent.notify.telegram_notifier import send_telegram_message
+
+    send_telegram_message(text=text, settings=settings)
+
+
+def _doctor_command(args: list[str]) -> int:
+    """pa-monitor doctor — 只读自检: 网关活着 + 凭据有效 + 模型名在列。"""
+    if args:
+        print(f"未知参数: {args[0]}", file=sys.stderr)
+        print("用法: pa-monitor doctor", file=sys.stderr)
+        return 2
+    from pa_agent.ai.provider_preflight import probe_provider
+    from pa_agent.config.paths import SETTINGS_JSON_PATH
+    from pa_agent.config.settings import load_settings
+
+    try:
+        settings = load_settings(SETTINGS_JSON_PATH)
+    except Exception as exc:
+        print(f"[自检失败] 配置读取失败: {exc}", file=sys.stderr)
+        return 1
+    provider = settings.provider
+    print(f"探活目标: {provider.base_url} (model={provider.model})")
+    result = probe_provider(settings)
+    print(result.summary())
+    if not result.ok:
+        print("[提示] 修好 key 后重启 pa-monitor; 持仓保护不受影响。", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _pnl_command(args: list[str]) -> int:
