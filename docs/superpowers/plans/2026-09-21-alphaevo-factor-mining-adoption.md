@@ -1153,6 +1153,68 @@ def test_identical_group_ics_are_not_rejected_as_zero_ir():
 
 ---
 
+## Phase 1.6：剔除绝对价位字段 + 置换检验标定阈值
+
+来源：Phase 1 全量冒烟（`--limit 900`，19 因子 / 2789 次去重观测 / 11 个 symbol×timeframe 组）的实测结果暴露两个方法论问题。用户已确认两项都做。
+
+### 问题 1：`range_high` / `range_low` 不是因子
+
+它们是 **USDT 绝对价位**，不是尺度无关特征。跨期价格漂移会直接污染 IC。
+
+**实测证据**：这两个字段靠伪信号排在 19 个里的第 4 与第 5（`range_high` IC −0.0856 / IR −1.4578，`range_low` IC −0.0487 / IR −1.4688）—— 一个绝对价位不该有这么强的"预测力"。
+
+**修法**：从 `MARKET_NUMERIC_FIELDS` 直接删除这两个字段。**不要做归一化后保留** —— 归一化版本 `(close − range_low) / (range_high − range_low)` 就是已经在列表里的 `price_position`。
+
+改完 market 11 个字段、总数 17 个。
+
+### 问题 2：阈值没有依据，且"按实际分布标定"字面执行是错的
+
+现有 `min_ic_abs=0.02 / min_ir=0.30` 抄自 alphaevo 的日线截面场景，在 15m bar 上无依据。两种标定法的区别：
+
+| 做法 | 问题 |
+| --- | --- |
+| (b) 描述性：取这 17 个因子 \|IC\| 的 90 分位当阈值 | **循环论证** —— 只是把"排得高的"重命名为"通过"。阈值随样本漂移，没有回答"多高才不是噪声" |
+| (a) 置换检验：组内打乱 `forward_return`，重算 IC/IR，重复 R 次，得"纯噪声能刷出的 \|IC\| / \|IR\| 分布"，取分位数当阈值 | 阈值有明确含义："随机因子的表现上限"；同时给出现有因子的显著性水平 |
+
+**采用 (a)。** 注意本计划早先写的"建议按实际 IC 分布标定阈值"**表述不准确**，字面执行会落到 (b)，那是错的。
+
+### 新增接口（`tools/factor_audit.py`）
+
+- `collect_facts(frames, extractors) -> dict[str, list[BarFact]]` —— 一次性收集去重观测，供审计与置换检验复用（`audit_frames` 改为基于它实现）
+- `_group_facts(rows) -> dict[tuple[str, str], list[BarFact]]` —— 分组口径与 `ic_stats` **必须一致**（symbol × timeframe）
+- `_abs_ic_and_ir(groups) -> tuple[float, float] | None` —— 按与 `ic_stats` 完全相同的口径算 (\|IC 均值\|, \|IR\|)
+- `NullQuantiles(rounds, samples, ic_p95, ic_p99, ir_p95, ir_p99)`
+- `permutation_null(facts_by_name, *, rounds=200, seed=7) -> NullQuantiles` —— 零分布只取决于观测结构与样本量、与具体因子无关，所以各因子的置换样本**汇总**成一个零分布
+- `_quantile(values, q) -> float` —— 线性插值分位数
+- `suggest_thresholds(null, *, level="p95") -> AuditThresholds` —— 复用既有 `AuditThresholds`，只覆盖 `min_ic_abs` / `min_ir`
+
+CLI 新增 `--calibrate` / `--rounds` / `--seed`。`--calibrate` 的文本输出打到 **stderr**，避免污染 `--json` 的 stdout 主体。`--spaces` 的参数校验仍须保持在**读盘之前**。
+
+### 新增测试
+
+1. 改 `test_build_extractors_defaults_to_both_spaces` 的计数断言：19/6/13 → **17/6/11**
+2. `test_market_extractors_exclude_absolute_price_levels` —— 无 `range_high`/`range_low`，有 `price_position`
+3. `test_abs_ic_and_ir_matches_ic_stats_caliber` —— **锁住置换检验与正式审计同口径**（|IC| 与 `abs(ic_stats(...).ic_mean)` 相等，1e-6 内）
+4. `test_permutation_null_is_deterministic_for_a_seed` —— 同 seed 两次相同、换 seed 不同
+5. `test_permutation_null_on_independent_data_is_near_zero` —— 特征与收益无关时 p95 \|IC\| < 0.15
+6. `test_permutation_null_quantiles_are_ordered` —— p95 ≤ p99
+7. `test_suggest_thresholds_rejects_unknown_level`
+8. `test_quantile_interpolates`
+
+### 验收
+
+```bash
+.venv/bin/python -m pytest tests/unit/test_factor_audit.py          # 期望 >= 39 passed
+.venv/bin/python -m ruff check tools/factor_audit.py tests/unit/test_factor_audit.py
+.venv/bin/python tools/factor_audit.py --records records/pending --limit 40 --calibrate --rounds 200
+```
+
+### 仍然不做（留到 Phase 4）
+
+置换检验给出的是**样本内**显著性。它**不能**替代样本外验证：在同一批数据上既选方向又选因子，仍然是多重检验。Phase 4（walk-forward）仍是必需品。
+
+---
+
 ## Phase 2：SQLite 因子库（P1）
 
 产出：审计通过的因子成为可检索资产，失败的留档但不参与后续。
