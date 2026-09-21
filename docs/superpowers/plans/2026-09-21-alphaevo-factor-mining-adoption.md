@@ -53,7 +53,8 @@
 以下为项目级硬约束，**每个任务的要求都隐含包含本节**：
 
 - Python `>=3.11`；命令一律用 `.venv/bin/python`
-- lint：`ruff check` 与 `ruff format --check` 必须通过；`line-length = 100`，`extend-select = ["E","F","I","UP","B","SIM","RUF"]`，`E501` 忽略
+- lint：每个 Task 的 lint 步骤**一律按三步走**：`ruff check --fix <files>`（自动修可修项，含 I003/I001 import 排序与 F401 未使用 import）→ `ruff format <files>` → `ruff check <files>`（必须 0 报错）。注意 `ruff format` **不会**排序 import，所以只跑 `format` + `check` 会在 import 排序上失败。`line-length = 100`，`extend-select = ["E","F","I","UP","B","SIM","RUF"]`，`E501` 忽略。
+  - 实测坑：本仓库 ruff 把 `tools` 与 `pa_agent` 判为**不同** import 段（`tools` 视为 first-party），所以 `from pa_agent...` 与 `from tools...` 之间**必须有一个空行**；同段内则**不得**有空行。
 - 测试放 `tests/unit/`，命名 `test_*.py`；工具模块以 `from tools.<module> import ...` 导入（`tools/` 是命名空间包，无 `__init__.py`）
 - 提交信息格式固定：`<emoji> <type>(scope): 中文描述`，例：`✨ feat(tools): 加时序因子审计`
 - **只读约束**：本计划新增的工具在测试与运行中都**不得写入** `records/` 与 `trade_records/`。因子库默认落在 `~/.pa_agent/factors.db`（用户目录），避开仓库根 conftest 的进程级 fs 闸门
@@ -441,7 +442,6 @@ from dataclasses import replace
 
 import pytest
 
-from pa_agent.ai.kline_features import compute_kline_geometry_features
 from pa_agent.data.base import KlineBar, KlineFrame
 from pa_agent.data.snapshot import compute_indicators
 from tools.factor_audit import (
@@ -539,7 +539,6 @@ Expected: FAIL —— `ImportError: cannot import name 'forward_return_at'`
 
 ```python
 from collections.abc import Callable, Iterable
-from pathlib import Path
 
 from pa_agent.ai.kline_features import compute_kline_geometry_features
 from pa_agent.data.base import KlineFrame
@@ -745,6 +744,9 @@ Expected: FAIL —— `ImportError: cannot import name 'render_markdown'`
 追加到 `tools/factor_audit.py`：
 
 ```python
+from pathlib import Path
+
+
 def load_frames(paths: Iterable[Path]) -> list[KlineFrame]:
     """把落盘的分析记录读成 KlineFrame; 坏文件跳过而不是中断."""
     from pa_agent.demo.record_loader import frame_from_record_klines, try_load_analysis_record
