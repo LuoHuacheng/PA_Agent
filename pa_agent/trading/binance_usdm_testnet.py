@@ -1202,7 +1202,14 @@ def execute_market_signal(
         # open-position guard: a watcher that died between fill and protection
         # (process restart) or a partial fill is repaired here with the SL/TP
         # recorded at placement time.
-        replacement = _replace_pending_limit(active_client, symbol, config)
+        plan_entry, plan_info = _preview_limit_plan(active_client, symbol, decision)
+        replacement = _replace_pending_limit(
+            active_client,
+            symbol,
+            config,
+            entry_price=plan_entry,
+            exchange_info=plan_info,
+        )
         if replacement is not None:
             return replacement
         if not active_client.one_way_mode():
@@ -1612,7 +1619,13 @@ def _execute_limit_signal(
                 "protective orders" + trend_note
             ),
         )
-    replacement = _replace_pending_limit(client, symbol, config)
+    replacement = _replace_pending_limit(
+        client,
+        symbol,
+        config,
+        entry_price=entry_price,
+        exchange_info=exchange_info,
+    )
     if replacement is not None:
         return replacement
     cooldown_reason = _repricing_cooldown_reason(symbol, entry_price, exchange_info, config)
@@ -1686,10 +1699,39 @@ def _execute_limit_signal(
     )
 
 
+def _preview_limit_plan(
+    client: BinanceUSDMTestnetClient,
+    symbol: str,
+    decision: dict[str, Any],
+) -> tuple[Decimal | None, dict[str, Any] | None]:
+    """Entry level + exchange filters for a limit plan, else (None, None).
+
+    The pending-entry resolution runs before the order-type dispatch, so it
+    needs the proposed limit level to tell a same-band re-hang (keep the resting
+    order) from a genuine reprice (2026-09-22 BTCUSDT 00:01).
+    """
+    if str(decision.get("order_type") or "") != "限价单":
+        return None, None
+    if _STATE_STORE.pending_get(symbol) is None:
+        # 没有在场挂单就没有同带可言: 不发这次 exchangeInfo 请求, 保持原调用序。
+        return None, None
+    entry = _positive_decimal(decision.get("entry_price"))
+    if entry is None:
+        return None, None
+    try:
+        info = client.exchange_info(symbol)
+    except BinanceAPIError:
+        return entry, None
+    return _price_for_tick(entry, info), info
+
+
 def _replace_pending_limit(
     client: BinanceUSDMTestnetClient,
     symbol: str,
     config: BinanceUSDMTestnetSettings | None = None,
+    *,
+    entry_price: Decimal | None = None,
+    exchange_info: dict[str, Any] | None = None,
 ) -> ExecutionResult | None:
     """Cancel any resting limit entry for ``symbol``; protect a filled one.
 
@@ -1756,6 +1798,28 @@ def _replace_pending_limit(
         _drop_pending(symbol, old_client_id)
         return ExecutionResult("skipped", "Previously filled limit entry now protected", symbol)
     if status in ("NEW", "PARTIALLY_FILLED"):
+        # 新方案与仍在场的挂单同带时保留原单, 不撤不换: 撤掉之后紧接着的同价位
+        # 冷却检查会拒挂, 品种就落到无单状态(2026-09-22 BTCUSDT 00:01: 撤掉
+        # 84778 挂单后同轮被冷却拒挂, 01:01 前每一轮都会继续 skip)。
+        old_entry = _positive_decimal(old.get("entry"))
+        if _same_repricing_band(entry_price, old_entry, exchange_info, config):
+            logger.info(
+                f"Kept resting {active_environment().label_en} limit entry %s for %s: "
+                f"new plan entry %s is within the repricing band of %s",
+                old_client_id,
+                symbol,
+                _decimal_text(entry_price),
+                _decimal_text(old_entry),
+            )
+            return ExecutionResult(
+                "skipped",
+                (
+                    "同价位挂单仍在场，保留原单不换挂：新方案入场 "
+                    f"{_decimal_text(entry_price)} 与在挂 {_decimal_text(old_entry)} "
+                    "相差在 limit_repricing_min_ticks 跳以内"
+                ),
+                symbol,
+            )
         try:
             client.cancel_order(symbol=symbol, client_id=old_client_id)
         except BinanceAPIError as exc:
@@ -3006,6 +3070,40 @@ def _remember_canceled_entry(symbol: str, entry_price: object, reason: str) -> N
         logger.warning("Cannot persist repricing cooldown anchor for %s: %s", symbol, exc)
 
 
+def _repricing_ticks_apart(
+    left: Decimal | None,
+    right: Decimal | None,
+    exchange_info: dict[str, Any] | None,
+    config: BinanceUSDMTestnetSettings | None,
+) -> float | None:
+    """Distance between two entry prices in ticks (None when not comparable).
+
+    Single definition of the same repricing band, shared by the cooldown gate
+    and the keep-the-resting-order check so the two can never disagree.
+    """
+    if config is None or left is None or right is None or exchange_info is None:
+        return None
+    if int(config.limit_repricing_min_ticks or 0) <= 0:
+        return None
+    tick = _tick_size(exchange_info)
+    if tick is None or tick <= 0:
+        return None
+    return float(abs(left - right) / tick)
+
+
+def _same_repricing_band(
+    new_entry: Decimal | None,
+    resting_entry: Decimal | None,
+    exchange_info: dict[str, Any] | None,
+    config: BinanceUSDMTestnetSettings | None,
+) -> bool:
+    """True when a fresh plan sits inside the resting entry's cooldown band."""
+    ticks = _repricing_ticks_apart(new_entry, resting_entry, exchange_info, config)
+    if ticks is None or config is None:
+        return False
+    return ticks <= int(config.limit_repricing_min_ticks or 0)
+
+
 def _repricing_cooldown_reason(
     symbol: str,
     entry_price: Decimal,
@@ -3033,12 +3131,10 @@ def _repricing_cooldown_reason(
     age_seconds = time.time() - canceled_at
     if age_seconds >= cooldown_minutes * 60:
         return None
-    previous = _positive_decimal(record.get("entry"))
-    tick = _tick_size(exchange_info)
-    if previous is None or tick is None:
-        return None
-    ticks_apart = abs(entry_price - previous) / tick
-    if ticks_apart > max_ticks:
+    ticks_apart = _repricing_ticks_apart(
+        entry_price, _positive_decimal(record.get("entry")), exchange_info, config
+    )
+    if ticks_apart is None or ticks_apart > max_ticks:
         return None
     return (
         f"同价位轮换冷却：上一笔挂单在 {max(0, int(age_seconds // 60))} 分钟前撤销，"

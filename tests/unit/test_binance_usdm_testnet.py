@@ -3836,6 +3836,65 @@ def test_repricing_cooldown_can_be_disabled(monkeypatch) -> None:
     assert result.status == "pending", result.reason
 
 
+def _resting_pending(symbol: str, client_id: str, entry: str) -> None:
+    binance_usdm_testnet._STATE_STORE.pending_put(
+        symbol,
+        {
+            "client_id": client_id,
+            "signal_id": "sig-resting",
+            "side": "BUY",
+            "quantity": "0.001",
+            "stop": "90",
+            "target": "120",
+            "entry": entry,
+            "placed_at": time.time(),
+        },
+    )
+
+
+def test_same_level_replace_keeps_the_resting_entry(monkeypatch) -> None:
+    """同价位轮换不许先撤后拒: 新方案落在在挂单的冷却带内时保留原单。
+
+    2026-09-22 BTCUSDT 00:01 现场: 撤掉 84778 挂单后同轮被同价位冷却拒挂,
+    01:01 前每一轮都继续 skip, 品种整段无单。
+    """
+    started = _stub_watcher_thread(monkeypatch)
+    client = FakeClient()
+    client_id = "pa-entry-resting1"
+    client.limit_orders[client_id] = {"status": "NEW"}
+    _resting_pending("BTCUSDT", client_id, "95")
+
+    result = execute_market_signal(
+        _limit_decision(95), _settings(), analysis_symbol="BTCUSDT", client=client
+    )
+
+    assert result.status == "skipped", result.reason
+    assert "保留原单" in result.reason, result.reason
+    assert ("cancel_limit", client_id) not in client.calls, "同带内不得撤单"
+    assert [call[0] for call in client.calls].count("limit_entry") == 0
+    record = binance_usdm_testnet._STATE_STORE.pending_get("BTCUSDT")
+    assert record is not None and record["client_id"] == client_id
+    assert started == [], "保留原单时不该再起一个 watcher"
+
+
+def test_far_entry_still_replaces_the_resting_order(monkeypatch) -> None:
+    """入场价离得远时照旧换挂: 保留原单只覆盖同带场景。"""
+    started = _stub_watcher_thread(monkeypatch)
+    client = FakeClient()
+    client_id = "pa-entry-resting2"
+    client.limit_orders[client_id] = {"status": "NEW"}
+    _resting_pending("BTCUSDT", client_id, "90")
+
+    result = execute_market_signal(
+        _limit_decision(95), _settings(), analysis_symbol="BTCUSDT", client=client
+    )
+
+    assert result.status == "pending", result.reason
+    assert ("cancel_limit", client_id) in client.calls
+    assert [call[0] for call in client.calls].count("limit_entry") == 1
+    assert started, "换挂成功后要起新的成交 watcher"
+
+
 def test_timed_out_cancel_remembers_entry_for_the_cooldown(tmp_path) -> None:
     client = FakeClient()
     client.limit_orders["pa-entry-timeout"] = {"status": "NEW"}
