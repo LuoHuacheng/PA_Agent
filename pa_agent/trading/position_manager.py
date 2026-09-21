@@ -832,6 +832,19 @@ def _tp_runner_loop(
         if (side == "BUY" and amount < 0) or (side == "SELL" and amount > 0):
             return  # not our position anymore
         if amount == 0:
+            if not _rest_confirms_flat(client, symbol):
+                # 共享快照在开仓瞬间可能仍是成交前的空仓, 直接撤单会毁掉刚挂的
+                # TP1 并丢弃记录(2026-09-21 ETHUSDT 事故)。直连 REST 未确认平仓
+                # 就继续等, 绝不基于滞后快照做不可逆动作。
+                budget.reset()
+                logger.info(
+                    "TP runner: %s flat read not confirmed by direct REST; "
+                    "keeping partial TP1 %s",
+                    symbol,
+                    tp_algo_id,
+                )
+                time.sleep(poll_seconds)
+                continue
             # 仓位已清: 撤掉可能残留的 TP1 部分单后移除记录。
             try:
                 client.cancel_algo_order(client_algo_id=tp_algo_id)
@@ -1323,6 +1336,16 @@ def _timestop_loop(
                 _positive_decimal(fresh.get("partial_qty")) is not None
                 and not bool(fresh.get("partial_done"))
             )
+            if amount == 0 and not _rest_confirms_flat(client, symbol):
+                # 快照滞后会被误读成"仓位已平", 时间止损线程随即退出并丢弃记录,
+                # 让活仓失去超时保护; 直连复核不符就继续等。
+                logger.info(
+                    "Time-stop: %s flat read not confirmed by direct REST; "
+                    "waiting before treating the position as gone",
+                    symbol,
+                )
+                time.sleep(poll_seconds)
+                continue
             if amount != 0:
                 if (side == "BUY" and amount < 0) or (side == "SELL" and amount > 0):
                     return  # not our position anymore
@@ -1750,6 +1773,26 @@ _UNMOVED_STOP_VERIFY_TICKS = 6
 _TIMESTOP_ADOPT_WAIT_POLLS = 2
 
 
+def _rest_confirms_flat(client: BinanceUSDMTestnetClient, symbol: str) -> bool:
+    """Direct-REST confirmation that the exchange truly holds no position.
+
+    ``current_position`` trusts the shared account snapshot whenever it counts
+    as "ready", and that snapshot may be up to ``max(45s, 1.2 x poll period)``
+    old (300s while the user-data stream is healthy). Right after an entry fills
+    it still predates the fill and reads flat, so every irreversible cleanup
+    (cancel a protective leg, drop the guard record, treat the position as gone)
+    re-reads the exchange first. Read failures answer "not flat" so a transient
+    error never triggers cleanup (2026-09-21 ETHUSDT: a fresh-looking snapshot
+    made the TP runner cancel TP1 and the watchdog drop the record on a live
+    0.164 position).
+    """
+    try:
+        amount = client.position_info(symbol).get("amount")
+    except BinanceAPIError:
+        return False
+    return isinstance(amount, Decimal) and amount == 0
+
+
 def _position_is_flat(client: BinanceUSDMTestnetClient, symbol: str) -> bool:
     """交易所是否确认该品种已无持仓 (读取失败一律按"未确认"处理).
 
@@ -1828,6 +1871,17 @@ def _stop_watchdog_loop(
         if (side == "BUY" and amount < 0) or (side == "SELL" and amount > 0):
             return  # not our position anymore
         if amount == 0:
+            if not _rest_confirms_flat(client, symbol):
+                # 同 TP runner: 开仓瞬间的共享快照是成交前的空仓, 不能据此撤单
+                # 删记录(2026-09-21 ETHUSDT 事故)。
+                budget.reset()
+                logger.info(
+                    "Stop watchdog: %s flat read not confirmed by direct REST; "
+                    "keeping guard record",
+                    symbol,
+                )
+                time.sleep(poll_seconds)
+                continue
             # 仓位已平: 撤残留部分单/TP2 单后移除记录(撤单幂等, -2011 视为已清).
             tp_algo_id = str(record.get("tp_algo_id") or "")
             if tp_algo_id:
@@ -2028,6 +2082,22 @@ def _parse_record_time(value: object) -> float | None:
     return None
 
 
+#: 价格同一性容差: 交易所 entryPrice 是浮点字符串(2026-09-21 ETHUSDT 实际返回
+#: "2678.7000000000003"), 与计划 CSV 的 "2678.7" 精确相等会静默失配, 收养仓因此
+#: 拿不到止盈腿。1e-9 相对容差远小于任何 tick, 只吸收浮点噪声。
+_PRICE_MATCH_REL_TOLERANCE = Decimal("1e-9")
+
+
+def _prices_match(left: Decimal, right: Decimal) -> bool:
+    """True when two prices denote the same level despite float noise."""
+    if left == right:
+        return True
+    scale = max(abs(left), abs(right))
+    if scale == 0:
+        return False
+    return abs(left - right) <= scale * _PRICE_MATCH_REL_TOLERANCE
+
+
 def _recover_plan(
     symbol: str, side: str, entry: Decimal | None
 ) -> dict[str, Any] | None:
@@ -2054,7 +2124,7 @@ def _recover_plan(
                 if str(row.get("order_direction") or "").strip() != wanted:
                     continue
                 plan_entry = _positive_decimal(row.get("entry_price"))
-                if plan_entry is None or plan_entry != entry:
+                if plan_entry is None or not _prices_match(plan_entry, entry):
                     continue
                 stamp = _parse_record_time(row.get("record_time"))
                 if stamp is not None and stamp < cutoff:
