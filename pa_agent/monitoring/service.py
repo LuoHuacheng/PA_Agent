@@ -21,6 +21,7 @@ from typing import Any
 from pa_agent.config.settings import MonitorTarget, Settings
 from pa_agent.data.base import DataSource
 from pa_agent.data.snapshot import INDICATOR_WARMUP_BARS, build_analysis_frame
+from pa_agent.monitoring.ai_failure_alert import AnalysisFailureAlerter
 from pa_agent.records.analysis_history import count_new_bars_since_record
 
 logger = logging.getLogger(__name__)
@@ -193,6 +194,8 @@ class MultiSymbolMonitor:
         self._analyze = analyze or self._analyze_and_notify
         self._on_result = on_result
         self._on_status = on_status
+        #: 连续 AI 失败（密钥/网络）告警：信号静默停摆时自己冒头。
+        self._ai_failure_alerter = AnalysisFailureAlerter(self._send_ai_failure_alert)
         self._states: dict[tuple[str, str], _TargetState] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -445,6 +448,12 @@ class MultiSymbolMonitor:
         except Exception:  # announcements are best-effort
             logger.exception("Rate-limit transition announcement failed")
         return paused
+
+    def _send_ai_failure_alert(self, text: str) -> None:
+        """Push one analysis-outage notice (best-effort)."""
+        from pa_agent.notify.telegram_notifier import send_telegram_message
+
+        send_telegram_message(text=text, settings=self._settings)
 
     def _announce_rate_limit_change(self, verb: str, detail: str) -> None:
         """Push one Telegram notice per pause/resume edge (best-effort)."""
@@ -712,6 +721,8 @@ class MultiSymbolMonitor:
             light_skip_judge=light_judge,
             htf_block=htf_block,
         )
+        # 静默停摆自己冒头：网络/密钥类失败累计到阈值才告警，正常跑完即清零。
+        self._ai_failure_alerter.note_record(record)
         if record_sink is not None and record is not None:
             record_sink.previous_record = record
         self._evaluate_structure_exit(frame, record)
