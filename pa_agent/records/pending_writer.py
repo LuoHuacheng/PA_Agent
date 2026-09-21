@@ -27,13 +27,26 @@ def _ms_to_local_datetime(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone()
 
 
+def build_record_basename(meta) -> str:
+    """Build the filename stem (without extension) for a record's meta.
+
+    Format: {YYYY-MM-DD_HH-MM-SS}_{symbol}_{timeframe}.
+
+    The minute field MUST stay %M. An earlier revision used %m (the month),
+    so the name carried no minute: two rounds inside the same hour whose meta
+    timestamps shared a second produced byte-identical paths and the later
+    save silently overwrote the earlier record file. On 2026-09-20/21 that
+    cost BTCUSDT/ETHUSDT/SOLUSDT 15 of 145 completed rounds, because the
+    first poll wave always starts on the same second.
+    """
+    dt = _ms_to_local_datetime(meta.timestamp_local_ms)
+    ts_str = dt.strftime("%Y-%m-%d_%H-%M-%S")
+    return f"{ts_str}_{meta.symbol}_{meta.timeframe}"
+
+
 def _build_basename(record: AnalysisRecord) -> str:
     """Build the filename stem (without extension) for a record."""
-    dt = _ms_to_local_datetime(record.meta.timestamp_local_ms)
-    ts_str = dt.strftime("%Y-%m-%d_%H-%m-%S")
-    symbol = record.meta.symbol
-    timeframe = record.meta.timeframe
-    return f"{ts_str}_{symbol}_{timeframe}"
+    return build_record_basename(record.meta)
 
 
 class PendingWriter:
