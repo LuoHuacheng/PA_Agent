@@ -435,5 +435,38 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if any(s.passed for s in stats) else 1
 
 
+#: SimpleMarketFeatures 里可作因子输入的数值字段
+MARKET_NUMERIC_FIELDS = (
+    "range_high",
+    "range_low",
+    "range_width_atr",
+    "price_position",
+    "dist_to_high_atr",
+    "dist_to_low_atr",
+    "overlap_mean_10",
+    "doji_inside_ratio_10",
+    "barbwire_score",
+    "pullback_depth_atr",
+    "pullback_bars",
+    "invalidation_long",
+    "invalidation_short",
+)
+
+
+def market_extractors(*, lookback: int = 40) -> dict[str, Extractor]:
+    """把结构特征的数值字段映射成抽取函数."""
+    from pa_agent.ai.market_features import compute_simple_market_features
+
+    def make(field: str) -> Extractor:
+        def extractor(frame: KlineFrame) -> float | None:
+            features = compute_simple_market_features(frame, lookback=lookback)
+            value = getattr(features, field)
+            return None if value is None else float(value)
+
+        return extractor
+
+    return {f"market.{field}": make(field) for field in MARKET_NUMERIC_FIELDS}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

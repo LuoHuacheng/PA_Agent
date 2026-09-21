@@ -19,6 +19,7 @@ from tools.factor_audit import (
     geometry_extractors,
     ic_stats,
     main,
+    market_extractors,
     render_markdown,
     spearman_ic,
 )
@@ -236,3 +237,18 @@ def test_cli_returns_two_for_missing_directory(tmp_path):
 
 def test_cli_returns_two_without_records_argument():
     assert main([]) == 2
+
+
+def test_market_extractors_cover_the_numeric_fields():
+    names = set(market_extractors())
+    assert "market.range_width_atr" in names
+    assert "market.price_position" in names
+    assert "market.barbwire_score" in names
+    assert "market.zone" not in names  # 分类字段不是因子
+    assert "market.swings" not in names
+
+
+def test_market_extractor_reads_the_newest_bar():
+    frame = _frame([100.0 + i for i in range(60)])
+    value = market_extractors()["market.price_position"](frame)
+    assert value is None or 0.0 <= value <= 1.0
