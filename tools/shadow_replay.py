@@ -25,7 +25,7 @@
 用法
 ----
     python tools/shadow_replay.py --replay --days 45
-    python tools/shadow_replay.py --calibrate -v
+    python tools/shadow_replay.py --calibrate --verbose
     python tools/shadow_replay.py --replay --days 45 --csv logs/shadow_rows.csv
 """
 from __future__ import annotations
@@ -932,8 +932,117 @@ def run_replay(args):
     return 0
 
 
+#: 校准报告里的分组低于这个样本量就不单独展开(小样本均值全是噪声).
+MIN_CALIB_GROUP_N = 10
+
+
+@dataclass
+class CalibrationSample:
+    """一笔真实成交与同一计划单模拟结果的配对."""
+
+    symbol: str
+    timeframe: str
+    close_reason: str
+    sim_reason: str
+    sim_filled: bool
+    real_net: float
+    real_risk: float
+    sim_net: float
+    sim_risk: float
+
+    @property
+    def real_r(self) -> float:
+        """真实盈亏折算成风险倍数(R)."""
+        return self.real_net / self.real_risk
+
+    @property
+    def sim_r(self) -> float:
+        """模拟盈亏折算成风险倍数(R)."""
+        return self.sim_net / self.sim_risk
+
+
+@dataclass
+class CalibrationGroup:
+    """一组配对样本的均值汇总, 同时给 USDT 与 R 两个口径."""
+
+    label: str
+    n: int
+    real_net: float
+    sim_net: float
+    real_r: float
+    sim_r: float
+
+    @property
+    def u_diff(self) -> float:
+        return self.sim_net - self.real_net
+
+    @property
+    def r_diff(self) -> float:
+        return self.sim_r - self.real_r
+
+
+@dataclass
+class CalibrationReport:
+    """校准报告: 头部三组固定, 其余按维度展开."""
+
+    groups: list[CalibrationGroup]
+    omitted: int
+    filled: int
+    total: int
+    min_n: int
+
+
+def calibration_group(label, samples) -> CalibrationGroup:
+    """把一组配对样本压成一行汇总; 空组直接报错, 免得返回 0 冒充有结论."""
+    n = len(samples)
+    if n == 0:
+        raise ValueError("空样本组不能汇总")
+    return CalibrationGroup(
+        label=label,
+        n=n,
+        real_net=sum(s.real_net for s in samples) / n,
+        sim_net=sum(s.sim_net for s in samples) / n,
+        real_r=sum(s.real_r for s in samples) / n,
+        sim_r=sum(s.sim_r for s in samples) / n,
+    )
+
+
+def calibration_report(samples, *, min_n=MIN_CALIB_GROUP_N) -> CalibrationReport:
+    """拆分配对样本, 产出可打印的校准报告."""
+    if not samples:
+        return CalibrationReport([], 0, 0, 0, min_n)
+    groups = [calibration_group("全部", samples)]
+    filled = [s for s in samples if s.sim_filled]
+    unfilled = [s for s in samples if not s.sim_filled]
+    if filled:
+        groups.append(calibration_group("模拟判定成交", filled))
+    if unfilled:
+        groups.append(calibration_group("模拟判定未成交", unfilled))
+    omitted = 0
+    dimensions = (
+        ("平仓", lambda s: s.close_reason or "<空>"),
+        ("周期", lambda s: s.timeframe or "<空>"),
+        ("品种", lambda s: s.symbol or "<空>"),
+    )
+    for prefix, key in dimensions:
+        buckets = defaultdict(list)
+        for sample in samples:
+            buckets[key(sample)].append(sample)
+        for name in sorted(buckets):
+            if len(buckets[name]) >= min_n:
+                groups.append(calibration_group(prefix + ":" + str(name), buckets[name]))
+            else:
+                omitted += 1
+    return CalibrationReport(groups, omitted, len(filled), len(samples), min_n)
+
+
 def run_calibrate(args):
-    """在真实成交上跑同一套模拟, 量化模拟与真实的偏差."""
+    """在真实成交上跑同一套模拟, 量化模拟与真实的偏差.
+
+    偏差必须用 R 口径判读: 真实单的 risk_usdt 跨度极大(0.01 - 37.48), 直接比 USDT
+    会把仓位差异当成模型差异. 另外必须拆开 "模拟判定成交" 与 "模拟判定未成交"
+    两组: 后者是模拟漏算的真实成交, 它们的真实盈亏决定了偏差方向.
+    """
     if not OUTCOMES_CSV.exists():
         print("缺少", OUTCOMES_CSV)
         return 0
@@ -941,11 +1050,15 @@ def run_calibrate(args):
     by_file = {os.path.basename(p.path): p for p in plans}
     timelines = merge_timelines(plans)
     fee_rate = fee_rate_from_outcomes(OUTCOMES_CSV)
-    print("真实成交口径手续费率: %.5f" % fee_rate)
+    print(f"真实成交口径手续费率: {fee_rate:.5f}")
 
-    diffs, fills, reasons = [], 0, Counter()
+    samples = []
+    reasons = Counter()
     if args.verbose:
-        print("%-10s %-22s %10s %10s %10s" % ("symbol", "真实/模拟结局", "真实净U", "模拟净U", "差"))
+        print(
+            f"{'symbol':<10} {'真实/模拟结局':<24} "
+            f"{'真实净U':>10} {'模拟净U':>10} {'差':>10}"
+        )
     with open(OUTCOMES_CSV, encoding="utf-8-sig", newline="") as fh:
         for row in csv.DictReader(fh):
             name = os.path.basename(row.get("record_file") or "")
@@ -960,25 +1073,49 @@ def run_calibrate(args):
                 min_stop_pct=args.min_stop_pct, min_stop_atr=args.min_stop_atr)
             try:
                 real_net = float(row["net_usdt"])
+                real_risk = float(row["risk_usdt"])
             except (KeyError, TypeError, ValueError):
                 continue
-            fills += 1 if out.filled else 0
-            reasons[str(row.get("close_reason")) + "/" + out.reason] += 1
-            diffs.append(out.net - real_net)
+            if real_risk <= 0:
+                continue
+            close_reason = str(row.get("close_reason") or "")
+            label = close_reason + "/" + out.reason
+            reasons[label] += 1
+            samples.append(CalibrationSample(
+                symbol=plan.symbol, timeframe=plan.timeframe,
+                close_reason=close_reason, sim_reason=out.reason,
+                sim_filled=out.filled, real_net=real_net, real_risk=real_risk,
+                sim_net=out.net, sim_risk=args.risk_usdt))
             if args.verbose:
-                print("%-10s %-22s %10.2f %10.2f %+10.2f" % (
-                    row.get("symbol"), str(row.get("close_reason")) + "/" + out.reason,
-                    real_net, out.net, out.net - real_net))
-    if not diffs:
+                print(
+                    f"{row.get('symbol')!s:<10} {label:<24} "
+                    f"{real_net:>10.2f} {out.net:>10.2f} {out.net - real_net:>+10.2f}"
+                )
+    if not samples:
         print("没有可配对的真实成交(record_file 缺失或不在 pending 中)")
         return 0
-    diffs.sort()
-    n = len(diffs)
-    worst = diffs[-1] if abs(diffs[-1]) > abs(diffs[0]) else diffs[0]
+
+    report = calibration_report(samples)
+    fill_pct = 100 * report.filled / report.total
     print()
-    print("配对 %d 笔, 模拟判定成交 %d 笔" % (n, fills))
-    print("模拟净 - 真实净:  中位 %+.3fU   均值 %+.3fU   最大偏差 %+.3fU" % (
-        diffs[n // 2], sum(diffs) / n, worst))
+    print(
+        f"配对 {report.total} 笔, 模拟判定成交 {report.filled} 笔 "
+        f"({fill_pct:.0f}%), 漏判 {report.total - report.filled} 笔"
+    )
+    print()
+    print(
+        f"{'分组':<24} {'n':>4} {'真实U':>9} {'模拟U':>9} {'U差':>8} "
+        f"{'真实R':>9} {'模拟R':>9} {'R差':>8}"
+    )
+    for group in report.groups:
+        print(
+            f"{group.label:<24} {group.n:>4d} {group.real_net:>9.2f} {group.sim_net:>9.2f} "
+            f"{group.u_diff:>+8.2f} {group.real_r:>9.3f} {group.sim_r:>9.3f} "
+            f"{group.r_diff:>+8.3f}"
+        )
+    if report.omitted:
+        print(f"({report.omitted} 个分组样本不足 {report.min_n} 笔, 未展开)")
+    print()
     print("结局对照 (真实/模拟):", dict(reasons.most_common(8)))
     return 0
 
