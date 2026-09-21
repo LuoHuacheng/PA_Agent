@@ -15,6 +15,7 @@ from tools.factor_audit import (
     BarFact,
     FactorStats,
     NullQuantiles,
+    RepresentativeReport,
     _abs_ic_and_ir,
     _group_facts,
     _quantile,
@@ -22,6 +23,7 @@ from tools.factor_audit import (
     bar_facts_for,
     build_extractors,
     dedupe_facts,
+    factor_correlation_matrix,
     forward_return_at,
     geometry_extractors,
     ic_stats,
@@ -29,6 +31,7 @@ from tools.factor_audit import (
     market_extractors,
     permutation_null,
     render_markdown,
+    select_representatives,
     spearman_ic,
     suggest_thresholds,
 )
@@ -418,3 +421,143 @@ def test_quantile_interpolates():
     assert _quantile([0.0, 1.0], 0.5) == 0.5
     assert _quantile([], 0.9) == 0.0
     assert _quantile([2.0], 0.9) == 2.0
+
+
+def _ranked_rows(symbol: str, values: list[float]) -> list[BarFact]:
+    """factor 按给定序列, forward 用单调递增序列(与 factor 值本身无关)."""
+    return [
+        _fact(symbol, BASE_TS + i * DAY_MS, float(value), float(i))
+        for i, value in enumerate(values)
+    ]
+
+
+def test_correlation_matrix_is_symmetric_with_unit_diagonal():
+    facts = {
+        "a": _ranked_rows("BTCUSDT", [float(i) for i in range(40)]),
+        "b": _ranked_rows("BTCUSDT", [float(40 - i) for i in range(40)]),
+        "c": _ranked_rows("BTCUSDT", [float((i * 7) % 40) for i in range(40)]),
+    }
+    corr = factor_correlation_matrix(facts)
+    # 只出现有序对(名字升序) + 对角线, 不会同时有 (a, b) 与 (b, a)
+    assert set(corr) == {
+        ("a", "a"),
+        ("b", "b"),
+        ("c", "c"),
+        ("a", "b"),
+        ("a", "c"),
+        ("b", "c"),
+    }
+    assert corr[("a", "a")] == 1.0
+    assert corr[("b", "b")] == 1.0
+    assert corr[("c", "c")] == 1.0
+    assert corr[("a", "b")] == pytest.approx(-1.0)
+    assert corr[("a", "c")] is not None
+    assert corr[("b", "c")] is not None
+    assert ("b", "a") not in corr
+
+    def lookup(left: str, right: str) -> float | None:
+        return corr[(left, right)] if (left, right) in corr else corr[(right, left)]
+
+    assert lookup("b", "a") == lookup("a", "b")
+    assert lookup("c", "a") == lookup("a", "c")
+    assert lookup("c", "b") == lookup("b", "c")
+
+
+def test_correlation_matrix_marks_thin_overlap_as_none():
+    thin = [_fact("BTCUSDT", BASE_TS + i * DAY_MS, float(i), float(i)) for i in range(5)]
+    wide_a = _ranked_rows("ETHUSDT", [float(i) for i in range(40)])
+    wide_b = _ranked_rows("ETHUSDT", [float(i * 3) for i in range(40)])
+    corr = factor_correlation_matrix(
+        {"thin_a": thin, "thin_b": thin, "wide_a": wide_a, "wide_b": wide_b}
+    )
+    assert corr[("thin_a", "thin_b")] is None  # 公共观测 5 < min_common=30
+    assert corr[("wide_a", "wide_b")] is not None
+
+
+def test_select_representatives_drops_identical_twins():
+    rows = _ranked_rows("BTCUSDT", [float(i) for i in range(40)])
+    corr = factor_correlation_matrix({"twin_a": rows, "twin_b": rows})
+    assert corr[("twin_a", "twin_b")] == pytest.approx(1.0)
+    report = select_representatives(corr, ic_by_name={"twin_a": 0.05, "twin_b": 0.09})
+    assert isinstance(report, RepresentativeReport)
+    assert report.kept == ("twin_b",)  # |IC| 大的留下
+    assert report.redundant == (("twin_a", "twin_b"),)
+
+
+def test_select_representatives_keeps_uncorrelated_factors():
+    corr = {
+        ("a", "a"): 1.0,
+        ("b", "b"): 1.0,
+        ("c", "c"): 1.0,
+        ("a", "b"): 0.1,
+        ("a", "c"): -0.2,
+        ("b", "c"): None,  # 公共观测不足 -> 视为不相关, 直接保留
+    }
+    report = select_representatives(corr, ic_by_name={"a": 0.05, "b": 0.04, "c": 0.03})
+    assert report.kept == ("a", "b", "c")
+    assert report.redundant == ()
+
+
+def test_select_representatives_is_deterministic():
+    corr = {("a", "a"): 1.0, ("b", "b"): 1.0, ("a", "b"): 0.9}
+    report = select_representatives(corr, ic_by_name={"a": 0.05, "b": 0.05})
+    # |IC| 相同 -> 按名字升序, a 先保留, b 因 |corr| 0.9 >= 0.7 判为冗余
+    assert report.kept == ("a",)
+    assert report.redundant == (("b", "a"),)
+    # 字典传入顺序不影响结论
+    assert select_representatives(corr, ic_by_name={"b": 0.05, "a": 0.05}) == report
+
+
+def _family_facts(n_factors: int, *, seed: int, size: int = 60) -> dict[str, list[BarFact]]:
+    """n_factors 个互不相同的因子, 共享同一批 bar 的前向收益(与真实数据语义一致).
+
+    真实场景里同一根 bar 的 forward_return 与用哪个因子评估无关; 若各因子在同一根
+    bar 上给出不同的收益, 族级构造(共享一份打乱收益)会失真。
+    """
+    rng = random.Random(seed)
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+    forward = {(symbol, i): rng.uniform(-0.01, 0.01) for symbol in symbols for i in range(size)}
+    facts: dict[str, list[BarFact]] = {}
+    for k in range(n_factors):
+        rows: list[BarFact] = []
+        for symbol in symbols:
+            values = [rng.uniform(-1.0, 1.0) for _ in range(size)]
+            rows.extend(
+                BarFact(
+                    symbol=symbol,
+                    ts_ms=BASE_TS + i * DAY_MS,
+                    factor=values[i],
+                    forward_return=forward[(symbol, i)],
+                )
+                for i in range(size)
+            )
+        facts[f"f{k}"] = rows
+    return facts
+
+
+def test_family_wise_null_is_at_least_single_factor_null():
+    facts = _family_facts(10, seed=23)
+    single = permutation_null(facts, rounds=200, seed=7)
+    family = permutation_null(facts, rounds=200, seed=7, family_wise=True)
+    # 族级每轮只产出一条样本(当轮 max), 单因子模式产出 因子 x 轮次
+    assert family.samples == 200
+    assert single.samples == 10 * 200
+    # max over N >= 单个 —— 这是族级构造正确性的判据
+    assert family.ic_p95 >= single.ic_p95
+    assert family.ir_p95 >= single.ir_p95
+
+
+def test_family_wise_null_is_deterministic_for_a_seed():
+    facts = _noisy_facts()
+    same = permutation_null(facts, rounds=30, seed=11, family_wise=True)
+    assert same == permutation_null(facts, rounds=30, seed=11, family_wise=True)
+    assert same != permutation_null(facts, rounds=30, seed=12, family_wise=True)
+
+
+def test_permutation_null_default_stays_single_factor():
+    facts = _noisy_facts()
+    default = permutation_null(facts, rounds=20, seed=7)
+    explicit = permutation_null(facts, rounds=20, seed=7, family_wise=False)
+    assert default == explicit
+    assert default.samples == 4 * 20  # 4 个因子 x 20 轮
+    assert permutation_null(facts, rounds=20, seed=7, family_wise=True).samples == 20

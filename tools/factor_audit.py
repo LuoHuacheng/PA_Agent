@@ -400,17 +400,100 @@ class NullQuantiles:
     ir_p99: float
 
 
+def _family_wise_samples(
+    facts_by_name: dict[str, list[BarFact]],
+    *,
+    rounds: int,
+    seed: int,
+) -> tuple[list[float], list[float]]:
+    """族级置换: 每轮只打乱一次, 同一份打乱收益评估全部因子, 取当轮 max|IC| / max|IR|.
+
+    这样得到的是"N 个因子里最高的那个能刷多高"的零分布, 即 FWER 控制下的阈值;
+    因子间的相关性会自动反映在 max 分布里, 不需要额外做 Bonferroni / BH。
+    """
+    rng = random.Random(seed)
+
+    # 每根 bar 的前向收益与因子无关, 用全部因子的并集建立网格
+    return_by_key: dict[tuple[str, str, int], float] = {}
+    for rows in facts_by_name.values():
+        for row in rows:
+            return_by_key.setdefault((row.symbol, row.timeframe, row.ts_ms), row.forward_return)
+
+    keys_by_group: dict[tuple[str, str], list[tuple[str, str, int]]] = {}
+    for key in return_by_key:
+        keys_by_group.setdefault((key[0], key[1]), []).append(key)
+
+    # 每个因子用 key 索引自己的观测
+    index_by_name: dict[str, dict[tuple[str, str, int], BarFact]] = {
+        name: {(r.symbol, r.timeframe, r.ts_ms): r for r in rows}
+        for name, rows in facts_by_name.items()
+    }
+
+    ic_samples: list[float] = []
+    ir_samples: list[float] = []
+    for _ in range(rounds):
+        shuffled: dict[tuple[str, str, int], float] = {}
+        for keys in keys_by_group.values():
+            values = [return_by_key[key] for key in keys]
+            rng.shuffle(values)
+            for key, value in zip(keys, values, strict=True):
+                shuffled[key] = value
+
+        round_ic: list[float] = []
+        round_ir: list[float] = []
+        for index in index_by_name.values():
+            grouped: dict[tuple[str, str], list[tuple[float, float]]] = {}
+            for key, row in index.items():
+                # 该因子缺这根 bar 的观测时跳过, 但仍用**共享的**打乱收益
+                if key in shuffled:
+                    grouped.setdefault((row.symbol, row.timeframe), []).append(
+                        (row.factor, shuffled[key])
+                    )
+            per_group_ic: list[float] = []
+            for pairs in grouped.values():
+                ic = spearman_ic([p[0] for p in pairs], [p[1] for p in pairs])
+                if ic is not None:
+                    per_group_ic.append(ic)
+            if len(per_group_ic) < 2:
+                continue
+            mean_ic = _mean(per_group_ic)
+            std_ic = _stdev(per_group_ic)
+            round_ic.append(abs(mean_ic))
+            round_ir.append(abs(mean_ic / std_ic) if std_ic > RANK_EPSILON else 0.0)
+
+        if round_ic:
+            ic_samples.append(max(round_ic))
+            ir_samples.append(max(round_ir))
+
+    return ic_samples, ir_samples
+
+
 def permutation_null(
     facts_by_name: dict[str, list[BarFact]],
     *,
     rounds: int = 200,
     seed: int = 7,
+    family_wise: bool = False,
 ) -> NullQuantiles:
     """组内打乱前向收益, 估计"纯噪声"能刷出的 |IC| 与 |IR| 分布.
 
-    每个因子每轮都产出样本, 最后汇总成一个零分布 —— 零分布只取决于观测结构与
-    样本量, 与具体因子无关, 所以汇总样本量更大、估计更稳。
+    默认(family_wise=False)是**单因子**口径: 每个因子各自打乱, 样本汇总成一个零分布
+    —— 零分布只取决于观测结构与样本量, 与具体因子无关, 所以汇总样本量更大、估计更稳。
+
+    family_wise=True 走**族级**口径(每轮只打乱一次, 取当轮 max|IC| / max|IR|),
+    回答的是"N 个因子里最高的那个能刷多高", 即 FWER 控制下的阈值。两种口径的
+    samples 含义不同: 单因子模式是"因子 x 轮次", 族级模式是"轮次"。
     """
+    if family_wise:
+        ic_samples, ir_samples = _family_wise_samples(facts_by_name, rounds=rounds, seed=seed)
+        return NullQuantiles(
+            rounds=rounds,
+            samples=len(ic_samples),
+            ic_p95=_quantile(ic_samples, 0.95),
+            ic_p99=_quantile(ic_samples, 0.99),
+            ir_p95=_quantile(ir_samples, 0.95),
+            ir_p99=_quantile(ir_samples, 0.99),
+        )
     rng = random.Random(seed)
     ic_samples: list[float] = []
     ir_samples: list[float] = []
@@ -470,6 +553,85 @@ def suggest_thresholds(null: NullQuantiles, *, level: str = "p95") -> AuditThres
             f"零分布样本只有 {null.samples} 次 (< {MIN_NULL_SAMPLES}), 分位数不可信, 拒绝给出阈值"
         )
     return AuditThresholds(min_ic_abs=round(ic, 6), min_ir=round(ir, 6))
+
+
+def factor_correlation_matrix(
+    facts_by_name: dict[str, list[BarFact]],
+    *,
+    min_common: int = 30,
+) -> dict[tuple[str, str], float | None]:
+    """在公共网格 (symbol, timeframe, ts_ms) 上算两两 Spearman 相关.
+
+    只用两个因子**同时有观测**的 bar, 否则 5m/15m 与不同品种的错位观测会污染相关.
+    公共观测少于 min_common 的对记 None —— 样本太薄的相关不可信, 不参与去重判断.
+    键是**有序且唯一**的: 只出现 (a, b) 或 (b, a) 之一(按名字升序), 另加 (a, a) = 1.0 对角线。
+    """
+    index: dict[str, dict[tuple[str, str, int], float]] = {
+        name: {(r.symbol, r.timeframe, r.ts_ms): r.factor for r in rows}
+        for name, rows in facts_by_name.items()
+    }
+    names = sorted(facts_by_name)
+    corr: dict[tuple[str, str], float | None] = {}
+    for i, left in enumerate(names):
+        corr[(left, left)] = 1.0
+        for right in names[i + 1 :]:
+            common = sorted(set(index[left]) & set(index[right]))
+            if len(common) < min_common:
+                corr[(left, right)] = None
+                continue
+            corr[(left, right)] = spearman_ic(
+                [index[left][key] for key in common],
+                [index[right][key] for key in common],
+            )
+    return corr
+
+
+@dataclass(frozen=True)
+class RepresentativeReport:
+    """代表性因子筛选结论: 保留哪些, 谁与谁冗余."""
+
+    kept: tuple[str, ...]
+    redundant: tuple[tuple[str, str], ...]  # (被丢弃因子, 与之冗余的已保留因子)
+
+
+def _pair_corr(corr: dict[tuple[str, str], float | None], a: str, b: str) -> float | None:
+    """按有序对取值; 键只会出现一个方向, 但这里两个方向都认, 避免调用方踩空."""
+    if a == b:
+        return 1.0
+    if (a, b) in corr:
+        return corr[(a, b)]
+    return corr.get((b, a))
+
+
+def select_representatives(
+    corr: dict[tuple[str, str], float | None],
+    *,
+    ic_by_name: dict[str, float],
+    threshold: float = 0.7,
+) -> RepresentativeReport:
+    """按 |IC| 降序贪心挑代表性因子: 与**已保留**因子的最大 |corr| 低于阈值才保留.
+
+    相关性为 None(公共观测不足)视为不相关, 直接保留。0.7 沿用 alphaevo 的
+    max_cross_correlation 约定。同 |IC| 时按名字升序, 保证结果确定。
+    """
+    order = sorted(ic_by_name, key=lambda name: (-abs(ic_by_name[name]), name))
+    kept: list[str] = []
+    redundant: list[tuple[str, str]] = []
+    for name in order:
+        worst_abs = 0.0
+        worst_partner: str | None = None
+        for kept_name in kept:
+            value = _pair_corr(corr, name, kept_name)
+            if value is None:
+                continue
+            if abs(value) > worst_abs:
+                worst_abs = abs(value)
+                worst_partner = kept_name
+        if worst_partner is None or worst_abs < threshold:
+            kept.append(name)
+        else:
+            redundant.append((name, worst_partner))
+    return RepresentativeReport(kept=tuple(kept), redundant=tuple(redundant))
 
 
 def audit_frames(
@@ -583,6 +745,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--rounds", type=int, default=200, help="置换检验重复次数")
     parser.add_argument("--seed", type=int, default=7, help="置换检验随机种子")
+    parser.add_argument(
+        "--corr-threshold",
+        type=float,
+        default=0.7,
+        help="代表性因子筛选的 |相关性| 阈值, 超过即判为冗余(默认 0.7)",
+    )
+    parser.add_argument(
+        "--representatives",
+        action="store_true",
+        help="按 |IC| 贪心筛选代表性因子, 打印冗余分组(需先读盘)",
+    )
     args = parser.parse_args(argv)
 
     # 先把参数校验做完再读盘: 这样 --spaces 写错时立刻返回 2, 不必先扫一遍记录
@@ -607,34 +780,62 @@ def main(argv: list[str] | None = None) -> int:
         print("没有可用的分析记录", file=sys.stderr)
         return 2
 
-    if args.calibrate:
-        # 校准信息是人读文本; 与 --json 同时给时不能混进 JSON 主体, 走 stderr
+    stats = audit_frames(frames, extractors, expected_direction=args.direction)
+    observations = sum(s.n_obs for s in stats) // max(len(stats), 1)
+
+    # 校准与代表性因子都是人读文本; 与 --json 同时给时不能混进 JSON 主体, 走 stderr
+    notes: list[str] = []
+    if args.calibrate or args.representatives:
         facts_by_name = collect_facts(frames, extractors)
-        null = permutation_null(facts_by_name, rounds=args.rounds, seed=args.seed)
+    if args.calibrate:
+        single = permutation_null(facts_by_name, rounds=args.rounds, seed=args.seed)
+        family = permutation_null(
+            facts_by_name, rounds=args.rounds, seed=args.seed, family_wise=True
+        )
         max_groups = max((len(_group_facts(rows)) for rows in facts_by_name.values()), default=0)
-        lines = [
-            f"置换检验零分布 (rounds={null.rounds}, 样本 {null.samples} 次)",
-            f"  |IC|  p95 = {null.ic_p95:.5f}   p99 = {null.ic_p99:.5f}",
-            f"  |IR|  p95 = {null.ir_p95:.4f}   p99 = {null.ir_p99:.4f}",
-        ]
+        notes.extend(
+            [
+                f"置换检验零分布 (rounds={args.rounds}, 单因子样本 {single.samples} 次, "
+                f"族级样本 {family.samples} 次)",
+                f"  单因子  |IC| p95 = {single.ic_p95:.5f}  |IR| p95 = {single.ir_p95:.4f}",
+                f"  族级    |IC| p95 = {family.ic_p95:.5f}  |IR| p95 = {family.ir_p95:.4f}"
+                f"   <- {len(facts_by_name)} 个因子里最高的那个",
+            ]
+        )
         try:
-            suggested = suggest_thresholds(null, level="p95")
+            # 建议阈值必须用族级那份: "N 个里最高的那个能刷多高"才是多重检验下的门槛
+            suggested = suggest_thresholds(family, level="p95")
         except ValueError as exc:
-            lines.append(f"建议阈值: 不给出 —— {exc}")
+            notes.append(f"建议阈值: 不给出 —— {exc}")
         else:
-            lines.append(
-                f"建议阈值 (p95): min_ic_abs={suggested.min_ic_abs:.5f}  "
+            notes.append(
+                f"建议阈值 (族级 p95): min_ic_abs={suggested.min_ic_abs:.5f}  "
                 f"min_ir={suggested.min_ir:.4f}"
             )
         if max_groups < MIN_IR_GROUPS_FOR_THRESHOLD:
-            lines.append(
+            notes.append(
                 f"警告: 每个因子最多只有 {max_groups} 个有效分组, IR 门槛无统计功效, "
                 "不要采用建议的 min_ir"
             )
-        print("\n".join(lines), file=sys.stderr if args.json else sys.stdout)
-
-    stats = audit_frames(frames, extractors, expected_direction=args.direction)
-    observations = sum(s.n_obs for s in stats) // max(len(stats), 1)
+    if args.representatives:
+        ic_by_name = {s.name: s.ic_mean for s in stats}
+        report = select_representatives(
+            factor_correlation_matrix(facts_by_name),
+            ic_by_name=ic_by_name,
+            threshold=args.corr_threshold,
+        )
+        notes.append(
+            f"代表性因子: {len(report.kept)} / {len(ic_by_name)} (冗余 {len(report.redundant)})"
+        )
+        grouped: dict[str, list[str]] = {}
+        for dropped, partner in report.redundant:
+            grouped.setdefault(partner, []).append(dropped)
+        for name in report.kept:
+            partners = grouped.get(name)
+            if partners:
+                notes.append(f"  {name}  <- {', '.join(partners)}")
+    if notes:
+        print("\n".join(notes), file=sys.stderr if args.json else sys.stdout)
 
     if args.json:
         print(json.dumps([asdict(s) for s in stats], ensure_ascii=False, indent=2))
