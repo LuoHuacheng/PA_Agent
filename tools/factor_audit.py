@@ -44,6 +44,7 @@ class BarFact:
     factor: float
     forward_return: float
     history: int = 0  # 该观测可用到的历史 bar 数; 跨快照去重时用来挑最深的一条
+    timeframe: str = ""  # 周期; 去重与分组必须带上它, 否则 5m/15m 会撞同一个 ts_open
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ class FactorStats:
     monthly_win_rate: float
     passed: bool
     reasons: tuple[str, ...]
+    ir_groups: int = 0  # 参与 IR 计算的分品种组数; 0 表示 IR 未定义(与 ir=0.0 可区分)
 
 
 def _mean(values: Sequence[float]) -> float:
@@ -132,9 +134,10 @@ def ic_stats(
     sign = 1.0 if expected_direction == "positive" else -1.0
     reasons: list[str] = []
 
-    groups: dict[str, list[BarFact]] = {}
+    # 分组必须带周期: 同一 ts_open 上的 5m/15m bar 是两种不同 horizon 的观测
+    groups: dict[tuple[str, str], list[BarFact]] = {}
     for row in rows:
-        groups.setdefault(row.symbol, []).append(row)
+        groups.setdefault((row.symbol, row.timeframe), []).append(row)
 
     per_group_ic: list[float] = []
     for group_rows in groups.values():
@@ -161,11 +164,14 @@ def ic_stats(
     ic_mean = _mean(per_group_ic)
     ic_std = _stdev(per_group_ic)
     ir = ic_mean / ic_std if ic_std > RANK_EPSILON else 0.0
+    ir_groups = len(per_group_ic)
+    # std=0 时 ir 退化为 0.0: 组间 IC 完全一致是"IR 未定义", 不是"没有方向性"
+    identical_group_ics = ic_std <= RANK_EPSILON and ic_mean != 0.0
     win_rate = sum(1 for ic in monthly_ic if ic * sign > 0) / len(monthly_ic) if monthly_ic else 0.0
 
     if len(rows) < limits.min_obs:
         reasons.append(f"观测数 {len(rows)} < {limits.min_obs}")
-    if len(per_group_ic) < 2:
+    if ir_groups < 2:
         reasons.append("有效分品种 IC 少于 2 组, 无法估计 IR")
 
     directed_ic = ic_mean * sign
@@ -174,8 +180,9 @@ def ic_stats(
         reasons.append(f"IC 均值 {ic_mean:.4f} 与预期方向 {expected_direction} 相反")
     elif directed_ic < limits.min_ic_abs:
         reasons.append(f"方向性 IC {directed_ic:.4f} < {limits.min_ic_abs}")
-    # 只有 >=2 个分品种组时 IR 才有定义: 单组样本下 std 恒为 0, 判定 IR 会误报
-    if len(per_group_ic) >= 2:
+    # IR 判定需要 >=3 组才有统计功效(组数 <5 时功效本就很低, 见报告口径说明);
+    # 组间 IC 完全一致时 ir 退化为 0.0, 那是"未定义"而非"无方向性", 直接通过 IR 检查
+    if ir_groups >= 3 and not identical_group_ics:
         if directed_ir < 0:
             reasons.append(f"IR {ir:.4f} 与预期方向 {expected_direction} 相反")
         elif directed_ir < limits.min_ir:
@@ -193,6 +200,7 @@ def ic_stats(
         monthly_win_rate=round(win_rate, 6),
         passed=not reasons,
         reasons=tuple(reasons),
+        ir_groups=ir_groups,
     )
 
 
@@ -210,20 +218,24 @@ Extractor = Callable[[KlineFrame], "float | None"]
 
 
 def dedupe_facts(facts: Iterable[BarFact]) -> list[BarFact]:
-    """同一根 bar 会被多份滚动快照反复覆盖, 按 (symbol, ts_ms) 只保留历史最深的一条.
+    """同一根 bar 会被多份滚动快照反复覆盖, 按 (symbol, timeframe, ts_ms) 只保留历史最深的一条.
+
+    键必须带周期: 实测(2026-09-21)300 份记录里 797 个 (symbol, ts_open) 有 141 个(17.7%)
+    同时被 5m 与 15m 覆盖; 同一 ts_open 的两种周期是完全不同的观测(OHLC 与 horizon 都不同),
+    不带周期会静默丢掉其中一个.
 
     实测(2026-09-21, BTCUSDT 15m): 616 份记录里只有 1417 根不同的 bar, 99.4% 的 bar
     被多份记录覆盖, 单根最多出现 90 次 —— 不去重会把样本量虚增约 43 倍, 让 min_obs
     门槛与月度胜率全部失真。同一根 bar 在不同快照里能看到的**历史长度**不同(旧快照更短),
     特征值因此可能不同; 取历史最深的一条, 与生产路径(历史充足)的语义一致。
     """
-    best: dict[tuple[str, int], BarFact] = {}
+    best: dict[tuple[str, str, int], BarFact] = {}
     for fact in facts:
-        key = (fact.symbol, fact.ts_ms)
+        key = (fact.symbol, fact.timeframe, fact.ts_ms)
         current = best.get(key)
         if current is None or fact.history > current.history:
             best[key] = fact
-    return sorted(best.values(), key=lambda f: (f.symbol, f.ts_ms))
+    return sorted(best.values(), key=lambda f: (f.symbol, f.timeframe, f.ts_ms))
 
 
 def forward_return_at(frame: KlineFrame, idx: int) -> float | None:
@@ -280,6 +292,7 @@ def bar_facts_for(
                 factor=float(value),
                 forward_return=forward,
                 history=len(bars) - idx,
+                timeframe=frame.timeframe,
             )
         )
     return facts
@@ -337,14 +350,17 @@ def load_frames(paths: Iterable[Path]) -> list[KlineFrame]:
         record = try_load_analysis_record(Path(path))
         if record is None or not record.kline_data:
             continue
-        frames.append(
-            frame_from_record_klines(
-                record.kline_data,
-                symbol=record.meta.symbol,
-                timeframe=record.meta.timeframe,
-                snapshot_ts_local_ms=record.meta.timestamp_local_ms,
+        try:
+            frames.append(
+                frame_from_record_klines(
+                    record.kline_data,
+                    symbol=record.meta.symbol,
+                    timeframe=record.meta.timeframe,
+                    snapshot_ts_local_ms=record.meta.timestamp_local_ms,
+                )
             )
-        )
+        except (KeyError, ValueError, TypeError):
+            continue
     return frames
 
 
@@ -365,16 +381,18 @@ def render_markdown(
         "# 因子审计报告",
         "",
         f"- 记录源：{source}",
-        f"- 样本：{frames} 份记录 / {observations} 次观测",
+        f"- 样本：{frames} 份记录 / 每因子约 {observations} 次观测",
         f"- 结论：{len(passed)} / {len(stats)} 个因子通过准入",
+        "- 口径：分品种 IC 是**组内时序排序**，月度 IC 把当月所有品种混进同一秩池做**跨品种截面排序**，两者不是同一件事",
+        "- 口径：IR 仅在分品种组数 >= 3 时才判定(组数越少统计功效越低)；IR 分组 列即参与 IR 计算的分品种(symbol×timeframe)组数，0 表示 IR 未定义而非 IR=0",
         "",
-        "| 因子 | 观测 | 分组 | IC 均值 | IR | 月度胜率 | 结论 |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| 因子 | 观测 | 分组 | IR 分组 | IC 均值 | IR | 月度胜率 | 结论 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for item in stats:
         verdict = "通过" if item.passed else "未通过"
         lines.append(
-            f"| {item.name} | {item.n_obs} | {item.group_count} | "
+            f"| {item.name} | {item.n_obs} | {item.group_count} | {item.ir_groups} | "
             f"{_fmt(item.ic_mean)} | {_fmt(item.ir)} | "
             f"{item.monthly_win_rate:.0%} | {verdict} |"
         )
@@ -396,7 +414,12 @@ def main(argv: list[str] | None = None) -> int:
         description="时序因子审计: 算 rank IC / IR / 月度胜率(只读)",
     )
     parser.add_argument("--records", help="分析记录目录或单个 JSON 路径")
-    parser.add_argument("--limit", type=int, default=300, help="最多读入多少份记录")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=300,
+        help="最多读入多少份记录; 按路径字典序截断, 取的是时间上最早的一段, 不含最新行情",
+    )
     parser.add_argument("--direction", choices=("positive", "negative"), default="positive")
     parser.add_argument("--out", help="Markdown 报告输出路径")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出结论")

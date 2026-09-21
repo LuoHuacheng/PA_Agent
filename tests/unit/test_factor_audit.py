@@ -148,7 +148,8 @@ def test_bar_facts_exclude_the_newest_bar_and_short_history():
     assert all(fact.ts_ms != newest_ts for fact in facts)
     # 历史不足 min_history 的尾部 bar 也不该产出观测
     oldest_used_ts = int(frame.bars[-1].ts_open * 1000)
-    assert all(fact.ts_ms >= oldest_used_ts for fact in facts)
+    # 严格大于: 最旧那根 bar 自身绝不能被用作观测
+    assert min(fact.ts_ms for fact in facts) > oldest_used_ts
 
 
 def test_geometry_extractors_expose_all_numeric_fields():
@@ -188,6 +189,28 @@ def test_dedupe_keeps_the_deepest_history_for_a_repeated_bar():
     assert got[0].factor == 0.9
 
 
+def test_dedupe_does_not_merge_across_timeframes():
+    same_ts = 1000
+    m5 = BarFact("BTCUSDT", same_ts, 0.5, 0.01, history=5, timeframe="5m")
+    m15 = BarFact("BTCUSDT", same_ts, 0.9, 0.01, history=60, timeframe="15m")
+    got = dedupe_facts([m5, m15])
+    assert len(got) == 2
+    assert {f.timeframe for f in got} == {"5m", "15m"}
+
+
+def test_ic_stats_groups_by_symbol_and_timeframe():
+    rows: list[BarFact] = []
+    for timeframe in ("5m", "15m"):
+        for i in range(40):
+            fact = _fact("BTCUSDT", BASE_TS + i * DAY_MS, float(i), float(i))
+            rows.append(replace(fact, timeframe=timeframe))
+    stats = ic_stats("geometry.body_ratio", rows)
+    assert stats.group_count == 2
+    # 两个周期各自一条完整时序, 不是把 80 个观测混进一组
+    assert stats.n_obs == 80
+    assert stats.ir_groups == 2
+
+
 def test_audit_frames_dedupes_bars_shared_by_two_snapshots():
     # 两份快照覆盖同一批 bar: 去重后观测数不应翻倍
     first = _frame([100.0 + i for i in range(60)])
@@ -197,6 +220,25 @@ def test_audit_frames_dedupes_bars_shared_by_two_snapshots():
     doubled = audit_frames([first, second], extractors)[0].n_obs
     assert single > 0
     assert doubled == single
+
+
+def test_ir_not_judged_below_three_groups():
+    rows: list[BarFact] = []
+    for symbol in ("BTCUSDT", "ETHUSDT"):
+        rows.extend(_fact(symbol, BASE_TS + i * DAY_MS, float(i), float(i)) for i in range(40))
+    stats = ic_stats("x", rows)
+    assert stats.ir_groups == 2
+    assert not any("IR" in reason for reason in stats.reasons)
+
+
+def test_identical_group_ics_are_not_rejected_as_zero_ir():
+    rows: list[BarFact] = []
+    for symbol in ("BTCUSDT", "ETHUSDT", "SOLUSDT"):
+        rows.extend(_fact(symbol, BASE_TS + i * DAY_MS, float(i), float(i)) for i in range(40))
+    stats = ic_stats("x", rows)
+    assert stats.ir_groups == 3
+    assert stats.ic_std <= 1e-12
+    assert not any("IR" in reason for reason in stats.reasons)
 
 
 def test_render_markdown_lists_factors_with_verdict():
