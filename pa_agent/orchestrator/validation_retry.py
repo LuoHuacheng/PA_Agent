@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Literal
 
 from pa_agent.ai.json_validator import Ok, ValidationError, coalesce_model_json_text
+from pa_agent.ai.rate_limit import call_with_rate_limit_backoff
 from pa_agent.ai.retry_feedback import build_retry_feedback, parse_previous_for_cheat
 from pa_agent.ai.retry_policy import detect_cheat, extract_feedback_targets, should_retry
 
@@ -162,4 +164,12 @@ def validate_with_retry(
             assistant_msg,
             {"role": "user", "content": feedback},
         ]
-        current_reply = call_api(current_messages)
+        # Guard the retry request against transient rate limits so a 429 does
+        # not turn a single format error into a chain of hard failures. The
+        # client layer already backs off, but wrapping here also covers clients
+        # that raise without their own retry, and keeps the loop responsive.
+        current_reply = call_with_rate_limit_backoff(
+            partial(call_api, current_messages),
+            log=logger,
+            stage_label=f"{stage} retry",
+        )
