@@ -340,6 +340,22 @@ def main() -> None:
         client = BinanceUSDMTestnetClient(cfg.api_key, cfg.api_secret)
         print("fetching orders/trades since %s ..." % fmt_ms(fetch_start_ms))
         fetch_account_data(client, symbols, fetch_start_ms, cache)
+        fills_all = json.load(open(cache / "user_trades.json", encoding="utf-8"))
+        fill_times = [int(f["time"]) for lst in fills_all.values() for f in lst]
+        if fill_times:
+            lo, hi = min(fill_times), max(fill_times)
+            span_days = (hi - lo) / 86400000.0
+            print("account fill history: %s -> %s (%d fills, %.1f days)"
+                  % (datetime.fromtimestamp(lo / 1000, TZ).strftime("%Y-%m-%d"),
+                     datetime.fromtimestamp(hi / 1000, TZ).strftime("%Y-%m-%d"),
+                     len(fill_times), span_days))
+            if lo > fetch_start_ms + 86400000:
+                print("  !! WARNING: account history does not reach back to %s "
+                      "(testnet accounts get reset). Requested --days %d but only %.1f days exist."
+                      % (datetime.fromtimestamp(fetch_start_ms / 1000, TZ).strftime("%Y-%m-%d"),
+                         args.days, span_days))
+        else:
+            print("  !! WARNING: no account fills at all")
         print("fetching %s klines ..." % args.interval)
         fetch_klines(symbols, fetch_start_ms, end_ms, args.interval, cache)
         dec_idx, pending_rows = load_decision_index(symbols)
