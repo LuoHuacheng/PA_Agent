@@ -39,7 +39,7 @@ import random
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -842,10 +842,140 @@ def run_baseline(args):
     return 0
 
 
+#: 入口门控读取的生产配置段. 回放必须与实盘同一套开关, 否则两套口径会漂移
+#: (2026-09-21 复核: 不加门控的回放成交 12.2 笔/天, 真实 5.7 笔/天).
+GATE_CONFIG_SECTION = "binance_usdm_testnet"
+SETTINGS_PATH = ROOT / "config" / "settings.json"
+#: 计划周期位置缺失时的占位; 生产侧此处为空串, 两者都不触发周期白名单.
+UNKNOWN_CYCLE = "unknown"
+
+
+@dataclass
+class EntryGates:
+    """复刻 signal_pipeline._entry_block_reasons 的入口环境门控."""
+
+    symbols: frozenset
+    block_short: bool = False
+    block_trending_tr: bool = False
+    block_neutral_diag: bool = False
+    cycle_allowlist: tuple = ()
+    block_session: bool = False
+    session_start_utc: int = 20
+    session_end_utc: int = 4
+    min_plan_rr: float = 0.0
+    enabled_from: str | None = None
+
+
+def load_entry_gates(path, *, section=GATE_CONFIG_SECTION, enabled_from=None) -> EntryGates:
+    """从生产配置读入口门控开关; 缺文件或缺字段时按关闭处理."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        doc = {}
+    cfg = doc.get(section) or {}
+    symbols = {
+        str(item).upper().strip()
+        for item in (cfg.get("symbol_whitelist") or [])
+        if str(item).strip()
+    }
+    return EntryGates(
+        symbols=frozenset(symbols),
+        block_short=bool(cfg.get("block_short_entry", False)),
+        block_trending_tr=bool(cfg.get("block_trending_tr_entry", False)),
+        block_neutral_diag=bool(cfg.get("block_neutral_diag_entry", False)),
+        cycle_allowlist=tuple(str(c) for c in (cfg.get("block_cycle_allowlist") or [])),
+        block_session=bool(cfg.get("block_session_entry", False)),
+        session_start_utc=int(cfg.get("block_session_utc_start_hour", 20) or 0),
+        session_end_utc=int(cfg.get("block_session_utc_end_hour", 4) or 0),
+        min_plan_rr=float(cfg.get("min_plan_reward_risk", 0.0) or 0.0),
+        enabled_from=enabled_from,
+    )
+
+
+def _session_blocked_at(ts_ms, *, start_hour_utc, end_hour_utc) -> bool:
+    """决策时刻是否落在低流动性窗口(UTC 小时, 跨零点取并集)."""
+    hour = datetime.fromtimestamp(ts_ms / 1000, UTC).hour
+    start = int(start_hour_utc) % 24
+    end = int(end_hour_utc) % 24
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def gate_reasons(plan, gates) -> tuple:
+    """返回该计划单被入口门控拦下的原因(空元组 = 放行).
+
+    生效日之前一律放行: 门控是 2026-09-13 之后才上线的, 拿今天的开关去回放
+    更早的计划单是穿越, 会把事后筛选算成事前规则.
+    """
+    if gates.enabled_from:
+        day = datetime.fromtimestamp(plan.record_ms / 1000, TZ8).strftime("%Y-%m-%d")
+        if day < gates.enabled_from:
+            return ()
+    reasons = []
+    if gates.symbols and plan.symbol.upper() not in gates.symbols:
+        reasons.append("symbol_block")
+    if gates.block_short and "空" in plan.direction:
+        reasons.append("short_block")
+    cycle = "" if plan.cycle_position == UNKNOWN_CYCLE else plan.cycle_position
+    if gates.block_trending_tr and cycle == "trending_tr":
+        reasons.append("trending_tr_block")
+    if gates.block_neutral_diag and plan.diag_direction == "neutral":
+        reasons.append("neutral_diag_block")
+    if gates.cycle_allowlist and cycle and cycle not in gates.cycle_allowlist:
+        reasons.append("cycle_block")
+    if gates.block_session and _session_blocked_at(
+        plan.record_ms,
+        start_hour_utc=gates.session_start_utc,
+        end_hour_utc=gates.session_end_utc,
+    ):
+        reasons.append("session_block")
+    if gates.min_plan_rr > 0:
+        risk = abs(plan.entry - plan.stop)
+        ratio = (abs(plan.target - plan.entry) / risk) if risk > 0 else None
+        if ratio is None or ratio < gates.min_plan_rr:
+            reasons.append("rr_block")
+    return tuple(reasons)
+
+
+def apply_entry_gates(plans, gates):
+    """按入口门控筛计划单; 返回 (放行的计划单, 各拦截原因计数)."""
+    counts = Counter()
+    admitted = []
+    for plan in plans:
+        reasons = gate_reasons(plan, gates)
+        if reasons:
+            counts["+".join(reasons)] += 1
+            continue
+        admitted.append(plan)
+    return admitted, counts
+
+
 def run_replay(args):
     symbols = {s.strip().upper() for s in args.symbols.split(",") if s.strip()} or None
     plans = load_plans(PENDING_DIR, days=args.days, symbols=symbols)
     print("载入计划单:", len(plans))
+    if getattr(args, "gates", False):
+        gates = load_entry_gates(
+            SETTINGS_PATH,
+            section=getattr(args, "gate_section", GATE_CONFIG_SECTION),
+            enabled_from=(getattr(args, "gate_start", "") or None),
+        )
+        admitted, blocked = apply_entry_gates(plans, gates)
+        dropped = len(plans) - len(admitted)
+        print(
+            f"入口门控: 生效日 {gates.enabled_from or '全程'}, "
+            f"白名单 {len(gates.symbols)} 个品种, 拦截 {dropped}/{len(plans)} 计划单"
+        )
+        for reason, count in blocked.most_common():
+            print(f"  {reason:<40} {count:>4d}")
+        plans = admitted
+        if not plans:
+            print("门控后无计划单可回放")
+            return 0
     if not plans:
         return 0
     timelines = merge_timelines(plans)
@@ -1153,6 +1283,15 @@ def main():
                     help="maker 费率(单边); 默认 fee_rate*0.4")
     ap.add_argument("--taker-fee", type=float, default=None,
                     help="taker 费率(单边); 默认 fee_rate*0.8")
+    ap.add_argument(
+        "--gates", action="store_true",
+        help="按生产配置复刻入口门控(品种白名单/禁空/禁周期/禁时段/最小RR)")
+    ap.add_argument(
+        "--gate-start", default="",
+        help="门控生效起始日 YYYY-MM-DD; 早于该日的计划单不受门控")
+    ap.add_argument(
+        "--gate-section", default=GATE_CONFIG_SECTION,
+        help="读取门控开关的配置段")
     ap.add_argument("--min-stop-pct", type=float, default=0.2,
                     help="止损距离下限(%%), 与 min_stop_distance_pct 同步")
     ap.add_argument("--no-stop-rr-guard", action="store_true",
