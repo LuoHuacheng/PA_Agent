@@ -1038,6 +1038,121 @@ git commit -m "✨ feat(tools): 因子审计接入结构特征(13 个数值字�
 
 ---
 
+## Phase 1.5：评审修正（必修，先于 Phase 2）
+
+来源：2026-09-21 对 Task 1.1 / 1.2 / 1.3 的独立代码评审（\`git diff 529170e 4fd8940\`），结论 **Ready to merge — With fixes**。评审的 Critical 已由主 agent 用真数据独立复现。
+
+### F1（Critical）跨周期撞车被静默合并
+
+**实测复现**：扫描 300 份记录，797 个 \`(symbol, ts_open)\` 里有 **141 个（17.7%）同时被 5m 与 15m 覆盖**。同一个 \`ts_open\` 的 5m bar 与 15m bar 是完全不同的观测（OHLC 不同、"后一根"对应 5 分钟 vs 15 分钟两种 horizon），现行 \`dedupe_facts\` 按 \`(symbol, ts_ms)\` 去重会静默丢掉其中一个，且 \`ic_stats\` 只按 symbol 分组，把两个 horizon 混进同一 IC/IR。
+
+**改动**：
+
+1. \`BarFact\` 增加字段 \`timeframe: str = ""\`，放在 \`history\` **之后**（保持既有位置参数调用兼容）：
+   ```python
+   @dataclass(frozen=True)
+   class BarFact:
+       """一根 bar 上的一次观测: 特征值 + 其后一根 bar 的收益."""
+
+       symbol: str
+       ts_ms: int
+       factor: float
+       forward_return: float
+       history: int = 0       # 该观测可用到的历史 bar 数; 跨快照去重时用来挑最深的一条
+       timeframe: str = ""    # 周期; 去重与分组必须带上它, 否则 5m/15m 会撞同一个 ts_open
+   ```
+2. \`dedupe_facts\` 的 key 改成 \`(fact.symbol, fact.timeframe, fact.ts_ms)\`，排序 key 同步改成 \`(f.symbol, f.timeframe, f.ts_ms)\`。
+3. \`ic_stats\` 的分组 key 改成 \`(row.symbol, row.timeframe)\`；\`group_count\` 因此反映 symbol×timeframe 组合数。
+4. \`bar_facts_for\` 构造 \`BarFact\` 时填 \`timeframe=frame.timeframe\`。
+
+**新增测试**：
+
+```python
+def test_dedupe_does_not_merge_across_timeframes():
+    same_ts = 1000
+    m5 = BarFact("BTCUSDT", same_ts, 0.5, 0.01, history=5, timeframe="5m")
+    m15 = BarFact("BTCUSDT", same_ts, 0.9, 0.01, history=60, timeframe="15m")
+    got = dedupe_facts([m5, m15])
+    assert len(got) == 2
+    assert {f.timeframe for f in got} == {"5m", "15m"}
+
+
+def test_ic_stats_groups_by_symbol_and_timeframe():
+    rows = []
+    for timeframe in ("5m", "15m"):
+        for i in range(40):
+            fact = _fact("BTCUSDT", BASE_TS + i * DAY_MS, float(i), float(i))
+            rows.append(replace(fact, timeframe=timeframe))
+    stats = ic_stats("geometry.body_ratio", rows)
+    assert stats.group_count == 2
+```
+
+### F2（Important）一条永远不可能失败的空断言
+
+\`test_bar_facts_exclude_the_newest_bar_and_short_history\` 里的
+\`assert all(fact.ts_ms >= oldest_used_ts for fact in facts)\` 恒为真（\`oldest_used_ts\` 就是最旧那根的 ts，任何 fact 都 ≥ 它），**没有锁住 \`min_history\` 语义**。
+
+改成 \`assert min(fact.ts_ms for fact in facts) > oldest_used_ts\`。
+改之前先故意把断言写成反的跑一次，确认它**能**失败。
+
+### F3（Important）\`ir\` 的 0.0 双关会把"组间完全一致"误杀
+
+\`_stdev\` 在 \`len < 2\` 时返回 0.0，与"两组 IC 恰好完全相同"不可区分，后者得到 \`ir = 0.0\` 被判"方向性 IR 0.0000 < 0.30"拒绝 —— 两个品种上完全一致的因子（本该是最强的一致性证据）反而最容易挂。且 0 与 \`1e-12\` 两侧行为不连续。
+
+**改动**：
+
+1. \`FactorStats\` 增加 \`ir_groups: int = 0\`，赋值为 \`len(per_group_ic)\`。让"IR 未定义"在 JSON 里可区分。
+2. **仅当 \`ir_groups >= 3\` 时才做 IR 判定**；\`ir_groups < 3\` 时不加任何 IR 相关 reason（\`ir_groups < 2\` 仍保留"有效分品种 IC 少于 2 组"的 reason）。
+3. 组间 IC 完全一致时（\`ic_std <= RANK_EPSILON and ic_mean != 0\`）不再按 \`ir = 0.0\` 拒绝，视为"组间完全一致"直接通过 IR 检查。
+
+**新增测试**：
+
+```python
+def test_ir_not_judged_below_three_groups():
+    rows = []
+    for symbol in ("BTCUSDT", "ETHUSDT"):
+        rows.extend(
+            _fact(symbol, BASE_TS + i * DAY_MS, float(i), float(i)) for i in range(40)
+        )
+    stats = ic_stats("x", rows)
+    assert stats.ir_groups == 2
+    assert not any("IR" in reason for reason in stats.reasons)
+
+
+def test_identical_group_ics_are_not_rejected_as_zero_ir():
+    rows = []
+    for symbol in ("BTCUSDT", "ETHUSDT", "SOLUSDT"):
+        rows.extend(
+            _fact(symbol, BASE_TS + i * DAY_MS, float(i), float(i)) for i in range(40)
+        )
+    stats = ic_stats("x", rows)
+    assert stats.ir_groups == 3
+    assert not any("IR" in reason for reason in stats.reasons)
+```
+
+### F4（Minor）报告口径与容错
+
+1. \`main\` 里 \`observations\` 是各因子 \`n_obs\` 的**平均**，报告文案从"样本：N 份记录 / M 次观测"改为"样本：N 份记录 / 每因子约 M 次观测"。
+2. \`load_frames\` 的 docstring 声称"坏文件跳过而不是中断"，但只兜底了 \`try_load_analysis_record\`；给 \`frame_from_record_klines\` 也加一层 \`try/except (KeyError, ValueError, TypeError)\`。
+3. \`render_markdown\` 增加一行口径说明：**分品种 IC 是组内时序排序，月度 IC 把当月所有品种混进同一秩池做跨品种截面排序，两者不是同一件事**；同时打印 \`ir_groups\`。
+
+### 明确不修（写进口径说明即可）
+
+- IR 在组数 < 5 时统计功效很低 —— 不做新门槛，只在报告里暴露 \`ir_groups\`。
+- \`--limit\` 按路径字典序截断，取的是时间上**最早**的一段，不覆盖最新行情 —— 在 \`--help\` 里写明。
+- \`_window_frame\` 的 O(n²) 窗口重建不优化（`max_bars=200` 已封顶，全量跑慢是已知代价）。
+
+### 验收
+
+```bash
+.venv/bin/python -m pytest tests/unit/test_factor_audit.py            # 期望 >= 26 passed
+.venv/bin/python -m ruff check tools/factor_audit.py tests/unit/test_factor_audit.py
+.venv/bin/python tools/factor_audit.py --records records/pending --limit 60 --json
+# 断言: group_count 现在反映 (symbol, timeframe) 组合数, 不再是恒定的 2
+```
+
+---
+
 ## Phase 2：SQLite 因子库（P1）
 
 产出：审计通过的因子成为可检索资产，失败的留档但不参与后续。
