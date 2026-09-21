@@ -57,6 +57,7 @@
   - 实测坑：本仓库 ruff 把 `tools` 与 `pa_agent` 判为**不同** import 段（`tools` 视为 first-party），所以 `from pa_agent...` 与 `from tools...` 之间**必须有一个空行**；同段内则**不得**有空行。
 - 测试放 `tests/unit/`，命名 `test_*.py`；工具模块以 `from tools.<module> import ...` 导入（`tools/` 是命名空间包，无 `__init__.py`）
 - 提交信息格式固定：`<emoji> <type>(scope): 中文描述`，例：`✨ feat(tools): 加时序因子审计`
+- **向已有测试文件追加用例时**：新增的 `import` 必须**合并进文件顶部已有的 import 区**，只有测试函数追加到文件末尾。整块贴在文件中间会触发 `E402`（ruff 不会自动修这一条）。新建测试文件不受此限。
 - **只读约束**：本计划新增的工具在测试与运行中都**不得写入** `records/` 与 `trade_records/`。因子库默认落在 `~/.pa_agent/factors.db`（用户目录），避开仓库根 conftest 的进程级 fs 闸门
 - 术语：前视 = look-ahead；IC = Spearman rank IC；IR = IC 均值 / IC 标准差；方向性 IC = IC 均值 × 预期方向符号
 - 所有新增数值函数必须是**纯函数**（输入 list/序列，输出 float），便于 TDD 与复现
@@ -426,16 +427,25 @@ git commit -m "✨ feat(tools): 加时序因子审计统计核心(rank IC/IR/月
 **Interfaces:**
 - Consumes: `BarFact`（Task 1.1）；`pa_agent.demo.record_loader.frame_from_record_klines`、`try_load_analysis_record`；`pa_agent.data.snapshot.compute_indicators`；`pa_agent.ai.kline_features.compute_kline_geometry_features`
 - Produces:
+  - `BarFact` **接口扩展**：新增带默认值的字段 `history: int = 0`（默认值保证 Task 1.1 已提交的 10 个用例不受影响）
+  - `dedupe_facts(facts: Iterable[BarFact]) -> list[BarFact]`
   - `forward_return_at(frame: KlineFrame, idx: int) -> float | None`
   - `bar_facts_for(frame, name, extractor: Callable[[KlineFrame], float | None], *, min_history: int = 20, max_bars: int = 200) -> list[BarFact]`
   - `geometry_extractors() -> dict[str, Callable[[KlineFrame], float | None]]`
   - `audit_frames(frames, extractors, *, expected_direction="positive", thresholds=None) -> list[FactorStats]`
 
+**为什么必须去重（真数据实测的结论，不是猜测）**：`records/pending` 是**逐根 bar 的滚动快照**，同一根 bar 会被大量记录重复覆盖。2026-09-21 对 BTCUSDT 15m 的探测：**616 份记录、每份中位 100 根 bar，但只有 1417 根不同的 bar**；99.4% 的 bar 被多份记录覆盖，单根最多被 **90 份**覆盖。朴素池化会把样本量虚增约 **43 倍**，让 `min_obs` 门槛与月度胜率全部失真。所以 `audit_frames` 必须按 `(symbol, ts_ms)` 去重。
+
+同一根 bar 在不同快照里**可见的历史长度不同**（旧快照更短），特征值因此可能不同；去重时保留**历史最深**的那条，与生产路径（历史充足）语义一致。
+
 **核心语义（别搞反）**：`frame.bars[0]` 是**最新** bar、`bars[-1]` 最旧。所以 bar `idx` 的"下一根"是 `idx - 1`；`idx == 0` 没有未来，必须剔除。评估 bar `idx` 的特征值时，要用 `bars[idx:]` 重建一个子 frame（`compute_indicators` 必须重算，因为它按"新到旧"对齐），再取该子 frame 的`最新`一行 —— 这样特征函数内部只会看到 idx 及其之前的数据，与生产路径的语义完全一致。
 
 - [ ] **Step 1: 写失败测试**
 
-追加到 `tests/unit/test_factor_audit.py`：
+在 `tests/unit/test_factor_audit.py` 中做两件事（**顺序很关键**）：
+
+1. 把下面代码块里的 4 条 import（`replace` / `pytest` / `pa_agent...` / `tools.factor_audit`）**合并进文件顶部已有的 import 区**，不要贴在文件中间 —— 否则 ruff 会报 `E402 Module level import not at top of file`。
+2. 把 `def _frame(...)` 及其后的所有测试函数**追加到文件末尾**。
 
 ```python
 from dataclasses import replace
@@ -445,8 +455,10 @@ import pytest
 from pa_agent.data.base import KlineBar, KlineFrame
 from pa_agent.data.snapshot import compute_indicators
 from tools.factor_audit import (
+    BarFact,
     audit_frames,
     bar_facts_for,
+    dedupe_facts,
     forward_return_at,
     geometry_extractors,
 )
@@ -526,6 +538,26 @@ def test_audit_frames_returns_one_stats_row_per_extractor():
     # 恒定特征无秩 => 无有效 IC
     assert stats["constant_zero"].passed is False
     assert stats["constant_zero"].ic_mean == 0.0
+
+
+def test_dedupe_keeps_the_deepest_history_for_a_repeated_bar():
+    shallow = BarFact("BTCUSDT", 1000, 0.5, 0.01, history=5)
+    deep = BarFact("BTCUSDT", 1000, 0.9, 0.01, history=60)
+    other = BarFact("BTCUSDT", 2000, 0.1, 0.02, history=30)
+    got = dedupe_facts([shallow, other, deep])
+    assert [f.ts_ms for f in got] == [1000, 2000]
+    assert got[0].factor == 0.9
+
+
+def test_audit_frames_dedupes_bars_shared_by_two_snapshots():
+    # 两份快照覆盖同一批 bar: 去重后观测数不应翻倍
+    first = _frame([100.0 + i for i in range(60)])
+    second = _frame([100.0 + i for i in range(60)])
+    extractors = {"geometry.body_ratio": geometry_extractors()["geometry.body_ratio"]}
+    single = audit_frames([first], extractors)[0].n_obs
+    doubled = audit_frames([first, second], extractors)[0].n_obs
+    assert single > 0
+    assert doubled == single
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -536,6 +568,22 @@ Expected: FAIL —— `ImportError: cannot import name 'forward_return_at'`
 - [ ] **Step 3: 写最小实现**
 
 追加到 `tools/factor_audit.py`：
+
+**先做一处接口扩展**：用 `edit` 工具把 Task 1.1 已提交的 `BarFact` 定义改成下面这样（只加一个带默认值的字段，其余不动；不要重写整个文件）：
+
+```python
+@dataclass(frozen=True)
+class BarFact:
+    """一根 bar 上的一次观测: 特征值 + 其后一根 bar 的收益."""
+
+    symbol: str
+    ts_ms: int
+    factor: float
+    forward_return: float
+    history: int = 0   # 该观测可用到的历史 bar 数; 跨快照去重时用来挑最深的一条
+```
+
+然后追加以下内容：
 
 ```python
 from collections.abc import Callable, Iterable
@@ -555,6 +603,23 @@ GEOMETRY_NUMERIC_FIELDS = (
 )
 
 Extractor = Callable[[KlineFrame], "float | None"]
+
+
+def dedupe_facts(facts: Iterable[BarFact]) -> list[BarFact]:
+    """同一根 bar 会被多份滚动快照反复覆盖, 按 (symbol, ts_ms) 只保留历史最深的一条.
+
+    实测(2026-09-21, BTCUSDT 15m): 616 份记录里只有 1417 根不同的 bar, 99.4% 的 bar
+    被多份记录覆盖, 单根最多出现 90 次 —— 不去重会把样本量虚增约 43 倍, 让 min_obs
+    门槛与月度胜率全部失真。同一根 bar 在不同快照里能看到的**历史长度**不同(旧快照更短),
+    特征值因此可能不同; 取历史最深的一条, 与生产路径(历史充足)的语义一致。
+    """
+    best: dict[tuple[str, int], BarFact] = {}
+    for fact in facts:
+        key = (fact.symbol, fact.ts_ms)
+        current = best.get(key)
+        if current is None or fact.history > current.history:
+            best[key] = fact
+    return sorted(best.values(), key=lambda f: (f.symbol, f.ts_ms))
 
 
 def forward_return_at(frame: KlineFrame, idx: int) -> float | None:
@@ -610,6 +675,7 @@ def bar_facts_for(
                 ts_ms=int(bars[idx].ts_open * 1000),
                 factor=float(value),
                 forward_return=forward,
+                history=len(bars) - idx,
             )
         )
     return facts
@@ -645,6 +711,7 @@ def audit_frames(
         rows: list[BarFact] = []
         for frame in frame_list:
             rows.extend(bar_facts_for(frame, name, extractor))
+        rows = dedupe_facts(rows)
         results.append(
             ic_stats(
                 name,
@@ -662,11 +729,12 @@ def audit_frames(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `.venv/bin/python -m pytest tests/unit/test_factor_audit.py -q`
-Expected: PASS（15 passed）
+Expected: PASS（17 passed）
 
 - [ ] **Step 5: lint + 提交**
 
 ```bash
+.venv/bin/python -m ruff check --fix tools/factor_audit.py tests/unit/test_factor_audit.py
 .venv/bin/python -m ruff format tools/factor_audit.py tests/unit/test_factor_audit.py
 .venv/bin/python -m ruff check tools/factor_audit.py tests/unit/test_factor_audit.py
 git add tools/factor_audit.py tests/unit/test_factor_audit.py
@@ -857,7 +925,7 @@ def main(argv: list[str] | None = None) -> int:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `.venv/bin/python -m pytest tests/unit/test_factor_audit.py -q`
-Expected: PASS（18 passed）
+Expected: PASS（20 passed）
 
 - [ ] **Step 5: 真机冒烟 + 提交**
 
@@ -951,12 +1019,13 @@ def market_extractors(*, lookback: int = 40) -> dict[str, Extractor]:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `.venv/bin/python -m pytest tests/unit/test_factor_audit.py -q`
-Expected: PASS（20 passed）
+Expected: PASS（22 passed）
 
 - [ ] **Step 5: 提交**
 
 ```bash
-.venv/bin/python -m ruff format tools/factor_audit.py
+.venv/bin/python -m ruff check --fix tools/factor_audit.py tests/unit/test_factor_audit.py
+.venv/bin/python -m ruff format tools/factor_audit.py tests/unit/test_factor_audit.py
 .venv/bin/python -m ruff check tools/factor_audit.py tests/unit/test_factor_audit.py
 git add tools/factor_audit.py tests/unit/test_factor_audit.py
 git commit -m "✨ feat(tools): 因子审计接入结构特征(13 个数值字段)"
@@ -1747,7 +1816,7 @@ alphaevo 用 `train_val_gap / val_test_gap / walk_forward_pass_rate` 三个门�
 - `BarFact` / `FactorStats` / `AuditThresholds` 在 Task 1.1 定义，Task 1.2 / 1.3 / 2.2 / 3.1 引用自同一处 ✅
 - `FactorStore` / `FactorRecord` 在 Task 2.1 定义，Task 2.2 引用 ✅
 - `render_markdown` 在 Task 1.3 定义签名，Task 3.2 只**追加可选参数**，向后兼容 ✅
-- 测试计数：1.1 = 10、1.2 = +5（15）、1.3 = +3（18）、1.4 = +2（20）、2.2 = +2（22）、3.1 = 6（独立文件 test_factor_maturity.py）、3.2 = +2（24）；总计 24 + 6 = 30 ✅
+- 测试计数：1.1 = 10、1.2 = +7（17）、1.3 = +3（20）、1.4 = +2（22）、2.2 = +2（24）、3.1 = 6（独立文件 test_factor_maturity.py）、3.2 = +2（26）；总计 26 + 6 = 32 ✅
 
 **4. 已实跑验证（不是纸上推演）**
 本计划的代码在落稿前后各跑过一次，验证方式是把计划里的代码块原样抄到 `/tmp/fa/` 下，用仓库同一个 `.venv` 执行：
@@ -1757,12 +1826,13 @@ alphaevo 用 `train_val_gap / val_test_gap / walk_forward_pass_rate` 三个门�
 | Task 1.1 统计核心（10 用例） | `PYTHONPATH=/tmp/fa .venv/bin/python -m pytest tests/test_factor_audit.py -q` | ✅ 10 passed |
 | Task 1.2 观测抽取（5 用例） | `PYTHONPATH=/tmp/fa .venv/bin/python -m pytest tests/test_task12.py -q` | ✅ 5 passed |
 | Task 3.1 成熟度检查单（6 断言） | 按文件路径加载 maturity.py 后逐条断言 | ✅ 6/6 通过 |
+| Task 1.2 去重必要性（真数据） | `python /tmp/dedupe_probe.py` | ✅ 616 份记录仅 1417 根不同 bar，99.4% 重复，最多 90 次 |
 
 **这次实跑改掉了计划里的一个真 bug**：`ic_stats` 原实现无条件判定 IR，当只有 1 个分品种组时 `ic_std == 0` 导致 `ir == 0.0`，于是任何单品种因子都会被误报"方向性 IR 0.0000 < 0.3"。正确语义是 **IR 在组数 < 2 时无定义**，已加 `len(per_group_ic) >= 2` 守卫，并已把修正写回上面的 Step 3 代码块。
 
 **已知风险（不回避）**
 
-1. `records/pending` 的 5737 份记录是**逐根 bar 的滚动快照**，同一根 bar 会被多份记录重复覆盖，可能高估有效样本量。Task 1.2 的 `min_history=20` 只挡住太短的快照，**没有去重**。建议在 Task 1.3 真机冒烟后先手工看一次 `n_obs` 是否远大于"记录数 × 40"，若显著偏大，再加 `--dedupe` 按 `(symbol, ts_ms)` 去重。
+1. ~~滚动快照重复覆盖可能高估有效样本量。~~ **已用真数据证实并已在本计划内修掉。** 2026-09-21 探测 BTCUSDT 15m：616 份记录、每份中位 100 根 bar，但只有 **1417 根不同 bar**；**99.4%** 的 bar 被多份记录覆盖，单根最多被 **90 份**覆盖，朴素池化虚增约 **43 倍**。Task 1.2 现在含 `dedupe_facts`：按 `(symbol, ts_ms)` 只保留**历史最深**的一条（同一根 bar 在不同快照里可见历史不同，取最深的与生产路径语义一致）。
 2. 阈值（`min_ic_abs=0.02 / min_ir=0.30`）直接抄自 alphaevo 的日线截面场景，**在本仓库 15m bar 上未必合适**。首次跑完后应按实际分布标定，不要当成定论。
 3. `audit_frames` 对每根 bar 重建子 frame 并重算指标，复杂度 O(n²)。`max_bars=200` 已封顶；若真机太慢，先降 `--limit`，不要急着优化。
 
