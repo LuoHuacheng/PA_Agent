@@ -14,10 +14,11 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import statistics
 import sys
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -33,6 +34,12 @@ RANK_EPSILON = 1e-12
 TZ8 = timezone(timedelta(hours=8))
 
 ExpectedDirection = Literal["positive", "negative"]
+
+#: 零分布样本少于此数时不给阈值 —— 分位数不可信, 且有效分组 < 2 时四条分位数全是 0.0
+MIN_NULL_SAMPLES = 200
+
+#: 有效分组少于此数时 IR 无统计功效(2 组时 IR 是"两个数的均值/标准差", 噪声尾部可冲到 30+)
+MIN_IR_GROUPS_FOR_THRESHOLD = 3
 
 
 @dataclass(frozen=True)
@@ -340,6 +347,131 @@ def build_extractors(spaces: str = DEFAULT_SPACES) -> dict[str, Extractor]:
     return extractors
 
 
+def collect_facts(
+    frames: Iterable[KlineFrame],
+    extractors: dict[str, Extractor],
+) -> dict[str, list[BarFact]]:
+    """一次性收集每个因子的去重观测, 供审计与置换检验复用."""
+    frame_list = list(frames)
+    collected: dict[str, list[BarFact]] = {}
+    for name, extractor in extractors.items():
+        rows: list[BarFact] = []
+        for frame in frame_list:
+            rows.extend(bar_facts_for(frame, name, extractor))
+        collected[name] = dedupe_facts(rows)
+    return collected
+
+
+def _group_facts(rows: Iterable[BarFact]) -> dict[tuple[str, str], list[BarFact]]:
+    """按 (symbol, timeframe) 分组 —— 与 ic_stats 的分组口径必须一致."""
+    groups: dict[tuple[str, str], list[BarFact]] = {}
+    for row in rows:
+        groups.setdefault((row.symbol, row.timeframe), []).append(row)
+    return groups
+
+
+def _abs_ic_and_ir(groups: dict[tuple[str, str], list[BarFact]]) -> tuple[float, float] | None:
+    """按与 ic_stats 完全相同的口径算 (|IC 均值|, |IR|); 有效组 < 2 时返回 None."""
+    per_group_ic: list[float] = []
+    for group_rows in groups.values():
+        ic = spearman_ic(
+            [r.factor for r in group_rows],
+            [r.forward_return for r in group_rows],
+        )
+        if ic is not None:
+            per_group_ic.append(ic)
+    if len(per_group_ic) < 2:
+        return None
+    mean_ic = _mean(per_group_ic)
+    std_ic = _stdev(per_group_ic)
+    ir = mean_ic / std_ic if std_ic > RANK_EPSILON else 0.0
+    return abs(mean_ic), abs(ir)
+
+
+@dataclass(frozen=True)
+class NullQuantiles:
+    """置换检验得到的噪声分布分位数."""
+
+    rounds: int
+    samples: int
+    ic_p95: float
+    ic_p99: float
+    ir_p95: float
+    ir_p99: float
+
+
+def permutation_null(
+    facts_by_name: dict[str, list[BarFact]],
+    *,
+    rounds: int = 200,
+    seed: int = 7,
+) -> NullQuantiles:
+    """组内打乱前向收益, 估计"纯噪声"能刷出的 |IC| 与 |IR| 分布.
+
+    每个因子每轮都产出样本, 最后汇总成一个零分布 —— 零分布只取决于观测结构与
+    样本量, 与具体因子无关, 所以汇总样本量更大、估计更稳。
+    """
+    rng = random.Random(seed)
+    ic_samples: list[float] = []
+    ir_samples: list[float] = []
+    for rows in facts_by_name.values():
+        groups = _group_facts(rows)
+        for _ in range(rounds):
+            shuffled: dict[tuple[str, str], list[BarFact]] = {}
+            for key, group_rows in groups.items():
+                returns = [r.forward_return for r in group_rows]
+                rng.shuffle(returns)
+                shuffled[key] = [
+                    replace(r, forward_return=v) for r, v in zip(group_rows, returns, strict=True)
+                ]
+            result = _abs_ic_and_ir(shuffled)
+            if result is None:
+                continue
+            ic_samples.append(result[0])
+            ir_samples.append(result[1])
+    return NullQuantiles(
+        rounds=rounds,
+        samples=len(ic_samples),
+        ic_p95=_quantile(ic_samples, 0.95),
+        ic_p99=_quantile(ic_samples, 0.99),
+        ir_p95=_quantile(ir_samples, 0.95),
+        ir_p99=_quantile(ir_samples, 0.99),
+    )
+
+
+def _quantile(values: Sequence[float], q: float) -> float:
+    """线性插值分位数; 空样本返回 0.0."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = q * (len(ordered) - 1)
+    low = math.floor(pos)
+    high = min(low + 1, len(ordered) - 1)
+    frac = pos - low
+    return ordered[low] * (1.0 - frac) + ordered[high] * frac
+
+
+def suggest_thresholds(null: NullQuantiles, *, level: str = "p95") -> AuditThresholds:
+    """把零分布分位数转成准入阈值; min_monthly_win_rate 与 min_obs 保持默认.
+
+    样本太少时**拒绝**给阈值: 分位数本身不可信, 而且有效分组 < 2 时四条分位数全是
+    0.0, 直接采用等于把准入门槛清零。
+    """
+    if level == "p99":
+        ic, ir = null.ic_p99, null.ir_p99
+    elif level == "p95":
+        ic, ir = null.ic_p95, null.ir_p95
+    else:
+        raise ValueError(f"未知分位档 {level!r}; 允许: ['p95', 'p99']")
+    if null.samples < MIN_NULL_SAMPLES:
+        raise ValueError(
+            f"零分布样本只有 {null.samples} 次 (< {MIN_NULL_SAMPLES}), 分位数不可信, 拒绝给出阈值"
+        )
+    return AuditThresholds(min_ic_abs=round(ic, 6), min_ir=round(ir, 6))
+
+
 def audit_frames(
     frames: Iterable[KlineFrame],
     extractors: dict[str, Extractor],
@@ -348,21 +480,11 @@ def audit_frames(
     thresholds: AuditThresholds | None = None,
 ) -> list[FactorStats]:
     """对每个抽取函数跑一遍全样本, 返回按 IR 降序的审计结论."""
-    frame_list = list(frames)
-    results: list[FactorStats] = []
-    for name, extractor in extractors.items():
-        rows: list[BarFact] = []
-        for frame in frame_list:
-            rows.extend(bar_facts_for(frame, name, extractor))
-        rows = dedupe_facts(rows)
-        results.append(
-            ic_stats(
-                name,
-                rows,
-                expected_direction=expected_direction,
-                thresholds=thresholds,
-            )
-        )
+    facts_by_name = collect_facts(frames, extractors)
+    results = [
+        ic_stats(name, rows, expected_direction=expected_direction, thresholds=thresholds)
+        for name, rows in facts_by_name.items()
+    ]
     results.sort(key=lambda s: (-abs(s.ir), s.name))
     return results
 
@@ -454,6 +576,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--direction", choices=("positive", "negative"), default="positive")
     parser.add_argument("--out", help="Markdown 报告输出路径")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出结论")
+    parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="跑置换检验, 打印纯噪声零分布与建议阈值(需先读盘)",
+    )
+    parser.add_argument("--rounds", type=int, default=200, help="置换检验重复次数")
+    parser.add_argument("--seed", type=int, default=7, help="置换检验随机种子")
     args = parser.parse_args(argv)
 
     # 先把参数校验做完再读盘: 这样 --spaces 写错时立刻返回 2, 不必先扫一遍记录
@@ -478,6 +607,32 @@ def main(argv: list[str] | None = None) -> int:
         print("没有可用的分析记录", file=sys.stderr)
         return 2
 
+    if args.calibrate:
+        # 校准信息是人读文本; 与 --json 同时给时不能混进 JSON 主体, 走 stderr
+        facts_by_name = collect_facts(frames, extractors)
+        null = permutation_null(facts_by_name, rounds=args.rounds, seed=args.seed)
+        max_groups = max((len(_group_facts(rows)) for rows in facts_by_name.values()), default=0)
+        lines = [
+            f"置换检验零分布 (rounds={null.rounds}, 样本 {null.samples} 次)",
+            f"  |IC|  p95 = {null.ic_p95:.5f}   p99 = {null.ic_p99:.5f}",
+            f"  |IR|  p95 = {null.ir_p95:.4f}   p99 = {null.ir_p99:.4f}",
+        ]
+        try:
+            suggested = suggest_thresholds(null, level="p95")
+        except ValueError as exc:
+            lines.append(f"建议阈值: 不给出 —— {exc}")
+        else:
+            lines.append(
+                f"建议阈值 (p95): min_ic_abs={suggested.min_ic_abs:.5f}  "
+                f"min_ir={suggested.min_ir:.4f}"
+            )
+        if max_groups < MIN_IR_GROUPS_FOR_THRESHOLD:
+            lines.append(
+                f"警告: 每个因子最多只有 {max_groups} 个有效分组, IR 门槛无统计功效, "
+                "不要采用建议的 min_ir"
+            )
+        print("\n".join(lines), file=sys.stderr if args.json else sys.stdout)
+
     stats = audit_frames(frames, extractors, expected_direction=args.direction)
     observations = sum(s.n_obs for s in stats) // max(len(stats), 1)
 
@@ -497,9 +652,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 #: SimpleMarketFeatures 里可作因子输入的数值字段
+#: range_high / range_low 是 USDT 绝对价位, 不是尺度无关特征 —— 跨期价格漂移会直接
+#: 污染 IC(实测靠伪信号排进前 5); 归一化版本就是已在列表里的 price_position, 故删除
 MARKET_NUMERIC_FIELDS = (
-    "range_high",
-    "range_low",
     "range_width_atr",
     "price_position",
     "dist_to_high_atr",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import replace
 
 import pytest
@@ -9,9 +10,14 @@ import pytest
 from pa_agent.data.base import KlineBar, KlineFrame
 from pa_agent.data.snapshot import compute_indicators
 from tools.factor_audit import (
+    MIN_NULL_SAMPLES,
     AuditThresholds,
     BarFact,
     FactorStats,
+    NullQuantiles,
+    _abs_ic_and_ir,
+    _group_facts,
+    _quantile,
     audit_frames,
     bar_facts_for,
     build_extractors,
@@ -21,8 +27,10 @@ from tools.factor_audit import (
     ic_stats,
     main,
     market_extractors,
+    permutation_null,
     render_markdown,
     spearman_ic,
+    suggest_thresholds,
 )
 
 BASE_TS = 1_700_000_000_000
@@ -192,9 +200,9 @@ def test_dedupe_keeps_the_deepest_history_for_a_repeated_bar():
 
 def test_build_extractors_defaults_to_both_spaces():
     names = set(build_extractors())
-    assert len(names) == 19
+    assert len(names) == 17
     assert len([n for n in names if n.startswith("geometry.")]) == 6
-    assert len([n for n in names if n.startswith("market.")]) == 13
+    assert len([n for n in names if n.startswith("market.")]) == 11
 
 
 def test_build_extractors_can_select_a_single_space():
@@ -323,3 +331,90 @@ def test_market_extractor_reads_the_newest_bar():
     frame = _frame([100.0 + i for i in range(60)])
     value = market_extractors()["market.price_position"](frame)
     assert value is None or 0.0 <= value <= 1.0
+
+
+def _noisy_rows(symbol: str, *, seed: int, size: int = 50) -> list[BarFact]:
+    """factor 与 forward 完全无关: factor=i, forward 取固定伪随机序列."""
+    rng = random.Random(seed)
+    return [
+        _fact(symbol, BASE_TS + i * DAY_MS, float(i), rng.uniform(-0.01, 0.01)) for i in range(size)
+    ]
+
+
+def _noisy_facts() -> dict[str, list[BarFact]]:
+    """每个因子都跨 4 个品种, 保证 _abs_ic_and_ir 有 >= 2 个有效组."""
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT")
+    return {
+        f"f{i}": [
+            row
+            for j, symbol in enumerate(symbols)
+            for row in _noisy_rows(symbol, seed=100 + 10 * i + j)
+        ]
+        for i in range(4)
+    }
+
+
+def test_market_extractors_exclude_absolute_price_levels():
+    names = set(market_extractors())
+    assert "market.range_high" not in names
+    assert "market.range_low" not in names
+    assert "market.price_position" in names
+
+
+def test_abs_ic_and_ir_matches_ic_stats_caliber():
+    rows = _increasing_rows("BTCUSDT", swaps=0) + _increasing_rows("ETHUSDT", swaps=3)
+    got = _abs_ic_and_ir(_group_facts(rows))
+    assert got is not None
+    assert got[0] == pytest.approx(abs(ic_stats("x", rows).ic_mean), abs=1e-6)
+
+
+def test_permutation_null_is_deterministic_for_a_seed():
+    facts = _noisy_facts()
+    assert permutation_null(facts, rounds=20, seed=7) == permutation_null(facts, rounds=20, seed=7)
+    assert permutation_null(facts, rounds=20, seed=7) != permutation_null(facts, rounds=20, seed=8)
+
+
+def test_permutation_null_on_independent_data_is_near_zero():
+    null = permutation_null(_noisy_facts(), rounds=100, seed=7)
+    assert null.samples > 0
+    assert null.ic_p95 < 0.15
+
+
+def test_permutation_null_quantiles_are_ordered():
+    null = permutation_null(_noisy_facts(), rounds=50, seed=7)
+    assert null.ic_p95 <= null.ic_p99
+    assert null.ir_p95 <= null.ir_p99
+
+
+def test_suggest_thresholds_rejects_unknown_level():
+    null = NullQuantiles(rounds=200, samples=1000, ic_p95=0.01, ic_p99=0.02, ir_p95=0.1, ir_p99=0.2)
+    default = suggest_thresholds(null)
+    assert default.min_ic_abs == 0.01
+    assert default.min_ir == 0.1
+    with pytest.raises(ValueError):
+        suggest_thresholds(null, level="p90")
+
+
+def test_suggest_thresholds_refuses_too_few_samples():
+    # 有效分组 < 2 时四条分位数全是 0.0; 直接采用等于把准入门槛清零
+    empty = NullQuantiles(rounds=200, samples=0, ic_p95=0.0, ic_p99=0.0, ir_p95=0.0, ir_p99=0.0)
+    with pytest.raises(ValueError, match="分位数不可信"):
+        suggest_thresholds(empty)
+    thin = NullQuantiles(
+        rounds=1, samples=MIN_NULL_SAMPLES - 1, ic_p95=0.01, ic_p99=0.02, ir_p95=0.1, ir_p99=0.2
+    )
+    with pytest.raises(ValueError, match="分位数不可信"):
+        suggest_thresholds(thin)
+
+
+def test_suggest_thresholds_accepts_enough_samples():
+    ok = NullQuantiles(
+        rounds=200, samples=MIN_NULL_SAMPLES, ic_p95=0.11, ic_p99=0.19, ir_p95=1.4, ir_p99=2.1
+    )
+    assert suggest_thresholds(ok).min_ic_abs == 0.11
+
+
+def test_quantile_interpolates():
+    assert _quantile([0.0, 1.0], 0.5) == 0.5
+    assert _quantile([], 0.9) == 0.0
+    assert _quantile([2.0], 0.9) == 2.0
