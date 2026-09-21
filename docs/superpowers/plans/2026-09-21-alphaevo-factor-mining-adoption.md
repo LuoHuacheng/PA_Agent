@@ -55,6 +55,7 @@
 - Python `>=3.11`；命令一律用 `.venv/bin/python`
 - lint：每个 Task 的 lint 步骤**一律按三步走**：`ruff check --fix <files>`（自动修可修项，含 I003/I001 import 排序与 F401 未使用 import）→ `ruff format <files>` → `ruff check <files>`（必须 0 报错）。注意 `ruff format` **不会**排序 import，所以只跑 `format` + `check` 会在 import 排序上失败。`line-length = 100`，`extend-select = ["E","F","I","UP","B","SIM","RUF"]`，`E501` 忽略。
   - 实测坑：本仓库 ruff 把 `tools` 与 `pa_agent` 判为**不同** import 段（`tools` 视为 first-party），所以 `from pa_agent...` 与 `from tools...` 之间**必须有一个空行**；同段内则**不得**有空行。
+  - 实测坑：报告/文案里的**全角标点**（`：`、`（）`）会触发 `RUF001`。保持文案逐字不变，在**文件第 1 行**加 `# ruff: noqa: RUF001 - Chinese product copy`（注释不是语句，放在 module docstring 前不影响 `__doc__`；仓库已有 13 个文件同款）。
 - 测试放 `tests/unit/`，命名 `test_*.py`；工具模块以 `from tools.<module> import ...` 导入（`tools/` 是命名空间包，无 `__init__.py`）
 - 提交信息格式固定：`<emoji> <type>(scope): 中文描述`，例：`✨ feat(tools): 加时序因子审计`
 - **向任何已有 .py 文件追加代码块时**（源文件与测试文件同理）：代码块里的新增 `import` 必须**合并进该文件顶部已有的 import 区**，只把函数/常量追加到文件末尾。整块贴在文件中间会触发 `E402 Module level import not at top of file`，而 `ruff check --fix` **不会**自动修这一条。新建文件不受此限。
@@ -918,6 +919,10 @@ def main(argv: list[str] | None = None) -> int:
             encoding="utf-8",
         )
     return 0 if any(s.passed for s in stats) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 ```
 
 同时在文件顶部补齐本步新用到的 import：`argparse`、`json`、`sys`、`dataclasses.asdict`。
@@ -1827,6 +1832,9 @@ alphaevo 用 `train_val_gap / val_test_gap / walk_forward_pass_rate` 三个门�
 | Task 1.2 观测抽取（5 用例） | `PYTHONPATH=/tmp/fa .venv/bin/python -m pytest tests/test_task12.py -q` | ✅ 5 passed |
 | Task 3.1 成熟度检查单（6 断言） | 按文件路径加载 maturity.py 后逐条断言 | ✅ 6/6 通过 |
 | Task 1.2 去重必要性（真数据） | `python /tmp/dedupe_probe.py` | ✅ 616 份记录仅 1417 根不同 bar，99.4% 重复，最多 90 次 |
+| Task 1.3 首次真机冒烟 | `tools/factor_audit.py --records records/pending --limit 60` | ✅ 60 份记录 → **220 次观测**（不去重为 4800，压缩 **21.8×**，去重确实生效）；6 个几何特征中 **1 个通过**（`geometry.lower_wick_ratio`，IC +0.0674 / IR 6.31），其余 5 个 IC 方向与 positive 相反 |
+
+> 上述冒烟只用了 `--limit 60`，220 次观测远低于 `sample` 检查的强门槛 200 中的「每个品种 200」，**不足以定论**。Phase 1 收尾要用 `--limit 800` 或全量重跑，并按实际 IC 分布标定 `min_ic_abs` / `min_ir`（见下方风险 2）。
 
 **这次实跑改掉了计划里的一个真 bug**：`ic_stats` 原实现无条件判定 IR，当只有 1 个分品种组时 `ic_std == 0` 导致 `ir == 0.0`，于是任何单品种因子都会被误报"方向性 IR 0.0000 < 0.3"。正确语义是 **IR 在组数 < 2 时无定义**，已加 `len(per_group_ic) >= 2` 守卫，并已把修正写回上面的 Step 3 代码块。
 
