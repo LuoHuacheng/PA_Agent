@@ -203,9 +203,9 @@ def test_dedupe_keeps_the_deepest_history_for_a_repeated_bar():
 
 def test_build_extractors_defaults_to_both_spaces():
     names = set(build_extractors())
-    assert len(names) == 17
+    assert len(names) == 15
     assert len([n for n in names if n.startswith("geometry.")]) == 6
-    assert len([n for n in names if n.startswith("market.")]) == 11
+    assert len([n for n in names if n.startswith("market.")]) == 9
 
 
 def test_build_extractors_can_select_a_single_space():
@@ -358,10 +358,16 @@ def _noisy_facts() -> dict[str, list[BarFact]]:
 
 
 def test_market_extractors_exclude_absolute_price_levels():
+    """绝对价位不是因子: 跨期价格漂移会污染 IC, 且伪信号在分折检验里会显得异常稳定."""
     names = set(market_extractors())
     assert "market.range_high" not in names
     assert "market.range_low" not in names
+    assert "market.invalidation_long" not in names
+    assert "market.invalidation_short" not in names
+    # 尺度无关的位置类特征必须保留
     assert "market.price_position" in names
+    assert "market.dist_to_high_atr" in names
+    assert "market.dist_to_low_atr" in names
 
 
 def test_abs_ic_and_ir_matches_ic_stats_caliber():

@@ -25,6 +25,21 @@ from tools.factor_audit import (
     permutation_null,
 )
 
+
+def _price_control() -> dict:
+    """对照项: 原始收盘价本身.
+
+    绝对价位不该当因子, 但放进同一张表当对照可以暴露"价位类伪信号":
+    若它表现出与价位类特征同样的跨折稳定性, 说明那类稳定性来自价格水平漂移,
+    而不是对下一根收益的预测力。
+    """
+
+    def extractor(frame):
+        return float(frame.bars[0].close) if frame.bars else None
+
+    return {"control.close_price": extractor}
+
+
 # ── 事前冻结的规则 ──
 FROZEN_FOLDS = 6  # 连续时间折数
 FROZEN_ROUNDS = 200  # 每折族级零分布的置换轮数
@@ -78,7 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"复用缓存: {cache}")
     else:
         for i, fold_paths in enumerate(folds):
-            facts = collect_facts(load_frames(fold_paths), build_extractors())
+            extractors = {**build_extractors(), **_price_control()}
+            facts = collect_facts(load_frames(fold_paths), extractors)
             null = permutation_null(facts, rounds=args.rounds, seed=FROZEN_SEED, family_wise=True)
             row: dict[str, tuple[float, float, int]] = {}
             for name, rows in facts.items():

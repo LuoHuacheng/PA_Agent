@@ -865,8 +865,10 @@ MARKET_NUMERIC_FIELDS = (
     "barbwire_score",
     "pullback_depth_atr",
     "pullback_bars",
-    "invalidation_long",
-    "invalidation_short",
+    # invalidation_long / invalidation_short 已移除: 它们等于最近摆动点的**绝对价格**
+    # (market_features.py: invalidation_long = supports[0] = pivot.price), 与 range_high /
+    # range_low 同类 —— 跨期价格漂移会直接污染 IC, 且这类伪信号在分折检验里会显得异常
+    # "稳定"(价格水平本身日间自相关), 比真信号更像真信号。要用必须先归一到 ATR 或百分比。
 )
 
 
