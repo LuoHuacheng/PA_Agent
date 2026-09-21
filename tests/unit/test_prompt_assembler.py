@@ -596,6 +596,63 @@ def test_incremental_stage1_prompt_includes_previous_record_and_new_bars(
     assert "程序结构辅助特征以本消息为准" in incremental_user
 
 
+def test_incremental_stage1_shifts_previous_kline_refs(
+    assembler: PromptAssembler,
+) -> None:
+    """上一轮 K 引用按新增根数整体 +N 平移后再喂给模型，incremental_delta 不参与平移。"""
+    import json
+
+    from pa_agent.records.schema import AnalysisRecord, RecordMeta
+
+    frame = _make_frame(6)
+    full_s1_messages = assembler.build_stage1(frame)
+
+    previous = AnalysisRecord(
+        meta=RecordMeta(
+            timestamp_local_iso="2026-01-01T00:00:00.000",
+            timestamp_local_ms=1,
+            symbol="XAUUSD",
+            timeframe="1h",
+            bar_count=4,
+            ai_provider={},
+        ),
+        kline_data=[],
+        htf_text="",
+        stage1_messages=full_s1_messages,
+        stage1_response={"content": "{}"},
+        stage1_diagnosis={
+            "bar_range": "K1-K3",
+            "bar_from": 1,
+            "bar_to": 3,
+            "reason": "K2 放量突破",
+            "incremental_delta": {"new_closed_bars": ["K1"]},
+        },
+        stage2_messages=[],
+        stage2_response=None,
+        stage2_decision={"reason": "K1 回踩确认"},
+        strategy_files_used=[],
+        experience_loaded=[],
+        exception=None,
+        usage_total={},
+    )
+
+    messages = assembler.build_incremental_stage1(frame, previous, 2)
+
+    prev_diag = json.loads(messages[2]["content"])
+    assert prev_diag["bar_range"] == "K3-K5"
+    assert prev_diag["reason"] == "K4 放量突破"
+    assert prev_diag["bar_from"] == 3
+    assert prev_diag["bar_to"] == 5
+    # 上一轮增量事实不参与平移
+    assert prev_diag["incremental_delta"] == {"new_closed_bars": ["K1"]}
+
+    incremental_user = messages[3]["content"]
+    assert "序号平移说明" in incremental_user
+    assert "上一轮 K1 在本轮为 K3" in incremental_user
+    assert "K1 回踩确认" not in incremental_user
+    assert "K3 回踩确认" in incremental_user
+
+
 def test_incremental_stage1_normalizes_fenced_previous_response(
     assembler: PromptAssembler,
 ) -> None:
