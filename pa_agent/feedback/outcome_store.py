@@ -55,6 +55,10 @@ OUTCOME_FIELDNAMES = [
 
 _AUDIT_INCOME_TYPES = ("REALIZED_PNL", "COMMISSION")
 
+#: attach_decisions 的四种归因状态(契约见 pa_agent.trading.replay_pairing).
+#: 覆盖率按状态分开报: manual 是"没解析出 clientOrderId", 不等于"人工下单".
+ATTRIBUTION_STATUSES = ("matched", "manual", "missing_decision", "ambiguous")
+
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -587,20 +591,157 @@ def _prune_experience_dir(subdir: Path, keep: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+def dedupe_income_rows(income_rows: list[dict]) -> list[dict]:
+    """去掉重复的 income 流水.
+
+    tools/outcome_merge 按品种循环调 fetch_account_data, 而 client.income_history
+    不带品种过滤 —— 同一份账户流水被拉 N 次, 直接 extend 就把账户真相放大了 N 倍.
+    按 tranId 去重, 缺失时退回 (时间, 品种, 类型, 金额, 资产).
+    """
+    seen: set = set()
+    out: list[dict] = []
+    for row in income_rows:
+        if not isinstance(row, dict):
+            continue
+        key = row.get("tranId")
+        if key in (None, ""):
+            key = (
+                row.get("time"),
+                row.get("symbol"),
+                row.get("incomeType"),
+                row.get("income"),
+                row.get("asset"),
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def income_net_by_symbol(income_rows: list[dict]) -> dict[str, float]:
+    """账户真相: 按品种汇总 income 流水里的已实现盈亏与手续费.
+
+    income 由交易所给出, 不依赖本地归因, 所以它才是"账户到底亏了多少"的基准。
+    """
+    out: dict[str, float] = {}
+    for r in income_rows:
+        if r.get("incomeType") not in _AUDIT_INCOME_TYPES:
+            continue
+        sym = str(r.get("symbol") or "")
+        if sym:
+            out[sym] = out.get(sym, 0.0) + float(r.get("income") or 0.0)
+    return out
+
+
+def _trade_net(trades: list[dict]) -> float:
+    """一组交易腿的已实现盈亏加手续费."""
+    return sum(float(t.get("realized") or 0.0) + float(t.get("fees") or 0.0) for t in trades)
+
+
+def cid_visible_from(orders_by_symbol: dict | None) -> dict[str, int]:
+    """每个品种 allOrders 能看到的最早订单时间.
+
+    交易所订单列表只回溯约一周(2026-09-21 实测到 09-15 12:01), 更早的成交腿查不到
+    clientOrderId, 于是被 attach_decisions 归成 manual. 这个时间戳就是"manual 到底是
+    历史过期还是真外部单"的分界线.
+    """
+    out: dict[str, int] = {}
+    for sym, orders in (orders_by_symbol or {}).items():
+        times = [int(o.get("time") or o.get("updateTime") or 0) for o in orders or []]
+        times = [t for t in times if t]
+        if times:
+            out[str(sym)] = min(times)
+    return out
+
+
+def account_coverage(
+    income_rows: list[dict],
+    attached: list[dict],
+    rows: list[dict],
+    *,
+    strategy_symbols: list[str] | None = None,
+    orders_by_symbol: dict | None = None,
+) -> dict:
+    """账户真相 vs 归因子集: 覆盖率必须与结论一起报.
+
+    outcomes.csv 只是"能归因到决策记录的那部分成交". 2026-09-21 实测 30 天窗口:
+    917 条交易腿里只有 25 条带 pa-entry 前缀(交易所订单列表只回溯约一周, 本地订单
+    账本 2026-09-18 才开始记), 而账户实现 -2052U 里 83% 来自策略没碰过的品种.
+    只报 outcomes 净额会把它当成账户结论, 所以三层要一起算出来.
+    """
+    by_symbol = income_net_by_symbol(income_rows)
+    account_net = sum(by_symbol.values())
+    scope = {str(s).upper() for s in (strategy_symbols or [])}
+    if not scope:
+        scope = {str(t.get("sym") or "").upper() for t in attached} - {""}
+    strategy_net = sum(v for s, v in by_symbol.items() if s.upper() in scope)
+    off_scope = {s: v for s, v in by_symbol.items() if s.upper() not in scope}
+    matched = [t for t in attached if t.get("status") == "matched"]
+    matched_net = _trade_net(matched)
+    total = len(attached)
+    return {
+        "trades_total": total,
+        "trades_matched": len(matched),
+        "trade_coverage": (len(matched) / total) if total else None,
+        "account_income_net": account_net,
+        "strategy_income_net": strategy_net,
+        "off_scope_net": sum(off_scope.values()),
+        "off_scope_symbols": dict(sorted(off_scope.items())),
+        "attributed_net": matched_net,
+        "outcomes_net": sum(float(r.get("net_usdt") or 0.0) for r in rows),
+        "net_coverage": (matched_net / strategy_net) if strategy_net else None,
+        "account_coverage": (matched_net / account_net) if account_net else None,
+        "net_by_status": {
+            name: _trade_net([t for t in attached if t.get("status") == name])
+            for name in ATTRIBUTION_STATUSES
+        },
+        **_cid_window_coverage(attached, orders_by_symbol),
+    }
+
+
+def _cid_window_coverage(attached: list[dict], orders_by_symbol: dict | None) -> dict:
+    """把 manual 拆成"订单历史过期"与"真外部单", 并给出窗口内的归因率."""
+    visible = cid_visible_from(orders_by_symbol)
+    global_from = min(visible.values()) if visible else None
+    manual = [t for t in attached if t.get("status") == "manual"]
+    expired: list[dict] = []
+    external: list[dict] = []
+    for t in manual:
+        cut = visible.get(str(t.get("sym") or ""), global_from)
+        opened = int(t.get("opened_at") or 0)
+        if cut is not None and opened and opened < cut:
+            expired.append(t)
+        else:
+            external.append(t)
+    in_window = [
+        t
+        for t in attached
+        if (cut := visible.get(str(t.get("sym") or ""), global_from)) is None
+        or int(t.get("opened_at") or 0) >= cut
+    ]
+    matched_in_window = [t for t in in_window if t.get("status") == "matched"]
+    return {
+        "cid_visible_from_ms": global_from,
+        "cid_visible_from": visible,
+        "expired_cid_count": len(expired),
+        "expired_cid_net": _trade_net(expired),
+        "external_count": len(external),
+        "external_net": _trade_net(external),
+        "window_trades_total": len(in_window),
+        "window_trades_matched": len(matched_in_window),
+        "window_trade_coverage": (
+            (len(matched_in_window) / len(in_window)) if in_window else None
+        ),
+    }
+
+
 def symbol_income_diff(income_rows: list[dict], trades: list[dict]) -> dict[str, float]:
     trade_syms = {str(t.get("sym") or "") for t in trades}
     trade_syms.discard("")
     if not trade_syms:
         return {}  # nothing to reconcile against
-    inc: dict[str, float] = {}
-    for r in income_rows:
-        if str(r.get("symbol") or "") not in trade_syms:
-            continue
-        if r.get("incomeType") not in _AUDIT_INCOME_TYPES:
-            continue
-        sym = str(r.get("symbol") or "")
-        if sym:
-            inc[sym] = inc.get(sym, 0.0) + float(r.get("income") or 0.0)
+    inc = {s: v for s, v in income_net_by_symbol(income_rows).items() if s in trade_syms}
     trade_sum: dict[str, float] = {}
     for t in trades:
         sym = str(t.get("sym") or "")
@@ -620,6 +761,10 @@ def build_audit_summary(
     income_rows: list[dict],
     csv_only: int,
     pending_only: int,
+    attached: list[dict] | None = None,
+    rows: list[dict] | None = None,
+    strategy_symbols: list[str] | None = None,
+    orders_by_symbol: dict | None = None,
 ) -> dict:
     """Merge the attribution audit with cross-source drift and income diff."""
     pending_set = _variant_set(pending_rows)
@@ -642,6 +787,14 @@ def build_audit_summary(
             "csv_only": len(csv_set - pending_set),
         },
     }
+    if attached is not None:
+        summary["coverage"] = account_coverage(
+            income_rows,
+            attached,
+            rows or [],
+            strategy_symbols=strategy_symbols,
+            orders_by_symbol=orders_by_symbol,
+        )
     return summary
 
 
@@ -666,6 +819,7 @@ def merge_all(
     income_rows = account_cache.get("income") or []
     if isinstance(income_rows, dict):
         income_rows = [r for lst in income_rows.values() for r in lst]
+    income_rows = dedupe_income_rows(income_rows)
 
     pending_rows = load_decision_records(
         records_root, symbols=symbols, days=days, now_ms=now_ms
@@ -692,6 +846,10 @@ def merge_all(
         income_rows=income_rows,
         csv_only=csv_only,
         pending_only=pending_only,
+        attached=attached,
+        rows=rows,
+        strategy_symbols=symbols,
+        orders_by_symbol=orders,
     )
     audit["rows_outcome"] = len(rows)
     return rows, audit

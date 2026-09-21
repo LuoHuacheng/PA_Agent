@@ -116,6 +116,28 @@ def main() -> int:
     print(f"决策记录: pending={audit['decisions_pending']} csv={audit['decisions_csv']}")
     print(f"归属: matched={audit['matched']} manual={audit['manual']} "
           f"missing={audit['missing_decision']} ambiguous={audit['ambiguous']}")
+    cov = audit.get("coverage") or {}
+    if cov:
+        print(
+            f"账户真相(income): 全账户 {cov['account_income_net']:.2f}U"
+            f" | 策略范围 {cov['strategy_income_net']:.2f}U"
+            f" | 策略外 {cov['off_scope_net']:.2f}U"
+        )
+        worst = sorted(
+            (cov.get("off_scope_symbols") or {}).items(), key=lambda kv: kv[1]
+        )[:5]
+        if worst:
+            print("  策略外最大 5 项:", ", ".join(f"{s}={v:.2f}U" for s, v in worst))
+        print(
+            f"归因覆盖率: 第1层(全部) {cov['trades_matched']}/{cov['trades_total']}"
+            f" | 第2层(订单可见窗口内)"
+            f" {cov['window_trades_matched']}/{cov['window_trades_total']}"
+        )
+        print(
+            f"  manual 拆分: 订单历史过期 {cov['expired_cid_count']} 条"
+            f" {cov['expired_cid_net']:.2f}U"
+            f" | 真外部单 {cov['external_count']} 条 {cov['external_net']:.2f}U"
+        )
     print(f"新 OutcomeRows: {audit['rows_outcome']} (uid 幂等去重落盘)")
     print("income 对账:", audit["income_diff_by_symbol"])
     print("audit:", audit_path)

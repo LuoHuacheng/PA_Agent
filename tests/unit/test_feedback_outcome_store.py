@@ -15,9 +15,13 @@ from pathlib import Path
 import pytest
 
 from pa_agent.feedback.outcome_store import (
+    account_coverage,
     build_audit_summary,
     build_outcome_rows,
+    cid_visible_from,
+    dedupe_income_rows,
     export_experience_cases,
+    income_net_by_symbol,
     load_csv_fallback,
     load_decision_records,
     merge_all,
@@ -523,3 +527,134 @@ def test_merge_all_end_to_end(tmp_path):
     assert rows[0]["source"] == "pending"
     assert rows[0]["strategy_files"] == ("震荡区间交易策略.txt", "震荡区间分析识别.txt")
     assert audit["income_diff_by_symbol"][SYM] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# 账户真相 vs 归因覆盖率 (2026-09-21)
+# ---------------------------------------------------------------------------
+
+
+def test_income_net_by_symbol_sums_audit_types_only():
+    income = [
+        {"symbol": SYM, "incomeType": "REALIZED_PNL", "income": 10.0},
+        {"symbol": SYM, "incomeType": "COMMISSION", "income": -0.5},
+        {"symbol": SYM, "incomeType": "FUNDING_FEE", "income": -9.0},
+        {"symbol": "ETHUSDT", "incomeType": "TRANSFER", "income": 99.0},
+    ]
+    out = income_net_by_symbol(income)
+    assert out[SYM] == pytest.approx(9.5)
+    assert "ETHUSDT" not in out
+
+
+def _leg(sym, status, net, opened_at):
+    return {
+        "sym": sym,
+        "status": status,
+        "realized": net,
+        "fees": 0.0,
+        "opened_at": opened_at,
+    }
+
+
+def test_cid_visible_from_takes_earliest_order_time():
+    orders = {
+        "BTCUSDT": [{"time": 5000}, {"time": 9000}],
+        "ETHUSDT": [{"updateTime": 3000}],
+        "EMPTYUSDT": [],
+    }
+    assert cid_visible_from(orders) == {"BTCUSDT": 5000, "ETHUSDT": 3000}
+
+
+def test_account_coverage_separates_scope_and_window():
+    income = [
+        {"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": -100.0},
+        {"symbol": "HEMIUSDT", "incomeType": "REALIZED_PNL", "income": -900.0},
+    ]
+    orders = {"BTCUSDT": [{"time": 1000}]}
+    attached = [
+        _leg("BTCUSDT", "matched", -10.0, 1500),
+        _leg("BTCUSDT", "manual", -60.0, 500),
+        _leg("BTCUSDT", "manual", -30.0, 2000),
+        _leg("HEMIUSDT", "manual", -900.0, 5000),
+    ]
+    cov = account_coverage(
+        income, attached, [], strategy_symbols=["BTCUSDT"], orders_by_symbol=orders
+    )
+    assert cov["account_income_net"] == pytest.approx(-1000.0)
+    assert cov["strategy_income_net"] == pytest.approx(-100.0)
+    assert cov["off_scope_net"] == pytest.approx(-900.0)
+    assert cov["off_scope_symbols"] == {"HEMIUSDT": -900.0}
+    assert cov["trades_matched"] == 1
+    assert cov["trade_coverage"] == pytest.approx(0.25)
+    assert cov["expired_cid_count"] == 1
+    assert cov["expired_cid_net"] == pytest.approx(-60.0)
+    assert cov["external_count"] == 2
+    assert cov["external_net"] == pytest.approx(-930.0)
+    assert cov["window_trades_total"] == 3
+    assert cov["window_trades_matched"] == 1
+    assert cov["window_trade_coverage"] == pytest.approx(1 / 3)
+
+
+def test_account_coverage_marks_manual_external_without_orders():
+    income = [{"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": -5.0}]
+    attached = [_leg("BTCUSDT", "manual", -5.0, 1000)]
+    cov = account_coverage(income, attached, [], strategy_symbols=["BTCUSDT"])
+    assert cov["cid_visible_from_ms"] is None
+    assert cov["expired_cid_count"] == 0
+    assert cov["external_count"] == 1
+    assert cov["window_trade_coverage"] == pytest.approx(0.0)
+
+
+def test_account_coverage_defaults_scope_to_traded_symbols():
+    income = [
+        {"symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": -5.0},
+        {"symbol": "LTCUSDT", "incomeType": "REALIZED_PNL", "income": -7.0},
+    ]
+    cov = account_coverage(income, [_leg("BTCUSDT", "matched", -5.0, 1)], [])
+    assert cov["strategy_income_net"] == pytest.approx(-5.0)
+    assert cov["off_scope_net"] == pytest.approx(-7.0)
+
+
+def test_build_audit_summary_includes_coverage_when_attached():
+    income = [{"symbol": SYM, "incomeType": "REALIZED_PNL", "income": -10.0}]
+    summary = build_audit_summary(
+        {"matched": 1, "manual": 0, "missing_decision": 0, "ambiguous": 0},
+        [],
+        [],
+        trades=[{"sym": SYM, "realized": -10.0, "fees": 0.0}],
+        income_rows=income,
+        csv_only=0,
+        pending_only=0,
+        attached=[_leg(SYM, "matched", -10.0, 1)],
+        rows=[{"net_usdt": "-10.0"}],
+        strategy_symbols=[SYM],
+    )
+    assert summary["coverage"]["trades_matched"] == 1
+    assert summary["coverage"]["outcomes_net"] == pytest.approx(-10.0)
+
+
+def test_build_audit_summary_without_attached_has_no_coverage():
+    summary = build_audit_summary(
+        {"matched": 0, "manual": 0, "missing_decision": 0, "ambiguous": 0},
+        [],
+        [],
+        trades=[],
+        income_rows=[],
+        csv_only=0,
+        pending_only=0,
+    )
+    assert "coverage" not in summary
+
+
+def test_dedupe_income_rows_collapses_repeated_fetch():
+    row = {"symbol": SYM, "incomeType": "REALIZED_PNL", "income": -10.0,
+           "time": 1000, "tranId": 7, "asset": "USDT"}
+    other = {"symbol": SYM, "incomeType": "COMMISSION", "income": -0.04,
+             "time": 1001, "tranId": 8, "asset": "USDT"}
+    assert dedupe_income_rows([row, other, row, other]) == [row, other]
+
+
+def test_dedupe_income_rows_falls_back_to_row_tuple():
+    row = {"symbol": SYM, "incomeType": "REALIZED_PNL", "income": -10.0, "time": 1000}
+    twin = dict(row)
+    assert dedupe_income_rows([row, twin]) == [row]
