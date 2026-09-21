@@ -2289,6 +2289,72 @@ def test_tp_runner_ignores_stale_amount_drift_before_tp1(monkeypatch) -> None:
     assert _tp_cancels(client)[0]["client_algo_id"] == "pa-tp-part0001"
 
 
+def test_tp1_partial_filled_requires_both_bounds() -> None:
+    """半仓判定必须双侧: 建仓碎片量小于 TP1 后应有量时不算半仓。"""
+    pred = position_manager._tp1_partial_filled
+    qty, partial = Decimal("16.94"), Decimal("8.47")
+    assert pred(amount=Decimal("8.47"), qty=qty, partial_qty=partial)
+    assert pred(amount=Decimal("-8.47"), qty=qty, partial_qty=partial), "空单取绝对值"
+    assert not pred(amount=Decimal("1.62"), qty=qty, partial_qty=partial), "建仓碎片量"
+    assert not pred(amount=Decimal("16.94"), qty=qty, partial_qty=partial), "满仓未减"
+    assert not pred(amount=Decimal("0"), qty=qty, partial_qty=partial), "已清仓"
+
+
+def test_tp_runner_ignores_entry_fragment_below_half_remainder(monkeypatch) -> None:
+    """建仓碎片量小于 TP1 后应有剩量时, 不得被当成 TP1 已半平。
+
+    回归 2026-09-21 LINKUSDT: 入场 16.94 分两笔成交(17:05:10 成交 1.62, 17:05:18
+    成交 15.32), 账户快照停在首笔 1.62; 旧判定只比上界(abs(amount) <= 8.47), 于是
+    开仓 1 秒后就撤掉信号止损 12.554、把满仓止损顶到入场价 12.790 —— 而 TP1 13.231
+    从未成交(交易所侧无任何 SELL 半平成交)。
+    """
+    _register_tp_record(extra={"qty": "16.94", "partial_qty": "8.47"})
+    client = PartialRunnerClient([1.62, 16.94, 8.47])
+    sleeps = _run_tp_runner(client, monkeypatch)
+    assert len(sleeps) == 2, "碎片量与满仓都不是半仓, 必须等待而不是移损"
+    places = _tp_places(client)
+    assert len(places) == 3, places
+    assert places[0].get("quantity") == Decimal("8.47"), "桥接单用真实剩余量, 不是碎片量"
+    assert _tp_cancels(client)[1]["client_algo_id"] == "pa-sl-old0001"
+
+
+class _FrozenSnapshotPoller:
+    """共享账户快照停在固定仓位上(模拟快照轮询滞后)。"""
+
+    def __init__(self, amount: str) -> None:
+        self._row = {"amount": Decimal(amount), "entry": Decimal("100")}
+
+    def snapshot_ready(self) -> bool:
+        return True
+
+    def position(self, symbol: str) -> dict:
+        return dict(self._row)
+
+    def mark_price(self, symbol: str) -> Decimal:
+        return Decimal("100")
+
+
+def test_tp_runner_confirms_half_close_with_direct_position_read(monkeypatch) -> None:
+    """快照显示已到 TP1 剩余量时, 也必须经直连 REST 复核才能移损。
+
+    账户快照轮询在 WS 健康时周期可达 300s: 快照可以停在任意历史时刻的仓位上。
+    这里快照停在 8.47(TP1 后应有量), 直连复核却是满仓 16.94, 因此必须继续等待,
+    不得撤掉信号止损。
+    """
+    _register_tp_record(extra={"qty": "16.94", "partial_qty": "8.47"})
+    monkeypatch.setattr(
+        binance_usdm_testnet, "_snapshot_poller", _FrozenSnapshotPoller("8.47")
+    )
+    client = PartialRunnerClient([16.94, 8.47])
+    sleeps = _run_tp_runner(client, monkeypatch)
+    assert len(sleeps) == 1, "直连复核发现仍是满仓 16.94, 必须等待"
+    assert _tp_cancels(client)[0]["client_algo_id"] == "pa-tp-part0001"
+    places = _tp_places(client)
+    assert places[0].get("quantity") == Decimal("8.47")
+    record = binance_usdm_testnet._read_guard("BTCUSDT")
+    assert record is not None and record["partial_done"] is True
+
+
 def test_tp_runner_tolerates_missing_stop_on_swap(monkeypatch) -> None:
     """撤原 SL 遇 -2011(已被撤): 视为已撤, 桥接+正式保本+TP2 照常落地。"""
     _register_tp_record()

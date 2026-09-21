@@ -201,13 +201,18 @@ def _tp1_partial_filled(*, amount: Decimal, qty: Decimal, partial_qty: Decimal) 
 
     不能再用 amount != qty 判定: 建仓被交易所拆成几十笔碎片成交时, 持仓快照会短暂
     停在中间量(2026-09-20 LINKUSDT: 已成交 25.03 / 记录 26.49), 于是 runner 在 TP1
-    根本没成交时就把止损挪到 entry(=当时市价) → 交易所 -2021 拒单。手工减仓等其它
-    缩量同理, 都不该被当成 TP1 已成交。
+    根本没成交时就把止损挪到 entry(=当时市价) → 交易所 -2021 拒单。
+
+    也不能只判上界 amount <= expected —— 建仓碎片量比 TP1 后的剩余量更小, 会把"刚
+    成交 1.62 / 应建 16.94"当成"已半平到 8.47", 从而撤掉信号的结构止损(2026-09-21
+    LINKUSDT: 快照停在碎片 1.62, 信号止损 12.554 被顶到入场价 12.790)。只有落在
+    expected 容差带内才算半仓; 手工减仓等其它缩量同理, 都不该被当成 TP1 已成交。
     """
     expected = qty - partial_qty
     if expected <= 0:
         return False
-    return abs(amount) <= expected + qty * _TP1_AMOUNT_REL_TOLERANCE
+    tolerance = qty * _TP1_AMOUNT_REL_TOLERANCE
+    return abs(abs(amount) - expected) <= tolerance
 
 
 def _rehang_stop_candidates(
@@ -879,7 +884,62 @@ def _tp_runner_loop(
             budget.reset()
             time.sleep(poll_seconds)
             continue
-        # TP1 半仓已触发(|amount| < qty): 进入 TP2 阶段。
+        # 命中半仓判定: 读到的可能是滞后的共享快照(账户快照轮询在 WS 健康时周期
+        # 可达 300s), 不能拿它做撤单/移损这种不可逆动作。移损前用直连 REST 复核
+        # 一次真实仓位, 复核不符就继续等(2026-09-21 LINKUSDT: 快照停建仓碎片 1.62,
+        # 满仓 16.94 的结构止损 12.554 被撤, 顶到入场价 12.790)。
+        try:
+            confirm = client.position_info(symbol)
+        except BinanceAPIError as exc:
+            if _is_rate_limit_reason(str(exc)):
+                _guard_rate_limit_wait(poll_seconds)
+                continue
+            if is_transient_error(exc):
+                _sleep_after_transient(
+                    budget,
+                    symbol=symbol,
+                    scope="TP runner position confirmation",
+                    exc=exc,
+                    poll_seconds=poll_seconds,
+                )
+                continue
+            _exhausted = budget.record()
+            logger.warning(
+                "TP runner position confirmation failed for %s (attempt %d): %s",
+                symbol,
+                budget.count,
+                exc,
+            )
+            if _exhausted:
+                logger.error(
+                    "TP runner gave up confirming the position for %s; partial "
+                    "TP1 stays in place",
+                    symbol,
+                )
+                return
+            time.sleep(poll_seconds)
+            continue
+        confirmed_amount = confirm.get("amount")
+        if not isinstance(confirmed_amount, Decimal):
+            confirmed_amount = None
+        if confirmed_amount is None or not _tp1_partial_filled(
+            amount=confirmed_amount, qty=qty, partial_qty=partial_qty
+        ):
+            budget.reset()
+            logger.info(
+                "TP runner: %s half-close unconfirmed by fresh position read "
+                "(snapshot %s, live %s); TP1 not filled yet, keeping stop",
+                symbol,
+                _decimal_text(amount),
+                _decimal_text(confirmed_amount) if confirmed_amount is not None else "n/a",
+            )
+            time.sleep(poll_seconds)
+            continue
+        amount = confirmed_amount
+        confirmed_entry = confirm.get("entry")
+        if isinstance(confirmed_entry, Decimal) and confirmed_entry > 0:
+            entry = confirmed_entry
+        # TP1 半仓已触发(|amount| ~= qty - partial_qty): 进入 TP2 阶段。
         # 临界区: 与保本 guard 的移损互斥(per-symbol 锁), 锁内重读注册表, 防双撤双挂。
         with _manager_lock(symbol):
             fresh = _read_guard(symbol)
