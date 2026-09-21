@@ -37,6 +37,7 @@ import json
 import os
 import random
 import sys
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
@@ -237,7 +238,7 @@ def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
                   partial_pct, timeout_min, time_stop_min,
                   min_stop_pct=0.0, min_stop_atr=0.0,
                   be_trigger=None, entry_gtx=False,
-                  maker_fee=None, taker_fee=None):
+                  maker_fee=None, taker_fee=None, structure_exit=None):
     """在决策时刻之后的 K 线上重演一次计划单."""
     side = 1 if plan.direction == "做多" else -1
     entry, stop, target = plan.entry, plan.stop, plan.target
@@ -347,6 +348,7 @@ def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
     stage = 1
     be_stop = None  # 保本移损生效价; 触发后下一根 K 起才检查(保守, 移单有延迟)
     be_armed_pending = False
+    struct_streak = 0
     last_i = min(len(future) - 1, fill_i + max_hold_bars)
     for j in range(fill_i + 1, min(len(future), fill_i + 1 + max_hold_bars)):
         _ts, o, h, low, _c = future[j]
@@ -385,6 +387,24 @@ def simulate_plan(plan, timeline, *, risk_usdt, fee_rate, leverage, margin_usdt,
             remaining = 0.0
             reason = "tp2"
             break
+        if structure_exit is not None:
+            # 生产侧结构否定在每根收盘后评估: 诊断连续看反, 且收盘已破入场但未触止损.
+            # 本根若已触发止损或 TP, 前面已 break; 走到这里说明静态单还没动.
+            direction = structure_exit["index"].in_bar(
+                (plan.symbol, plan.timeframe), _ts, bar_ms
+            )
+            if direction is not None and direction == _ANTI_DIRECTION[side]:
+                struct_streak += 1
+            else:
+                struct_streak = 0
+            if struct_streak >= int(structure_exit["confirm_bars"]):
+                inside = (stop < _c < fill_px) if side == 1 else (fill_px < _c < stop)
+                if inside:
+                    gross += (_c - fill_px) * side * remaining
+                    exits.append((_c, remaining))
+                    remaining = 0.0
+                    reason = "structure_exit"
+                    break
     if remaining > 0:
         last_px = future[last_i][4]
         gross += (last_px - fill_px) * side * remaining
@@ -941,12 +961,24 @@ def gate_reasons(plan, gates) -> tuple:
     return tuple(reasons)
 
 
-def apply_entry_gates(plans, gates):
-    """按入口门控筛计划单; 返回 (放行的计划单, 各拦截原因计数)."""
+def apply_entry_gates(plans, gates, *, rounds=None, direction_gates=False):
+    """按入口门控筛计划单; 返回 (放行的计划单, 各拦截原因计数).
+
+    rounds 非空且 direction_gates 为真时, 一并应用方向闸门 G1/G2.
+    """
     counts = Counter()
     admitted = []
     for plan in plans:
-        reasons = gate_reasons(plan, gates)
+        reasons = list(gate_reasons(plan, gates))
+        if direction_gates and rounds is not None:
+            key = (plan.symbol, plan.timeframe)
+            reasons += list(
+                direction_gate_reasons(
+                    plan,
+                    tick=infer_tick_from_bars(plan.bars),
+                    previous_direction=rounds.previous(key, plan.record_ms),
+                )
+            )
         if reasons:
             counts["+".join(reasons)] += 1
             continue
@@ -954,17 +986,162 @@ def apply_entry_gates(plans, gates):
     return admitted, counts
 
 
+#: 方向闸门 G1: 挂单价距最新收盘几 tick 之内视为追单.
+G1_CLOSE_TOUCH_TICKS = 2
+#: 结构否定离场要求的看反侧标签: 多单看空、空单看多.
+_ANTI_DIRECTION = {1: "bearish", -1: "bullish"}
+
+
+@dataclass
+class Round:
+    """一次分析轮次(含不下单的), 供 G2 与结构否定使用."""
+
+    record_ms: int
+    direction: str
+    close: float | None
+
+
+class RoundIndex:
+    """按 (symbol, timeframe) 索引分析轮次, 支持按时间二分.
+
+    轮次序列动辄上千条, 而每笔交易每根 K 都要查一次; 线性扫描会退化到 O(n^2).
+    """
+
+    def __init__(self, rounds):
+        self._ms = {}
+        self._dir = {}
+        for key, items in rounds.items():
+            # 二分查询的前提是时间升序; 调用方排序过也照排一遍, 免得这个前提
+            # 只在一处成立、被别的调用方踩到.
+            ordered = sorted(items, key=lambda item: item.record_ms)
+            self._ms[key] = [item.record_ms for item in ordered]
+            self._dir[key] = [item.direction for item in ordered]
+
+    def previous(self, key, record_ms):
+        """该计划单之前最近一轮的 stage-1 方向(与实盘 previous_record 同义)."""
+        ms = self._ms.get(key) or []
+        i = bisect_left(ms, record_ms) - 1
+        return self._dir[key][i] if i >= 0 else None
+
+    def in_bar(self, key, bar_start_ms, bar_ms):
+        """本根 K 线期间发生的最后一轮分析给出的 stage-1 方向."""
+        ms = self._ms.get(key) or []
+        i = bisect_right(ms, bar_start_ms + bar_ms) - 1
+        if i < 0 or ms[i] <= bar_start_ms:
+            return None
+        return self._dir[key][i]
+
+
+def load_rounds(pending_dir, *, days=None, symbols=None):
+    """收集所有分析轮次(含不下单的), 按 (symbol, timeframe) 分组.
+
+    load_plans 只保留真正下单的轮次; G2 比较的是上一轮 stage-1 判断, 结构否定
+    按轮次累计连续看反的根数, 两者都需要不下单的轮次, 所以这里单独扫一遍.
+    """
+    cutoff = _cutoff_from_days(days)
+    rounds = defaultdict(list)
+    for path in sorted(glob.glob(str(pending_dir / "*.json"))):
+        name = os.path.basename(path)
+        if cutoff and name[:10] < cutoff:
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except Exception:
+            continue
+        meta = doc.get("meta") or {}
+        symbol = str(meta.get("symbol") or "")
+        if symbols and symbol not in symbols:
+            continue
+        record_ms = meta.get("timestamp_local_ms")
+        if not record_ms:
+            continue
+        closes = []
+        for bar in doc.get("kline_data") or []:
+            ts = bar.get("ts_open")
+            value = _num(bar.get("close"))
+            if ts and value is not None:
+                closes.append((int(ts) - KLINE_EPOCH_OFFSET_MS, value))
+        closes.sort()
+        diag = doc.get("stage1_diagnosis") or {}
+        rounds[(symbol, str(meta.get("timeframe") or ""))].append(
+            Round(
+                record_ms=int(record_ms),
+                direction=str(diag.get("direction") or "").strip().lower(),
+                close=closes[-1][1] if closes else None,
+            )
+        )
+    for key in rounds:
+        rounds[key].sort(key=lambda item: item.record_ms)
+    return rounds
+
+
+def infer_tick_from_bars(bars):
+    """复刻 infer_price_tick_from_frame: 用快照里最多的小数位数推 tick."""
+    max_decimals = 0
+    for bar in bars:
+        for value in bar[1:5]:
+            text = f"{float(value):.12f}".rstrip("0")
+            if "." in text:
+                max_decimals = max(max_decimals, len(text.split(".")[1]))
+    if max_decimals <= 0:
+        return 1.0
+    return 10 ** (-min(max_decimals, 6))
+
+
+def direction_gate_reasons(plan, *, tick, previous_direction, g1_ticks=G1_CLOSE_TOUCH_TICKS):
+    """复刻 direction_gates.evaluate_direction_gates 的 G1/G2.
+
+    G1 收盘触碰: 挂单价距最新收盘 2 tick 以内 = 追单而非回踩.
+    G2 顺逆: 信号方向与上一轮 stage-1 判断相反.
+    两个条件都只用价格几何, 不解析 LLM 文本.
+    """
+    if not plan.bars:
+        return ()
+    reasons = []
+    if tick and tick > 0:
+        dist_ticks = abs(plan.entry - plan.bars[-1][4]) / tick
+        if dist_ticks <= g1_ticks + 1e-9:
+            reasons.append("G1_close_touch")
+    if previous_direction in ("bullish", "bearish"):
+        sign = 1 if plan.direction == "做多" else -1
+        conflict = (sign > 0 and previous_direction == "bearish") or (
+            sign < 0 and previous_direction == "bullish"
+        )
+        if conflict:
+            reasons.append("G2_flip")
+    return tuple(reasons)
+
+
 def run_replay(args):
+
     symbols = {s.strip().upper() for s in args.symbols.split(",") if s.strip()} or None
     plans = load_plans(PENDING_DIR, days=args.days, symbols=symbols)
     print("载入计划单:", len(plans))
+    want_rounds = bool(getattr(args, "direction_gates", False)) or (
+        getattr(args, "structure_exit", "off") == "on"
+    )
+    rounds = None
+    if want_rounds:
+        rounds = RoundIndex(load_rounds(PENDING_DIR, days=args.days, symbols=symbols))
+    struct_ctx = None
+    if rounds is not None and getattr(args, "structure_exit", "off") == "on":
+        struct_ctx = {
+            "index": rounds,
+            "confirm_bars": int(getattr(args, "structure_exit_bars", 2)),
+        }
     if getattr(args, "gates", False):
         gates = load_entry_gates(
             SETTINGS_PATH,
             section=getattr(args, "gate_section", GATE_CONFIG_SECTION),
             enabled_from=(getattr(args, "gate_start", "") or None),
         )
-        admitted, blocked = apply_entry_gates(plans, gates)
+        admitted, blocked = apply_entry_gates(
+            plans,
+            gates,
+            rounds=rounds,
+            direction_gates=bool(getattr(args, "direction_gates", False)),
+        )
         dropped = len(plans) - len(admitted)
         print(
             f"入口门控: 生效日 {gates.enabled_from or '全程'}, "
@@ -1005,7 +1182,8 @@ def run_replay(args):
             risk_usdt=args.risk_usdt, fee_rate=fee_rate, leverage=args.leverage,
             margin_usdt=args.margin_usdt, partial_pct=args.partial_pct,
             timeout_min=args.timeout_min, time_stop_min=args.time_stop_min,
-            min_stop_pct=args.min_stop_pct, min_stop_atr=args.min_stop_atr)
+            min_stop_pct=args.min_stop_pct, min_stop_atr=args.min_stop_atr,
+            structure_exit=struct_ctx)
         rows.append({
             "record_time": datetime.fromtimestamp(plan.record_ms / 1000, TZ8).strftime("%Y-%m-%d %H:%M:%S"),
             "symbol": plan.symbol, "timeframe": plan.timeframe,
@@ -1180,6 +1358,13 @@ def run_calibrate(args):
     by_file = {os.path.basename(p.path): p for p in plans}
     timelines = merge_timelines(plans)
     fee_rate = fee_rate_from_outcomes(OUTCOMES_CSV)
+    struct_ctx = None
+    if getattr(args, "structure_exit", "off") == "on":
+        rounds = RoundIndex(load_rounds(PENDING_DIR, days=args.days))
+        struct_ctx = {
+            "index": rounds,
+            "confirm_bars": int(getattr(args, "structure_exit_bars", 2)),
+        }
     print(f"真实成交口径手续费率: {fee_rate:.5f}")
 
     samples = []
@@ -1200,7 +1385,8 @@ def run_calibrate(args):
                 risk_usdt=args.risk_usdt, fee_rate=fee_rate, leverage=args.leverage,
                 margin_usdt=args.margin_usdt, partial_pct=args.partial_pct,
                 timeout_min=args.timeout_min, time_stop_min=args.time_stop_min,
-                min_stop_pct=args.min_stop_pct, min_stop_atr=args.min_stop_atr)
+                min_stop_pct=args.min_stop_pct, min_stop_atr=args.min_stop_atr,
+                structure_exit=struct_ctx)
             try:
                 real_net = float(row["net_usdt"])
                 real_risk = float(row["risk_usdt"])
@@ -1292,6 +1478,15 @@ def main():
     ap.add_argument(
         "--gate-section", default=GATE_CONFIG_SECTION,
         help="读取门控开关的配置段")
+    ap.add_argument(
+        "--direction-gates", action="store_true",
+        help="应用方向闸门 G1(收盘触碰)/G2(逆上一轮 stage-1 判断)")
+    ap.add_argument(
+        "--structure-exit", choices=["off", "dry_run", "on"], default="off",
+        help="结构否定提前平仓(生产侧 structure_exit_mode=on)")
+    ap.add_argument(
+        "--structure-exit-bars", type=int, default=2,
+        help="结构否定需连续看反的轮次数")
     ap.add_argument("--min-stop-pct", type=float, default=0.2,
                     help="止损距离下限(%%), 与 min_stop_distance_pct 同步")
     ap.add_argument("--no-stop-rr-guard", action="store_true",
