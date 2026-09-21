@@ -103,3 +103,40 @@ def test_active_intraday_bar_still_forming() -> None:
     head = _bar(ts_open)
     assert is_bar_still_forming(head, "15m", now_ms=now_ms)
     assert has_forming_bar_at_head([head], "15m", now_ms=now_ms)
+
+
+def test_ashare_daily_bar_respects_session_state(monkeypatch) -> None:
+    """A 股 1d：休市视为已收盘，开市仍算 forming（且必须真的走到会话判断）。"""
+    from pa_agent.data import ashare_common
+
+    ts_open = int(time.time() * 1000)  # 本日开盘 ≈ 当前，避开 1d/1w 的 6h 安全网
+    now_ms = ts_open + 60_000
+    head = _bar(ts_open)
+
+    calls: list[str] = []
+
+    def _closed() -> bool:
+        calls.append("checked")
+        return False
+
+    monkeypatch.setattr(ashare_common, "ashare_session_open", _closed)
+    assert is_bar_still_forming(head, "1d", now_ms=now_ms, symbol="600519") is False
+    assert calls == ["checked"], "会话判断被静默跳过（坏导入回归）"
+
+    monkeypatch.setattr(ashare_common, "ashare_session_open", lambda: True)
+    assert is_bar_still_forming(head, "1d", now_ms=now_ms, symbol="600519") is True
+
+
+def test_ashare_session_skipped_for_non_ashare_symbol(monkeypatch) -> None:
+    """非 A 股品种 / 非 1d 周期不得触碰 A 股会话判断。"""
+    from pa_agent.data import ashare_common
+
+    def _boom() -> bool:
+        raise AssertionError("不应为非 A 股品种调用 ashare_session_open")
+
+    monkeypatch.setattr(ashare_common, "ashare_session_open", _boom)
+    ts_open = int(time.time() * 1000)
+    now_ms = ts_open + 60_000
+
+    assert is_bar_still_forming(_bar(ts_open), "1d", now_ms=now_ms, symbol="XAUUSD") is True
+    assert is_bar_still_forming(_bar(ts_open), "15m", now_ms=now_ms, symbol="600519") is True

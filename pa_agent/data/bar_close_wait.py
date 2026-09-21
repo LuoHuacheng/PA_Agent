@@ -129,13 +129,10 @@ def is_bar_still_forming(
         now_ms = int(time.time() * 1000)
     tf = str(timeframe or "").strip().lower()
     if tf == "1d" and _looks_like_ashare_symbol(symbol):
-        try:
-            from pa_agent.data.akshare_source import _ashare_session_open
+        from pa_agent.data.ashare_common import ashare_session_open
 
-            if not _ashare_session_open():
-                return False
-        except ImportError:
-            pass
+        if not ashare_session_open():
+            return False
     duration_s = timeframe_to_seconds(timeframe)
     if duration_s is None:
         return True
