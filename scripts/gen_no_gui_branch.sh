@@ -95,6 +95,7 @@ cat > pa_agent/main.py <<'PY'
 启动直接进入无头监控。GUI 入口保留在主干分支的 pa_agent/main.py;
 本分支永不 merge 回主干。
 """
+
 from __future__ import annotations
 
 import logging
@@ -124,6 +125,7 @@ PY
 
 cat > pa_agent/demo/__init__.py <<'PY'
 """Demo mode: replay saved analysis records in the UI."""
+
 from pa_agent.demo.record_loader import (
     frame_from_record_klines,
     is_demo_playable,
