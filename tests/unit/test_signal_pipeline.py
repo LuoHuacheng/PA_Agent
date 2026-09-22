@@ -404,6 +404,53 @@ def test_session_window_label_is_inclusive_last_minute() -> None:
     assert _session_window_label(start_hour_utc=20, end_hour_utc=0) == "20:00-23:59 UTC"
 
 
+def test_session_block_active_combines_flag_and_window() -> None:
+    """唯一判据: 开关开着 + 落在窗口内。任何一边不满足都不算本轮会被拦。"""
+    from types import SimpleNamespace
+
+    from pa_agent.trading.signal_pipeline import session_block_active
+
+    def cfg(**kw):
+        base = dict(
+            block_session_entry=True,
+            block_session_utc_start_hour=20,
+            block_session_utc_end_hour=4,
+        )
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    assert session_block_active(cfg(block_session_entry=False), now_hour=20) is False
+    assert session_block_active(cfg(), now_hour=12) is False
+    assert session_block_active(cfg(), now_hour=19) is False
+    for hour in (20, 23, 0, 1, 3):
+        assert session_block_active(cfg(), now_hour=hour) is True
+    assert session_block_active(SimpleNamespace(block_session_entry=True), now_hour=22) is True
+    assert session_block_active(SimpleNamespace(block_session_entry=True), now_hour=10) is False
+    assert session_block_active(SimpleNamespace(), now_hour=22) is False
+
+
+def test_session_block_predicate_is_shared_by_gate_and_skip(monkeypatch) -> None:
+    """门控与跳过阶段二必须消费同一个谓词, 否则会悄悄分叉。
+
+    反证法: 把共用的 session_block_active 打成常量, 两边行为必须一起翻转。
+    任何一边留着自己的拷贝, 这个补丁就动不了它, 测试即失败。
+    """
+    from pa_agent.monitoring.light_gate import session_blocked_skip_reason
+    from pa_agent.trading import signal_pipeline as sp
+
+    settings = _env_settings(block_session_entry=True)
+    cfg = settings.binance_usdm_testnet
+    pipeline = SignalPipeline(settings)
+    inner = {"order_direction": "做多"}
+
+    monkeypatch.setattr(sp, "session_block_active", lambda *_a, **_k: True)
+    assert any(r.startswith("session_block") for r in pipeline._entry_block_reasons(inner))
+    assert session_blocked_skip_reason(cfg) != ""
+
+    monkeypatch.setattr(sp, "session_block_active", lambda *_a, **_k: False)
+    assert not any(r.startswith("session_block") for r in pipeline._entry_block_reasons(inner))
+    assert session_blocked_skip_reason(cfg) == ""
+
 def test_block_session_entry(monkeypatch) -> None:
     from pa_agent.trading.signal_pipeline import _session_blocked_now
 

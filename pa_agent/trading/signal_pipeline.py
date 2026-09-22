@@ -129,6 +129,22 @@ def _session_blocked_now(
     return hour >= start or hour < end
 
 
+def session_block_active(cfg: Any, *, now_hour: int | None = None) -> bool:
+    """该轮是否会被入口门控的 session_block 拦下。
+
+    门控(_entry_block_reasons)与"窗口内跳过阶段二"(monitoring.light_gate)共用这
+    一个判据。两处各留一份拷贝时, 将来窗口逻辑一变(按品种/周末/学出来的时段)就会
+    悄悄分叉 —— 门控放行却被跳过会白丢机会, 门控拦下却不跳会白花钱(2026-09-22)。
+    """
+    if not getattr(cfg, "block_session_entry", False):
+        return False
+    return _session_blocked_now(
+        now_hour,
+        start_hour_utc=int(getattr(cfg, "block_session_utc_start_hour", 20)),
+        end_hour_utc=int(getattr(cfg, "block_session_utc_end_hour", 4)),
+    )
+
+
 def _session_window_label(*, start_hour_utc: int, end_hour_utc: int) -> str:
     """门控文案里的窗口区间, 形如 20:00-03:59 UTC。
 
@@ -340,10 +356,7 @@ class SignalPipeline:
         allow = tuple(getattr(cfg, "block_cycle_allowlist", ()) or ())
         if allow and cycle and cycle not in allow:
             reasons.append(f"cycle_block: 周期位置 {cycle} 不在白名单({'/'.join(allow)})")
-        if getattr(cfg, "block_session_entry", False) and _session_blocked_now(
-            start_hour_utc=int(getattr(cfg, "block_session_utc_start_hour", 20)),
-            end_hour_utc=int(getattr(cfg, "block_session_utc_end_hour", 4)),
-        ):
+        if session_block_active(cfg):
             window = _session_window_label(
                 start_hour_utc=int(getattr(cfg, "block_session_utc_start_hour", 20)),
                 end_hour_utc=int(getattr(cfg, "block_session_utc_end_hour", 4)),
