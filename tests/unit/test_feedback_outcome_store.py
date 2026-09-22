@@ -782,3 +782,93 @@ def test_build_audit_summary_omits_contamination_without_bounds():
         attached=[_leg(SYM, "matched", -1.0, 1)],
     )
     assert "contamination" not in summary
+
+
+def _e2e_cache(tmp_path, income, *, root=None):
+    """与 test_merge_all_end_to_end 同一套素材, 只换 income 行.
+
+    root 可传入共享同一条 pending 目录: 两次运行读同一份决策记录, 差异就只剩
+    income —— 否则 record_file 里的绝对路径会污染对比.
+    """
+    inner = _inner(entry=100.0, stop=99.0, target=103.0, otype="市价单")
+    entry_cid = cid_variants(SYM, "做多", "市价单", 100.0, 99.0, 103.0)[0]
+    rec_ts = NOW - 120_000
+    open_ts = NOW - 119_000
+    close_ts = NOW - 118_000
+    root = root or (tmp_path / "pending")
+    root.mkdir(parents=True, exist_ok=True)
+    rec = _pending_record(rec_ts, inner=inner, sym=SYM)
+    (root / _name(rec_ts, sym=SYM)).write_text(json.dumps(rec), encoding="utf-8")
+    cache = {
+        "orders": {
+            SYM: [
+                {"symbol": SYM, "orderId": 1, "clientOrderId": entry_cid, "time": open_ts},
+                {"symbol": SYM, "orderId": 2, "clientOrderId": "pa-sl-x", "time": close_ts},
+            ]
+        },
+        "user_trades": {
+            SYM: [
+                {
+                    "symbol": SYM,
+                    "orderId": 1,
+                    "id": 1,
+                    "time": open_ts,
+                    "side": "BUY",
+                    "qty": "1.0",
+                    "price": "100.0",
+                    "realizedPnl": "0",
+                    "commission": "0.02",
+                },
+                {
+                    "symbol": SYM,
+                    "orderId": 2,
+                    "id": 2,
+                    "time": close_ts,
+                    "side": "SELL",
+                    "qty": "1.0",
+                    "price": "103.0",
+                    "realizedPnl": "3.0",
+                    "commission": "0.02",
+                },
+            ]
+        },
+        "income": list(income),
+    }
+    return cache, root
+
+
+def test_merge_all_rows_ignore_income_duplication(tmp_path):
+    """income 去重只该改变审计, 不得改变写入 outcomes.csv 的行.
+
+    这是决策安全边界: config/settings.json 里 feedback.enabled=true 时,
+    base_rate_injector 读 outcomes.csv 生成历史胜率先验块并注入阶段二 prompt.
+    CSV 内容变了就会影响模型的决策.
+    """
+    units = [
+        {"symbol": SYM, "incomeType": "REALIZED_PNL", "income": 3.0, "tranId": 1},
+        {"symbol": SYM, "incomeType": "COMMISSION", "income": -0.04, "tranId": 2},
+    ]
+    shared = tmp_path / "pending"
+    dup_cache, _ = _e2e_cache(tmp_path / "dup", units * 3, root=shared)
+    one_cache, _ = _e2e_cache(tmp_path / "one", units, root=shared)
+    dup_rows, dup_audit = merge_all(
+        dup_cache,
+        records_root=shared,
+        csv_dir=_csv_dir(tmp_path),
+        symbols=[SYM],
+        days=30,
+        now_ms=NOW,
+    )
+    one_rows, one_audit = merge_all(
+        one_cache,
+        records_root=shared,
+        csv_dir=_csv_dir(tmp_path),
+        symbols=[SYM],
+        days=30,
+        now_ms=NOW,
+    )
+    assert dup_rows == one_rows  # 写进 CSV 的行不受 income 重复影响
+    assert one_audit["income_diff_by_symbol"][SYM] == pytest.approx(0.0)
+    assert dup_audit["coverage"]["account_income_net"] == pytest.approx(
+        one_audit["coverage"]["account_income_net"]
+    )
