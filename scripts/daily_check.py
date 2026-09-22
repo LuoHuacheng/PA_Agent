@@ -14,6 +14,7 @@ launchd 拉起的 /bin/bash 读不了 ~/Documents(TCC 保护), 报 exit 126
     /Users/hc/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/bin/python3.11 \
         scripts/daily_check.py
 """
+
 from __future__ import annotations
 
 import json
@@ -28,12 +29,20 @@ LOG_DIR = REPO / "logs"
 TSV = LOG_DIR / "daily_check.tsv"
 
 
-def _run(args):
-    """跑一个子命令, 返回其输出行(制表符已换成空格)."""
-    proc = subprocess.run([sys.executable, *args], cwd=REPO,
-                          capture_output=True, text=True)
+def _run_checked(args):
+    """跑一个子命令, 返回 (退出码, 输出行); 制表符已换成空格.
+
+    只在需要退出码的地方用: expectancy_report 把**非零退出码当判定结果**
+    (路 B 不通过返回 1, 触发回滚返回 3), 所以不能全局按 rc 判失败。
+    """
+    proc = subprocess.run([sys.executable, *args], cwd=REPO, capture_output=True, text=True)
     lines = (proc.stdout + proc.stderr).strip().splitlines()
-    return [ln.replace("\t", " ") for ln in lines]
+    return proc.returncode, [ln.replace("\t", " ") for ln in lines]
+
+
+def _run(args):
+    """跑一个子命令, 只要输出行(制表符已换成空格)."""
+    return _run_checked(args)[1]
 
 
 def _first(lines, default="(无输出)"):
@@ -55,7 +64,9 @@ def orders_count():
 def service_alive():
     """用信号探测监控进程; ps 在受限环境里不可用."""
     try:
-        pid = int(json.loads((REPO / "config" / "monitoring.pid").read_text(encoding="utf-8"))["pid"])
+        pid = int(
+            json.loads((REPO / "config" / "monitoring.pid").read_text(encoding="utf-8"))["pid"]
+        )
         os.kill(pid, 0)
         return "yes"
     except Exception:
@@ -79,13 +90,18 @@ def outcome_merge_line():
     不跑就断链 —— 2026-09-20 实测断了 10 天(09-10 ~ 09-20)。后果比看上去严重:
     本脚本第 1~4 行的判定**全部**读 trade_records/outcomes.csv
     (expectancy_report.py 的默认入参), 所以那几天日检报的 n 全是停滞值。
-    uid 幂等, 重复跑只补新增。失败不阻塞日检, 只如实记一行。
+    uid 幂等, 重复跑只补新增。
+
+    2026-09-22: 判成功看**输出里有没有 `新 OutcomeRows`**, 不看退出码 ——
+    tools/outcome_merge.py 在密钥缺失时打印一行说明后 `return 0`, 退出码是骗人的。
+    失败不再写成无声的 "(无输出)", 而是带 `!!` 前缀并让日检退出码非零, 这样
+    launchd 的 last exit code 与台账都留得下痕迹。
     """
-    lines = _run(["tools/outcome_merge.py", "--days", "7"])
+    rc, lines = _run_checked(["tools/outcome_merge.py", "--days", "7"])
     for ln in lines:
         if "新 OutcomeRows" in ln:
-            return ln.strip()
-    return f"outcome_merge: {_last(lines)}"
+            return ln.strip(), True
+    return f"!! 回填失败 rc={rc}: {_last(lines)}", False
 
 
 def account_equity():
@@ -111,7 +127,7 @@ def account_equity():
 
 def main():
     # 必须先回填再判定: 下面四条 expectancy_report 读的就是 outcomes.csv。
-    merged = outcome_merge_line()
+    merged, refill_ok = outcome_merge_line()
     equity = account_equity()
     # 账户口径回撤: 分母 = 账户现有余额(每次动态取), 缺本金时退回计划口径。
     dd = ["--capital", f"{equity:.2f}", "--account-dd-gate"] if equity else []
@@ -125,12 +141,21 @@ def main():
     service = service_alive()
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    row = "\t".join([
-        ts, f"全部: {all_line}", f"上线后: {post}", f"路B: {lossb}",
-        f"回滚: {rollback}", f"闸门: {gate}", f"成交率: {fill}",
-        f"orders={orders}", f"service={service}", f"回填: {merged}",
-        f"权益: {equity:.2f}U" if equity else "权益: 不可读",
-    ])
+    row = "\t".join(
+        [
+            ts,
+            f"全部: {all_line}",
+            f"上线后: {post}",
+            f"路B: {lossb}",
+            f"回滚: {rollback}",
+            f"闸门: {gate}",
+            f"成交率: {fill}",
+            f"orders={orders}",
+            f"service={service}",
+            f"回填: {merged}",
+            f"权益: {equity:.2f}U" if equity else "权益: 不可读",
+        ]
+    )
     LOG_DIR.mkdir(exist_ok=True)
     with open(TSV, "a", encoding="utf-8") as fh:
         fh.write(row + "\n")
@@ -148,6 +173,12 @@ def main():
         print(f"9) 参照本金: {equity:.2f}U (账户现有余额, 回撤门槛走账户口径)")
     else:
         print("9) 参照本金: 不可读 -> 回撤门槛退回峰值口径")
+    if not refill_ok:
+        print(
+            "!! 样本回填失败: outcomes.csv 已停止增长, 第 1~4 行判定会一直报旧数;"
+            " 且超过 --days 7 窗口后对应成交【永久】归因不上, 事后补跑也不回来。"
+        )
+        return 1
     return 0
 
 

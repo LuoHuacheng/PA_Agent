@@ -12,8 +12,14 @@ cd "$(dirname "$0")/.." || exit 1
 ts=$(date '+%Y-%m-%d %H:%M:%S')
 # 先回填 outcomes.csv 再判定: expectancy_report 读的就是它。不跑就断链
 # (2026-09-20 实测断了 10 天, 期间日检报的 n 全是停滞值)。
+# 判成功看有没有 '新 OutcomeRows', 不看退出码: outcome_merge 在密钥缺失时打印一行
+# 说明后 return 0。失败要留下 !! 前缀并让日检退出码非零, 否则就是无声停增。
+refill_failed=""
 backfill=$(.venv/bin/python tools/outcome_merge.py --days 7 2>&1 | grep '新 OutcomeRows' | tail -1 | tr '\t' ' ')
-[ -z "$backfill" ] && backfill="(无输出)"
+if [ -z "$backfill" ]; then
+  backfill="!! 回填失败(无 '新 OutcomeRows')"
+  refill_failed="yes"
+fi
 # 参照本金 = 账户现有余额(2026-09-20 用户裁定); 取不到就退回计划口径。
 equity=$(.venv/bin/python -c "
 from pa_agent.config.paths import SETTINGS_JSON_PATH
@@ -53,3 +59,8 @@ echo "5) 闸门    : $gate"
 echo "6) 账本条目: $orders  (必须 > 0)   服务存活: $service"
 echo "7) 样本回填: $backfill   <- outcomes.csv 自动补新(前几行判定读它)"
 tail -2 logs/daily_check.tsv
+if [ -n "$refill_failed" ]; then
+  echo "!! 样本回填失败: outcomes.csv 停增, 前几行判定会一直报旧数;"
+  echo "   且超过 --days 7 窗口后对应成交【永久】归因不上, 事后补跑也不回来。"
+  exit 1
+fi
