@@ -22,6 +22,29 @@ _STOP_TIMEOUT_SECONDS = 15.0
 # only observed once that read returns. The watchdog force-exits the process
 # after the deadline so SIGTERM/SIGINT always stop it.
 _STOP_WATCHDOG_SECONDS = 4.0
+_STOP_DRAIN_FALLBACK_SECONDS = 90.0
+
+
+def _configured_shutdown_seconds(fallback: float = _STOP_DRAIN_FALLBACK_SECONDS) -> float:
+    """Read monitoring.shutdown_timeout_seconds from config/settings.json.
+
+    监控进程用它在 SIGTERM 后等在途分析收尾；`pa-monitor stop` 的等待与 stop
+    watchdog 都必须比它更长，否则会把正在收尾的分析直接 SIGKILL 掉
+    (2026-09-22: 旧实现 15s/4s 上限 + cancel_futures 让每次重启都废掉一轮信号)。
+    """
+    try:
+        from pa_agent.config.paths import SETTINGS_JSON_PATH
+        from pa_agent.config.settings import load_settings
+
+        return float(
+            getattr(
+                load_settings(SETTINGS_JSON_PATH).monitoring,
+                "shutdown_timeout_seconds",
+                fallback,
+            )
+        )
+    except Exception:
+        return fallback
 
 
 def _signal_name(signum: int) -> str:
@@ -269,7 +292,10 @@ def stop_monitor(pid_path: Path, root: Path | None = None) -> int:
             pid_path.unlink(missing_ok=True)
         print("[监控已停止] 进程已退出。")
         return 0
-    deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
+    # 客户端等待必须长于监控自己的收尾上限 + watchdog(收尾上限+5), 否则会把正在
+    # 收尾的进程 SIGKILL 掉。
+    wait_seconds = max(_STOP_TIMEOUT_SECONDS, _configured_shutdown_seconds() + 10.0)
+    deadline = time.monotonic() + wait_seconds
     while _pid_exists(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
     if _pid_exists(pid):
@@ -394,6 +420,8 @@ def run_monitor() -> int:
 
     stop_event = threading.Event()
     watchdog_armed = threading.Event()
+    # 在途分析收尾上限: SIGTERM 后先让它跑完, 超时才强制结束(见 settings)。
+    shutdown_timeout = _configured_shutdown_seconds()
 
     def request_stop(_signum: int, _frame: Any) -> None:
         # Diagnostic: a silent process death was indistinguishable from a normal
@@ -407,7 +435,9 @@ def run_monitor() -> int:
         if watchdog_armed.is_set():
             return
         watchdog_armed.set()
-        _arm_stop_watchdog(_STOP_WATCHDOG_SECONDS, MONITORING_PID_PATH)
+        _arm_stop_watchdog(
+            max(_STOP_WATCHDOG_SECONDS, shutdown_timeout + 5.0), MONITORING_PID_PATH
+        )
 
     previous_sigint = signal.signal(signal.SIGINT, request_stop)
     previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
@@ -737,7 +767,7 @@ def run_monitor() -> int:
             _shutdown_monitor_process(
                 monitor,
                 MONITORING_PID_PATH,
-                timeout=2.0,
+                timeout=shutdown_timeout,
                 stop_requested=stop_event.is_set(),
             )
         signal.signal(signal.SIGINT, previous_sigint)

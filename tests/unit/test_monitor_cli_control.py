@@ -17,6 +17,31 @@ from pa_agent.monitoring.cli import (
 )
 
 
+def test_configured_shutdown_seconds_reads_monitoring_settings(monkeypatch) -> None:
+    """收尾上限来自 settings, 客户端等待与 watchdog 都按它算 (2026-09-22)。"""
+    from types import SimpleNamespace
+
+    from pa_agent.monitoring import cli
+
+    monkeypatch.setattr(
+        "pa_agent.config.settings.load_settings",
+        lambda *_a, **_k: SimpleNamespace(
+            monitoring=SimpleNamespace(shutdown_timeout_seconds=42.0)
+        ),
+    )
+    assert cli._configured_shutdown_seconds() == 42.0
+
+
+def test_configured_shutdown_seconds_falls_back_on_bad_config(monkeypatch) -> None:
+    from pa_agent.monitoring import cli
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("settings.json 不可读")
+
+    monkeypatch.setattr("pa_agent.config.settings.load_settings", _boom)
+    assert cli._configured_shutdown_seconds(33.0) == 33.0
+
+
 def test_signal_name_labels_signals_for_shutdown_logs() -> None:
     """Shutdown diagnostics need a readable signal name in the log."""
     import signal as _signal

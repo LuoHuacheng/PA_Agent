@@ -408,12 +408,26 @@ class MultiSymbolMonitor:
                 except Exception:
                     logger.debug("Monitor source disconnect failed", exc_info=True)
         deadline = time.monotonic() + max(0.0, timeout)
+        pending = len(self._futures)
+        if pending:
+            # 事后能判断这次停止到底砍没砍到在途分析 (2026-09-22)。
+            logger.warning(
+                "监控停止: 等待 %d 个在途分析收尾 (上限 %.0fs)", pending, timeout
+            )
         if self._executor is not None:
-            self._executor.shutdown(wait=False, cancel_futures=True)
+            # cancel_futures=False: 队列里的分析也要跑完。旧值 True + 2s 超时意味着
+            # 每重启一次就丢一轮正在跑的信号 —— 单轮分析要 1-3 分钟，根本来不及。
+            self._executor.shutdown(wait=False, cancel_futures=False)
         if self._thread is not None:
             self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
         while self._futures and time.monotonic() < deadline:
             time.sleep(0.01)
+        if self._futures:
+            logger.error(
+                "监控停止: %d 个在途分析未在 %.0fs 内收尾，进程将强制结束",
+                len(self._futures),
+                timeout,
+            )
         self._save_state()
         return not self._futures
 

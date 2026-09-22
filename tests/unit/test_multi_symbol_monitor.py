@@ -742,6 +742,85 @@ def test_monitor_stop_disconnects_source_before_waiting_for_running_analysis(
     assert not monitor._futures
 
 
+def test_monitor_stop_drains_running_analysis_instead_of_cancelling(
+    tmp_path: Path,
+) -> None:
+    """SIGTERM 后等在途分析跑完 (2026-09-22)。
+
+    旧实现 ``_shutdown_monitor_process(timeout=2.0)`` + ``cancel_futures=True``:
+    单轮分析要 1-3 分钟, 每次重启都废掉正在跑的那轮信号。这里要求 stop() 等到
+    分析真正结束, 且返回 True(进程可以干净退出, 不用 watchdog 强杀)。
+    """
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
+    source = FakeSource(_bars(1_800))
+    started = threading.Event()
+    released = threading.Event()
+    finished = threading.Event()
+
+    def analyze(_frame: object, **kw: object) -> None:
+        started.set()
+        released.wait(timeout=5)
+        finished.set()
+
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: source,
+        clock=lambda: 1_805,
+        analyze=analyze,
+    )
+    monitor._executor = ThreadPoolExecutor(max_workers=1)
+    state = next(iter(monitor._states.values()))
+    state.next_poll_at = 0
+    assert monitor.run_due_once(now=1_805) == 1
+    assert started.wait(timeout=1)
+
+    threading.Timer(0.3, released.set).start()
+    began = time.monotonic()
+    assert monitor.stop(timeout=3) is True
+    elapsed = time.monotonic() - began
+
+    assert finished.is_set()
+    assert elapsed >= 0.25  # 确实等了, 不是立刻砍掉
+    assert not monitor._futures
+
+
+def test_monitor_stop_reports_false_when_analysis_outlasts_timeout(
+    tmp_path: Path,
+) -> None:
+    """超时仍未收尾要如实返回 False, 让 cli 走强制退出而不是假装干净。"""
+    settings = _settings(MonitorTarget(symbol="XAUUSD", timeframe="15m"))
+    source = FakeSource(_bars(1_800))
+    started = threading.Event()
+    released = threading.Event()
+
+    def analyze(_frame: object, **kw: object) -> None:
+        started.set()
+        released.wait(timeout=5)
+
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=settings,
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: source,
+        clock=lambda: 1_805,
+        analyze=analyze,
+    )
+    monitor._executor = ThreadPoolExecutor(max_workers=1)
+    state = next(iter(monitor._states.values()))
+    state.next_poll_at = 0
+    assert monitor.run_due_once(now=1_805) == 1
+    assert started.wait(timeout=1)
+
+    try:
+        assert monitor.stop(timeout=0.2) is False
+        assert monitor._futures
+    finally:
+        released.set()
+        monitor._executor.shutdown(wait=True)
+
+
 def _order_frame() -> object:
     return type("Frame", (), {"symbol": "BTCUSDT", "timeframe": "15m"})()
 
