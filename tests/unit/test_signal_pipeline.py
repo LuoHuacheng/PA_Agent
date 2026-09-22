@@ -628,6 +628,26 @@ def test_entry_gate_block_notifies_and_marks(monkeypatch) -> None:
     assert "short_block" in signal.decision["execution"]["gate_reasons"][0]
 
 
+def test_entry_gate_block_writes_prompt_feedback_ledger(monkeypatch, tmp_path) -> None:
+    """被拦方案落一行轻量台账, 供下一轮 prompt 回灌 (2026-09-22)。
+
+    现场: BTCUSDT 连续三轮重推同一个被 short_block 拦掉的做空方案, 因为拦截原因
+    只进了 pending 完整记录和推送, 模型下一轮看不到。这里锁住写入侧。
+    """
+    from pa_agent.trading import gate_block_log
+
+    monkeypatch.setattr(gate_block_log, "GATE_BLOCK_LOG_DIR", tmp_path)
+    _patch_io(monkeypatch)
+    signal = _env_signal("做空", "normal_channel", "bearish")
+    SignalPipeline(_env_settings(block_short_entry=True)).dispatch(signal)
+
+    rows = gate_block_log.read_gate_blocks(symbol="BTCUSDT", hours=24)
+    assert len(rows) == 1
+    assert rows[0]["direction"] == "做空"
+    assert "short_block" in rows[0]["gates"]
+    assert rows[0]["details"]["short_block"]
+
+
 def test_executed_signal_marks_submitted(monkeypatch) -> None:
     _patch_io(monkeypatch, exec_status="submitted")
     signal = _signal(_decision())

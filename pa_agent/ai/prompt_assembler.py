@@ -923,9 +923,13 @@ class PromptAssembler:
         prompt_settings: Any = None,
         feedback_settings: Any = None,
         binance_settings: Any = None,
+        gate_block_reader: Any = None,
     ) -> None:
         self._prompt_dir = prompt_dir
         self._experience_reader = experience_reader
+        #: 入口门控拦截读者(默认走 records/gate_blocks 的真实实现)。注入点与
+        #: experience_reader 同风格: 测试传内存实现, 生产传 None 用真实 IO。
+        self._gate_block_reader = gate_block_reader
         self._prompt_settings = prompt_settings
         self._feedback_settings = feedback_settings
         #: Active Binance execution section; supplies the program-side floors that
@@ -1425,6 +1429,7 @@ class PromptAssembler:
             _stage1_output_reminder_for_mode(analysis_mode),
         ]
         stage1_context = "\n\n---\n\n".join(p for p in stage1_parts if p)
+        gate_feedback = self._render_gate_feedback(frame)
         kline_limit = self._stage1_kline_limit()
         kline_table = self._render_kline_table(frame, kline_limit)
         feature_table = self._render_kline_feature_table(frame, kline_limit)
@@ -1473,6 +1478,7 @@ class PromptAssembler:
             + (f"{simple_features_block}\n\n" if simple_features_block else "")
             + (f"{prefill_hint}\n\n" if prefill_hint else "")
             + (f"{cycle_block}\n\n" if cycle_block else "")
+            + (f"{gate_feedback}\n\n" if gate_feedback else "")
             + f"请根据以上数据，严格输出阶段一 JSON 诊断结果。\n\n"
             f"{_STAGE1_TAIL_REMINDER}"
         )
@@ -1501,6 +1507,7 @@ class PromptAssembler:
         """Build a Stage 1 update turn using the last completed analysis."""
         pattern_block = self._stage1_pattern_supplement()
         prefill_hint = self._render_program_prefill_hint(frame)
+        gate_feedback = self._render_gate_feedback(frame)
         stage1_parts = [
             *(self._load(name) for name in STAGE1_TASK_PROMPT_TXT_FILES),
             *([pattern_block] if pattern_block else []),
@@ -1566,6 +1573,7 @@ class PromptAssembler:
             f"{full_feature_table}\n\n"
             + (f"{simple_features_block}\n\n" if simple_features_block else "")
             + (f"{prefill_hint}\n\n" if prefill_hint else "")
+            + (f"{gate_feedback}\n\n" if gate_feedback else "")
             + "请基于上一轮结论、新增K线和当前完整K线，严格输出更新后的阶段一 JSON 诊断结果。\n\n"
             f"{_STAGE1_TAIL_REMINDER}"
         )
@@ -1586,6 +1594,7 @@ class PromptAssembler:
         even when the full K-line table is not re-sent.
         """
         prefill_hint = self._render_program_prefill_hint(frame)
+        gate_feedback = self._render_gate_feedback(frame)
         simple_features_block = self._render_simple_market_features_block(frame)
         if simple_features_block:
             simple_features_block = _MARKET_FEATURES_AUTHORITY_NOTE + simple_features_block
@@ -1648,6 +1657,7 @@ class PromptAssembler:
             f"{new_feature_table}\n\n"
             + (f"{simple_features_block}\n\n" if simple_features_block else "")
             + (f"{prefill_hint}\n\n" if prefill_hint else "")
+            + (f"{gate_feedback}\n\n" if gate_feedback else "")
             + "请基于上方完整K线数据、上一轮结论和新增K线，严格输出更新后的阶段一 JSON 诊断结果。\n\n"
             f"{_STAGE1_TAIL_REMINDER}"
         )
@@ -1872,6 +1882,9 @@ class PromptAssembler:
                     max_chars_per_entry=max_chars,
                 )
             )
+        gate_feedback_block = self._render_gate_feedback(frame)
+        if gate_feedback_block:
+            dynamic_parts.append(gate_feedback_block)
         # _STAGE2_OUTPUT_CONTRACT now lives in the system turn (see
         # _with_stage2_output_contract) so it stays inside the cached prefix.
         if enable_next_bar_prediction:
@@ -2192,6 +2205,45 @@ class PromptAssembler:
         if direction == "neutral":
             lines.append("- 阶段一 direction=neutral：**§9.0P 默认 wait**（禁止双边边界挂单）。")
         return "\n".join(lines) + "\n"
+
+    def _render_gate_feedback(self, frame: KlineFrame) -> str:
+        """本品种近期入口门控拦截, 渲染成 prompt 块；无拦截/已关闭时返回 ""。
+
+        Why(2026-09-22): BTCUSDT 连续三轮重推同一个被 short_block 硬拦的做空方案。
+        拦截原因此前只进 pending 完整记录与 Telegram, 模型下一轮看不到, 于是每
+        30 分钟重新论证同一方向。窗口内无拦截时该块为空, 不占 token。
+        """
+        cfg = self._prompt_settings
+        if cfg is not None and not bool(getattr(cfg, "gate_feedback_enabled", True)):
+            return ""
+        try:
+            hours = (
+                float(getattr(cfg, "gate_feedback_hours", 4.0))
+                if cfg is not None
+                else 4.0
+            )
+            max_chars = (
+                int(getattr(cfg, "gate_feedback_max_chars", 400))
+                if cfg is not None
+                else 400
+            )
+        except (TypeError, ValueError):
+            hours, max_chars = 4.0, 400
+        try:
+            from pa_agent.trading.gate_block_log import (
+                read_gate_blocks,
+                summarize_gate_blocks,
+            )
+
+            reader = self._gate_block_reader or read_gate_blocks
+            rows = reader(symbol=frame.symbol, hours=hours)
+            return summarize_gate_blocks(rows, max_chars=max_chars)
+        except Exception:  # 回灌是增强, 读不到就当没有
+            logger.debug(
+                "Gate feedback unavailable for %s", getattr(frame, "symbol", "?"),
+                exc_info=True,
+            )
+            return ""
 
     @staticmethod
     def _render_experience(

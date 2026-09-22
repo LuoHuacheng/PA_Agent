@@ -437,6 +437,9 @@ class SignalPipeline:
                 gate_reasons=evaluation.gate_reasons,
                 dry_run_reasons=evaluation.entry_dry_run_reasons,
             )
+            # 轻量台账: 完整记录在 records/pending(1MB 级, 反序列化贵), 这里补一条
+            # 可查询的小行, 供下一轮 prompt 回灌"这方向刚被硬拦"(2026-09-22)。
+            self._record_gate_block_audit(signal, evaluation.gate_reasons)
             notified = self._notify_gate_blocked(signal, evaluation.gate_reasons)
             # 注意：不写 trade_records CSV —— 那是"已执行决策行"的账本，被回放与
             # outcome 统计直接消费，混入未提交的信号会污染胜率口径。被拦方案的
@@ -642,6 +645,28 @@ class SignalPipeline:
             except Exception:
                 logger.exception("Execution-failure notification failed")
         return result
+
+    def _record_gate_block_audit(
+        self, signal: OrderSignal, gate_reasons: tuple[str, ...]
+    ) -> None:
+        """拦截落一行轻量台账, 供下一轮 prompt 回灌（见 gate_block_log）。
+
+        完整记录在 records/pending（1MB 级，反序列化贵）；这里只存方向 + 门控键 +
+        原文，够下一轮告诉模型"这方向刚被硬拦过"。写盘失败只告警：拦截已经是
+        既成事实，审计线不该反过来影响下单流程。
+        """
+        try:
+            from pa_agent.trading.gate_block_log import record_gate_block
+
+            record_gate_block(
+                symbol=signal.symbol,
+                timeframe=signal.timeframe,
+                direction=str(signal.inner.get("order_direction") or ""),
+                gate_reasons=gate_reasons,
+                entry_price=signal.inner.get("entry_price"),
+            )
+        except Exception:
+            logger.warning("Gate-block audit hook failed for %s", signal.symbol, exc_info=True)
 
     def _notify_gate_blocked(
         self, signal: OrderSignal, gate_reasons: tuple[str, ...]

@@ -22,6 +22,9 @@ RECORDS_DIR: Path = PROJECT_ROOT / "records"
 RECORDS_PENDING_DIR: Path = RECORDS_DIR / "pending"
 #: Append-only cancel audit trail (one JSON object per line, daily files).
 CANCEL_LOG_DIR: Path = RECORDS_DIR / "cancels"
+#: Append-only entry-gate block audit trail; the source for the prompt-side
+#: "recent blocks" feedback block (daily files, one JSON object per line).
+GATE_BLOCK_LOG_DIR: Path = RECORDS_DIR / "gate_blocks"
 EXPERIENCE_DIR: Path = PROJECT_ROOT / "experience"
 CONFIG_DIR: Path = PROJECT_ROOT / "config"
 LOGS_DIR: Path = PROJECT_ROOT / "logs"
