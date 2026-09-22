@@ -83,11 +83,16 @@ for f in "${GUI_TESTS[@]}"; do
 done
 
 echo "[4/6] 移除 gui-only 死代码"
-for f in pa_agent/data/refresh_loop.py tests/unit/test_refresh_loop_warmup.py; do
+for f in \
+  pa_agent/data/refresh_loop.py \
+  pa_agent/demo/replayer.py \
+  tests/unit/test_refresh_loop_warmup.py; do
   if [ -e "$f" ]; then git rm -q "$f"; fi
 done
+# 清掉遗留字节码, 否则 find_spec 仍可能看到已删模块的缓存目录。
+rm -rf pa_agent/demo/__pycache__
 
-echo "[5/6] 重写无 Qt 入口 + demo 包按需导入"
+echo "[5/6] 重写无 Qt 入口 + demo 包剔除 Qt 依赖项"
 cat > pa_agent/main.py <<'PY'
 """Application entry point — 无图形界面分支 (no-gui)。
 
@@ -137,7 +142,6 @@ from pa_agent.demo.record_loader import (
 )
 
 __all__ = [
-    "DemoReplayer",
     "frame_from_record_klines",
     "is_demo_playable",
     "list_pending_record_paths",
@@ -146,19 +150,6 @@ __all__ = [
     "pick_random_record_path",
     "try_load_analysis_record",
 ]
-
-
-def __getattr__(name: str):
-    """DemoReplayer 依赖 Qt, 改按需导入 (no-gui 分支)。
-
-    原先在包顶层 eager import: tools/ 下 9 个脚本都只想要 record_loader, 却会
-    顺着包 __init__ 把 PyQt6 拖进来 —— 无 Qt 环境直接挂。
-    """
-    if name == "DemoReplayer":
-        from pa_agent.demo.replayer import DemoReplayer
-
-        return DemoReplayer
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 PY
 
 git add -A
@@ -189,6 +180,7 @@ class _BlockQt:
 
 sys.meta_path.insert(0, _BlockQt())
 
+import pa_agent.demo  # noqa: E402
 import pa_agent.main  # noqa: E402
 import pa_agent.demo.record_loader  # noqa: E402
 from pa_agent.monitoring.cli import run_monitor  # noqa: E402
@@ -196,6 +188,10 @@ from pa_agent.monitoring.cli import run_monitor  # noqa: E402
 assert callable(pa_agent.main.main), "pa_agent.main.main 不可调用"
 assert callable(run_monitor), "run_monitor 不可调用"
 assert importlib.util.find_spec("pa_agent.gui") is None, "pa_agent.gui 仍然存在"
+assert importlib.util.find_spec("pa_agent.demo.replayer") is None, (
+    "pa_agent.demo.replayer 仍然存在"
+)
+assert not hasattr(pa_agent.demo, "DemoReplayer"), "DemoReplayer 仍挂在 demo 包上"
 print("NO-GUI-BRANCH-OK")
 PY
 else
