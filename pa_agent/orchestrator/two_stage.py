@@ -26,6 +26,7 @@ STAGE2_VALIDATION_AUTO_RETRY = False
 import copy
 import dataclasses
 import logging
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -475,6 +476,7 @@ class TwoStageOrchestrator:
                 thinking=_thinking,
                 reasoning_effort=_effort,
                 stage_label="Stage 1",
+                on_retry=lambda: on_event(OrchestratorEvent.Stage1Retry),
             )
         except Exception as exc:
             if self._is_network_error(exc):
@@ -815,6 +817,7 @@ class TwoStageOrchestrator:
                 thinking=_thinking,
                 reasoning_effort=_effort,
                 stage_label="Stage 2",
+                on_retry=lambda: on_event(OrchestratorEvent.Stage2Retry),
             )
         except Exception as exc:
             if self._is_network_error(exc):
@@ -1067,21 +1070,93 @@ class TwoStageOrchestrator:
         thinking: bool,
         reasoning_effort: str,
         stage_label: str,
+        on_retry: Callable[[], None] | None = None,
     ) -> Any:
-        """Stream one stage through the configured provider (single attempt).
+        """Stream one stage, retrying bounded transport failures.
 
         Provider switching on network errors was removed together with the
-        hardcoded connector routes; errors surface to the caller unchanged.
+        hardcoded connector routes; what remains is a same-provider retry with
+        backoff, because a gateway that restarts takes seconds - not a whole
+        analysis round. 2026-09-22: four of fifty rounds died on "peer closed
+        connection" during a gateway flap; a single attempt turns a 5s blip
+        into a lost bar.
+
+        Only transport errors raised before any token reached the caller are
+        retried: replaying a call that already streamed part of its reply would
+        emit that content twice.
         """
-        del stage_label
-        return self._client.stream_chat(
-            messages,
-            on_reasoning_token=on_reasoning_token,
-            on_content_token=on_content_token,
-            cancel_token=cancel_token,
-            thinking=thinking,
-            reasoning_effort=reasoning_effort,
-        )
+        max_retries, backoff_seconds = self._transport_retry_policy()
+        attempt = 0
+        while True:
+            streamed = False
+
+            def _wrap(callback: Callable[[str], None] | None) -> Callable[[str], None]:
+                def _forward(chunk: str) -> None:
+                    nonlocal streamed
+                    streamed = True
+                    if callback is not None:
+                        callback(chunk)
+
+                return _forward
+
+            try:
+                return self._client.stream_chat(
+                    messages,
+                    on_reasoning_token=_wrap(on_reasoning_token),
+                    on_content_token=_wrap(on_content_token),
+                    cancel_token=cancel_token,
+                    thinking=thinking,
+                    reasoning_effort=reasoning_effort,
+                )
+            except Exception as exc:
+                if attempt >= max_retries or not self._is_network_error(exc):
+                    raise
+                if streamed:
+                    logger.warning(
+                        "%s transport error after partial stream; not retrying: %s",
+                        stage_label,
+                        exc,
+                    )
+                    raise
+                if cancel_token is not None and cancel_token.is_set():
+                    raise
+                delay = backoff_seconds * (2**attempt)
+                attempt += 1
+                logger.warning(
+                    "%s transport error (retry %d/%d in %.1fs): %s",
+                    stage_label,
+                    attempt,
+                    max_retries,
+                    delay,
+                    exc,
+                )
+                if on_retry is not None:
+                    try:
+                        on_retry()
+                    except Exception:
+                        logger.debug("transport-retry event callback failed", exc_info=True)
+                if delay <= 0:
+                    continue
+                if cancel_token is not None:
+                    if cancel_token.wait(delay):
+                        raise
+                else:
+                    time.sleep(delay)
+
+    def _transport_retry_policy(self) -> tuple[int, float]:
+        """Bounded same-provider retry policy for transport failures."""
+        provider = getattr(self._settings, "provider", None)
+        raw_max = getattr(provider, "transport_retry_max", 2)
+        raw_backoff = getattr(provider, "transport_retry_backoff_seconds", 5.0)
+        try:
+            max_retries = max(0, int(raw_max))
+        except (TypeError, ValueError):
+            max_retries = 2
+        try:
+            backoff_seconds = max(0.0, float(raw_backoff))
+        except (TypeError, ValueError):
+            backoff_seconds = 5.0
+        return max_retries, backoff_seconds
 
     @staticmethod
     def _is_network_error(exc: Exception) -> bool:
