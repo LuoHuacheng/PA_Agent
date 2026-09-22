@@ -12,8 +12,14 @@ BTC 裸仓 6 分 41 秒、ETH 挂单被遗弃 3 小时。
 from __future__ import annotations
 
 import importlib
+import os
 
 import pytest
+
+# 测试进程一律无窗口。必须在任何 Qt 导入之前落定: Qt 一旦绑上 cocoa platform,
+# 再改这个环境变量就失效。setdefault 保留手工覆盖 (如 QT_QPA_PLATFORM=minimal)。
+# GUI 用例只验证逻辑与信号, 不需要真窗口; 开发跑 pytest 时也不再满屏弹窗抢焦点。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 _TARGETS = (
     ("pa_agent.trading.order_ledger", "DEFAULT_LEDGER_DIR", "records/orders"),
