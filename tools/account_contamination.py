@@ -113,13 +113,16 @@ def render(report) -> str:
     return chr(10).join(lines)
 
 
-def load_account_legs(days: int):
-    """拉账户成交并 LIFO 配对. 依赖 testnet 密钥, 无密钥时抛 SystemExit."""
+def load_account_bundle(days: int) -> dict:
+    """拉账户 payload 并 LIFO 配对, 返回体检需要的全部原料.
+
+    比只要 legs 多给 orders/fills/symbols/窗口边界 —— 归因窗口(cid_visible_from)
+    要用 orders, 覆盖率要用 income, 分开拉会重复请求. """
     from _pa_sim_common import fetch_account_data, make_client, window_bounds
 
     from pa_agent.trading.replay_pairing import rebuild_trades
 
-    start_ms, _end = window_bounds(days)
+    start_ms, end_ms = window_bounds(days)
     _, client = make_client()
     income = client.income_history(start_ms=start_ms)
     syms = sorted({str(r.get("symbol")) for r in income if r.get("symbol")})
@@ -129,7 +132,21 @@ def load_account_legs(days: int):
         orders = json.load(fh)
     with open(cache / "user_trades.json", encoding="utf-8") as fh:
         fills = json.load(fh)
-    return rebuild_trades(orders, fills, syms), income
+    return {
+        "legs": rebuild_trades(orders, fills, syms),
+        "income": income,
+        "orders": orders,
+        "fills": fills,
+        "symbols": syms,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+    }
+
+
+def load_account_legs(days: int):
+    """向后兼容: 只要 (legs, income)."""
+    bundle = load_account_bundle(days)
+    return bundle["legs"], bundle["income"]
 
 
 def main() -> int:

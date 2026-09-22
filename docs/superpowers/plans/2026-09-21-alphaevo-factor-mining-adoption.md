@@ -1,5 +1,41 @@
 # 借鉴 alphaevo 做因子挖掘 · 实施计划
 
+> ## ⛔ 状态: 已终止 (2026-09-21 更新)
+>
+> **Phase 1 / 1.5 / 1.6 / 1.7 已完成并合并**(产物见下). **Phase 2 与 Phase 3 宣布作废**,
+> 不要再按本计划继续实现.
+>
+> 作废理由(完整论证见 [结论汇总](../../结论汇总-2026-09-21.md)):
+>
+> 1. **因子层全线无信号**: 扩到 23 个尺度无关特征后, 在 1-48 根视界、6 折走步、预注册
+>    样本外三层检验下都不可复现; 预注册假设 H1 **正式被否定(0/3)**.
+> 2. 过程中出现三次**伪信号**, 机制都已查明(阈值低于噪声底 / 绝对价位伪信号 / 重叠窗口
+>    伪影). 决定性控制实验: 把原始收盘价当"因子"也能在**所有视界 7/7 命中**.
+> 3. 出场层 5 个规则 **0/5 可采纳**; 成本长期吃掉全部毛利.
+> 4. 功率上限: 单笔 R 的 sd ≈ 1.66, 检出 +0.19R 需要 **599 笔 ≈ 78 天** —— 现有数据
+>    从原理上支持不了进一步调参, 继续调只会过拟合这 9 天.
+>
+> **因此 Phase 2(SQLite 因子库)没有意义** —— 它只是把已确认是噪声的因子存起来;
+> **Phase 3(成熟度检查单)同理** —— 没有"够格"的因子可评.
+>
+> ### 已完成 (Phase 1 系列)
+>
+> | 任务 | 产物 |
+> | --- | --- |
+> | 1.1 AST 沙箱移植 | `tools/feature_guard.py`(15 规则)+ `tests/unit/test_feature_guard.py`(43 例) |
+> | 1.2 时序因子审计 | `tools/factor_audit.py` + `tests/unit/test_factor_audit.py` |
+> | 1.3 结构特征扩充 | `tools/structural_features.py` + `tests/unit/test_structural_features.py`(40 例) |
+> | 1.4 CLI 空间切换 | `tools/factor_audit.py --spaces geometry,market,structural` |
+> | 1.5 复核修正 | [因子审计修正](../../因子审计修正-2026-09-21.md) |
+> | 1.6 字段裁剪 + 置换校准 | 噪声底 0.0467; 探索集 family-wise p95 = 0.06816 |
+> | 1.7 相关去重 + family-wise 零分布 | `select_representatives` / `permutation_null(family_wise=True)` |
+>
+> ### 本计划未覆盖、但已完成的工作(另立报告)
+>
+> 走步验证、预注册样本外验证、视界扫描、真实结局审计、出场规则配对检验、影子回放
+> 校准与入口门控/方向闸门/结构否定复刻、账户三层对账与污染诊断 —— 全部列在
+> [结论汇总](../../结论汇总-2026-09-21.md) 第 1 节.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 给 PA_Agent 补上"因子这一层" —— 把现有 K 线特征从"写死在 prompt 组装里"变成可量化打分、可存档、可淘汰的研究资产。
