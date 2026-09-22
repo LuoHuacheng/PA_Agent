@@ -391,6 +391,19 @@ def test_session_window_is_utc_defined() -> None:
     assert not _session_blocked_now(now_hour=9, start_hour_utc=8, end_hour_utc=8)
 
 
+def test_session_window_label_is_inclusive_last_minute() -> None:
+    """窗口是 [start, end), 文案末分钟必须是 end-1:59。
+
+    2026-09-22 前打印的是 end:59, 默认窗口被写成 20:00-04:59, 与实际的
+    20:00-03:59 UTC(= 04:00-11:59 UTC+8)差一小时, 会让排查者算错边界。
+    """
+    from pa_agent.trading.signal_pipeline import _session_window_label
+
+    assert _session_window_label(start_hour_utc=20, end_hour_utc=4) == "20:00-03:59 UTC"
+    assert _session_window_label(start_hour_utc=8, end_hour_utc=12) == "08:00-11:59 UTC"
+    assert _session_window_label(start_hour_utc=20, end_hour_utc=0) == "20:00-23:59 UTC"
+
+
 def test_block_session_entry(monkeypatch) -> None:
     from pa_agent.trading.signal_pipeline import _session_blocked_now
 
@@ -399,9 +412,117 @@ def test_block_session_entry(monkeypatch) -> None:
     result = pipeline.dispatch(_env_signal("做多", "normal_channel", "bullish"))
     if _session_blocked_now():  # 实际运行时刻落在窗口内才拦截
         assert result.gate_blocked and "session_block" in result.gate_reasons[0]
+        assert "03:59 UTC" in result.gate_reasons[0]
+        assert "04:59" not in result.gate_reasons[0]
         assert exec_calls == []
     else:
         assert not result.gate_blocked
+
+
+def test_entry_gates_mode_defaults_to_on() -> None:
+    """默认必须是 on。
+
+    入口门控 5 个 block_* 已在线上拦了很多天; direction_gates_mode 的默认是
+    dry_run(先观察), 照抄那个默认就等于一次无人察觉的行为变更。默认值本身是
+    安全属性, 用测试钉死。
+    """
+    assert Settings().binance_usdm_testnet.entry_gates_mode == "on"
+
+
+def test_entry_gates_dry_run_passes_but_records_reasons(monkeypatch) -> None:
+    """dry_run: 命中不拦(照常下单), 但把"本会拦"的理由写进记录留痕。"""
+    exec_calls, notified = _patch_io(monkeypatch)
+    settings = _env_settings(block_short_entry=True, entry_gates_mode="dry_run")
+    pipeline = SignalPipeline(settings)
+    signal = _env_signal("做空", "normal_channel", "bullish")
+    result = pipeline.dispatch(signal)
+
+    assert result.gate_blocked is False
+    assert len(exec_calls) == 1  # 真的进了执行层
+    # 不推"被入口门控拦截": 这张单其实下了, 那文案会撒谎。
+    assert "gate_blocked" not in notified
+    marker = signal.decision["execution"]
+    assert marker["status"] == "submitted"  # 执行结果才是正经 status
+    assert "gate_reasons" not in marker
+    assert any(r.startswith("short_block") for r in marker["gate_dry_run"])
+
+
+def test_entry_gates_dry_run_unmasks_direction_gate(monkeypatch) -> None:
+    """入口门控放行后, 方向闸门必须真的被评估到。
+
+    入口门控命中即 return 是既有短路; dry_run 若也跟着 return, 方向闸门的真实
+    命中率就永远测不出来 —— 而测出来正是这次改动的唯一目的。
+    """
+    from dataclasses import replace
+
+    exec_calls, _ = _patch_io(monkeypatch)
+    settings = _env_settings(
+        block_short_entry=True,
+        entry_gates_mode="dry_run",
+        direction_gates_mode="on",
+    )
+    monkeypatch.setattr(
+        "pa_agent.util.price_tick.infer_price_tick_from_frame", lambda _f: 0.01
+    )
+    monkeypatch.setattr(
+        "pa_agent.trading.direction_gates.evaluate_direction_gates",
+        lambda **_kw: ["G1: 逆势"],
+    )
+    pipeline = SignalPipeline(settings)
+    signal = replace(_env_signal("做空", "normal_channel", "bullish"), frame=_frame())
+    result = pipeline.dispatch(signal)
+
+    assert result.gate_blocked is True  # 方向闸门拦下了, 证明它被跑到了
+    assert exec_calls == []
+    assert signal.decision["execution"]["gate_reasons"] == ["G1: 逆势"]
+
+
+def test_entry_gates_on_still_blocks_and_omits_dry_run_key(monkeypatch) -> None:
+    """回归护栏: mode=on 时行为与加 mode 之前逐字一致。"""
+    exec_calls, notified = _patch_io(monkeypatch)
+    settings = _env_settings(block_short_entry=True, entry_gates_mode="on")
+    pipeline = SignalPipeline(settings)
+    signal = _env_signal("做空", "normal_channel", "bullish")
+    result = pipeline.dispatch(signal)
+
+    assert result.gate_blocked is True
+    assert exec_calls == [] and notified == ["gate_blocked"]
+    marker = signal.decision["execution"]
+    assert marker["status"] == "gate_blocked"
+    assert any(r.startswith("short_block") for r in marker["gate_reasons"])
+    assert "gate_dry_run" not in marker
+
+
+def test_entry_gates_dry_run_uses_its_own_counter(monkeypatch) -> None:
+    """dry_run 命中进平行桶, 不污染 direction_gate_stats 的真拦截序列。"""
+    _patch_io(monkeypatch)
+    settings = _env_settings(block_short_entry=True, entry_gates_mode="dry_run")
+    blocked_hits: list[str] = []
+    dry_hits: list[str] = []
+    pipeline = SignalPipeline(
+        settings,
+        on_gate_hit=blocked_hits.append,
+        on_entry_dry_run_hit=dry_hits.append,
+    )
+    pipeline.dispatch(_env_signal("做空", "normal_channel", "bullish"))
+    assert blocked_hits == []
+    assert dry_hits == ["short_block"]
+
+
+def test_entry_gates_on_fills_block_counter_not_dry_run(monkeypatch) -> None:
+    """on 模式仍走原桶: 两个桶各记各的, 不在同一序列里互相稀释。"""
+    _patch_io(monkeypatch)
+    settings = _env_settings(block_short_entry=True, entry_gates_mode="on")
+    blocked_hits: list[str] = []
+    dry_hits: list[str] = []
+    pipeline = SignalPipeline(
+        settings,
+        on_gate_hit=blocked_hits.append,
+        on_entry_dry_run_hit=dry_hits.append,
+    )
+    pipeline.dispatch(_env_signal("做空", "normal_channel", "bullish"))
+    assert blocked_hits == ["short_block"]
+    assert dry_hits == []
 
 
 def test_block_low_plan_reward_risk(monkeypatch) -> None:

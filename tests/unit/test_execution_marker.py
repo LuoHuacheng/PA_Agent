@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pa_agent.records.execution_marker import (
+    dry_run_reasons,
     execution_status,
     gate_reasons,
     mark_execution,
@@ -48,3 +49,23 @@ def test_readers_still_work():
 
 def test_unmarked_record_is_treated_as_working():
     assert plan_is_working({"stage2_decision": {}}) is True
+
+def test_dry_run_reasons_are_separate_from_real_gate_reasons():
+    """dry_run 的"本会拦"必须与真拦截分开放, 否则回测会把它们当成同一件事。"""
+    decision = {}
+    mark_execution(
+        decision,
+        status="submitted",
+        dry_run_reasons=("short_block: 45 天回放做空 22 笔",),
+    )
+    record = {"stage2_decision": decision}
+    assert dry_run_reasons(record) == ["short_block: 45 天回放做空 22 笔"]
+    assert gate_reasons(record) == []  # 真拦截口径不被污染
+    assert plan_is_working(record) is True  # dry_run 的单确实在场
+
+
+def test_dry_run_reasons_empty_when_blocked_for_real():
+    decision = {}
+    mark_execution(decision, status="gate_blocked", gate_reasons=("rr_block: 1.2 < 1.5",))
+    record = {"stage2_decision": decision}
+    assert dry_run_reasons(record) == []

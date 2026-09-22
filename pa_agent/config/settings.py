@@ -302,6 +302,12 @@ class BinanceUSDMTestnetSettings(BaseModel):
     # 低流动性窗口(UTC 小时, 跨零点时 start > end)。
     block_session_utc_start_hour: int = Field(default=20, ge=0, le=23)
     block_session_utc_end_hour: int = Field(default=4, ge=0, le=24)
+    # 入口门控模式: on = 命中即拦(现行行为); dry_run = 命中只记录/计数/日志, 照常下单。
+    # 默认必须是 on —— direction_gates_mode 的默认是 dry_run(先观察), 但入口门控的
+    # 5 个 block_* 已在实盘拦了很多天, 照抄那个默认就是一次无人察觉的行为变更。
+    # dry_run 的用途是"放行同时留痕": 入口门控命中即 return 会短路掉方向闸门,
+    # 想测出方向闸门的真实命中率, 只能先让它被放行(2026-09-22)。
+    entry_gates_mode: Literal["on", "dry_run"] = "on"
 
     # --- 突破单(STOP_MARKET)自动执行 (2026-09-19 新增, 默认关) ---
     # 动机: 单边行情里模型选对了入场方式却拿不到货。decision_nodes 的周期→方法

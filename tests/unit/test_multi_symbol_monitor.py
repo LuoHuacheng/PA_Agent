@@ -1081,3 +1081,39 @@ def test_daily_trend_line_degrades_without_enable_or_bars(tmp_path: Path) -> Non
 
     monitor._settings.binance_usdm_testnet.enabled = True
     assert monitor._daily_trend_line(state, "BTCUSDT", "30m") == ""
+
+
+def test_entry_gate_dry_run_stats_round_trip(tmp_path: Path) -> None:
+    """dry_run 计数桶独立持久化: 与 direction_gate_stats 各记各的。"""
+    path = tmp_path / "state.json"
+    monitor = object.__new__(MultiSymbolMonitor)
+    monitor._state_path = path
+    monitor._direction_gate_stats = {"short_block": 7}
+    monitor._entry_gate_dry_run_stats = {}
+    monitor._persisted_closed_ts = {}
+    monitor._structure_exit_streak = {}
+    monitor._fill_stats = {}
+    monitor._bump_entry_gate_dry_run_stats("session_block")
+    monitor._bump_entry_gate_dry_run_stats("session_block")
+    monitor._save_state()
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["entry_gate_dry_run_stats"] == {"session_block": 2}
+    assert raw["direction_gate_stats"] == {"short_block": 7}  # 真拦截序列没被稀释
+
+    reloaded = object.__new__(MultiSymbolMonitor)
+    reloaded._state_path = path
+    reloaded._load_state()
+    assert reloaded._entry_gate_dry_run_stats == {"session_block": 2}
+    assert reloaded._direction_gate_stats == {"short_block": 7}
+
+
+def test_monitor_wires_entry_gate_dry_run_counter(tmp_path: Path) -> None:
+    """监控必须把 dry_run 计数器接进管线: 接错桶就统计不到"本会拦"。"""
+    monitor = MultiSymbolMonitor(
+        ctx=object(),
+        settings=_settings(MonitorTarget(symbol="XAUUSD", timeframe="15m")),
+        state_path=tmp_path / "state.json",
+        source_factory=lambda _kind: FakeSource(_bars(1_800)),
+    )
+    assert monitor._signal_pipeline._on_entry_dry_run_hit == monitor._bump_entry_gate_dry_run_stats

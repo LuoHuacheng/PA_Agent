@@ -211,6 +211,9 @@ class MultiSymbolMonitor:
         self._light_quiet: dict[str, int] = {}
         #: Direction-gate rejection counters keyed by gate name (G1/G2...).
         self._direction_gate_stats: dict[str, int] = {}
+        #: 入口门控 dry_run 的"本会拦"计数。与上面的真拦截序列分开持久化, 否则
+        #: "拦了"和"本会拦"会写成同一条时间序列, 事后分不开(2026-09-22)。
+        self._entry_gate_dry_run_stats: dict[str, int] = {}
         #: 限价挂单成交率遥测（placed/fills/timeouts, per symbol）。见
         #: pa_agent.monitoring.fill_stats 的口径说明。
         self._fill_stats: dict[str, dict[str, int]] = {}
@@ -222,7 +225,9 @@ class MultiSymbolMonitor:
 
         #: 统一开仓管线：机会判定/方向闸门/落盘/执行/通知只在这一处。
         self._signal_pipeline = SignalPipeline(
-            settings, on_gate_hit=self._bump_direction_gate_stats
+            settings,
+            on_gate_hit=self._bump_direction_gate_stats,
+            on_entry_dry_run_hit=self._bump_entry_gate_dry_run_stats,
         )
         self._load_state()
 
@@ -785,6 +790,12 @@ class MultiSymbolMonitor:
             self._direction_gate_stats.get(gates_key, 0) + 1
         )
 
+    def _bump_entry_gate_dry_run_stats(self, gates_key: str) -> None:
+        """入口门控 dry_run 命中计数（"本会拦"口径, 不是真拦截）。"""
+        self._entry_gate_dry_run_stats[gates_key] = (
+            self._entry_gate_dry_run_stats.get(gates_key, 0) + 1
+        )
+
     def _observe_execution(self, symbol: str, result: Any) -> None:
         """把执行结果折算成限价挂单成交率样本（遥测, 不参与任何判定）.
 
@@ -1061,6 +1072,11 @@ class MultiSymbolMonitor:
                 self._direction_gate_stats = {
                     str(k): int(v) for k, v in stats.items() if isinstance(v, (int, float))
                 }
+            dry = raw.get("entry_gate_dry_run_stats", {})
+            if isinstance(dry, dict):
+                self._entry_gate_dry_run_stats = {
+                    str(k): int(v) for k, v in dry.items() if isinstance(v, (int, float))
+                }
             from pa_agent.monitoring.fill_stats import STATE_KEY, normalize
 
             self._fill_stats = normalize(raw.get(STATE_KEY, {}))
@@ -1079,6 +1095,7 @@ class MultiSymbolMonitor:
                         "last_processed_closed_ts": self._persisted_closed_ts,
                         "structure_exit_streak": self._structure_exit_streak,
                         "direction_gate_stats": self._direction_gate_stats,
+                        "entry_gate_dry_run_stats": self._entry_gate_dry_run_stats,
                         "fill_stats": self._fill_stats,
                     },
                     indent=2,

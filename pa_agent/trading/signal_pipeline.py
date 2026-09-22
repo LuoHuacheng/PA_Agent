@@ -86,6 +86,9 @@ class Evaluation:
     opportunity: bool
     gate_reasons: tuple[str, ...] = ()
     gate_mode: str = "off"  # off / dry_run / on
+    #: 入口门控在 dry_run 下"本会拦"的原因。与 gate_reasons 分开存, 免得把
+    #: "拦了"和"本会拦"读成同一件事。
+    entry_dry_run_reasons: tuple[str, ...] = ()
 
 
 @dataclass
@@ -126,6 +129,18 @@ def _session_blocked_now(
     return hour >= start or hour < end
 
 
+def _session_window_label(*, start_hour_utc: int, end_hour_utc: int) -> str:
+    """门控文案里的窗口区间, 形如 20:00-03:59 UTC。
+
+    _session_blocked_now 判的是左闭右开 [start, end), 窗口的最后一分钟是
+    end-1:59。2026-09-22 之前这里直接打印 end:59, 把 20:00-03:59 写成
+    20:00-04:59 —— 照文案换算北京时间会多算一小时。
+    """
+    start = int(start_hour_utc) % 24
+    last = (int(end_hour_utc) - 1) % 24
+    return f"{start:02d}:00-{last:02d}:59 UTC"
+
+
 class SignalPipeline:
     """下单机会的单一入口：评估、门控、落盘、执行、通知。"""
 
@@ -134,10 +149,14 @@ class SignalPipeline:
         settings: Any,
         *,
         on_gate_hit: Callable[[str], None] | None = None,
+        on_entry_dry_run_hit: Callable[[str], None] | None = None,
     ) -> None:
         self._settings = settings
-        # 方向闸门命中即回调（含 dry-run），monitor 用它维护统计。
+        # 门控命中即回调（含 dry-run），monitor 用它维护统计。
         self._on_gate_hit = on_gate_hit
+        # 入口门控 dry_run 命中单独回调: 混进 direction_gate_stats 会把"拦了"
+        # 与"本会拦"写成同一条序列, 事后分不开。
+        self._on_entry_dry_run_hit = on_entry_dry_run_hit
 
     # ── 配置 ────────────────────────────────────────────────────────────
 
@@ -209,24 +228,46 @@ class SignalPipeline:
         if not self.has_order_opportunity(inner):
             return Evaluation(opportunity=False)
         env_reasons = self._entry_block_reasons(inner, decision=decision)
+        entry_dry_run_reasons: tuple[str, ...] = ()
         if env_reasons:
             cfg = self._binance_cfg
             gates_key = ",".join(sorted(r.split(":", 1)[0] for r in env_reasons))
-            if self._on_gate_hit is not None:
-                try:
-                    self._on_gate_hit(gates_key)
-                except Exception:
-                    logger.debug("entry-gate stats callback failed", exc_info=True)
-            logger.warning(
-                "[入口门控] %s 拦截 %s: %s",
-                self._frame_label(frame), gates_key, "; ".join(env_reasons),
-            )
-            return Evaluation(opportunity=True, gate_reasons=env_reasons, gate_mode="on")
+            label = self._frame_label(frame)
+            detail = "; ".join(env_reasons)
+            mode = str(getattr(cfg, "entry_gates_mode", "on") or "on").strip()
+            if mode == "dry_run":
+                # 只记录不拦: 记下"本会拦"的原因后继续走方向闸门 —— 入口门控
+                # 命中即 return 的短路会让方向闸门的真实命中率永远测不到。
+                if self._on_entry_dry_run_hit is not None:
+                    try:
+                        self._on_entry_dry_run_hit(gates_key)
+                    except Exception:
+                        logger.debug(
+                            "entry-gate dry-run callback failed", exc_info=True
+                        )
+                logger.info(
+                    "[入口门控 dry-run] %s 命中 %s: %s", label, gates_key, detail
+                )
+                entry_dry_run_reasons = env_reasons
+            else:
+                if self._on_gate_hit is not None:
+                    try:
+                        self._on_gate_hit(gates_key)
+                    except Exception:
+                        logger.debug(
+                            "entry-gate stats callback failed", exc_info=True
+                        )
+                logger.warning("[入口门控] %s 拦截 %s: %s", label, gates_key, detail)
+                return Evaluation(
+                    opportunity=True,
+                    gate_reasons=env_reasons,
+                    gate_mode="on",
+                )
         reasons = self._direction_gate_reasons(
             inner, frame=frame, previous_record=previous_record
         )
         if not reasons:
-            return Evaluation(opportunity=True)
+            return Evaluation(opportunity=True, entry_dry_run_reasons=entry_dry_run_reasons)
         cfg = self._binance_cfg
         mode = str(getattr(cfg, "direction_gates_mode", "off") or "off").strip()
         gates_key = ",".join(sorted({str(r).split(":", 1)[0] for r in reasons}))
@@ -241,9 +282,19 @@ class SignalPipeline:
             logger.info(
                 "[方向闸门 dry-run] %s 命中 %s: %s", label, gates_key, detail
             )
-            return Evaluation(opportunity=True, gate_reasons=reasons, gate_mode="dry_run")
+            return Evaluation(
+                opportunity=True,
+                gate_reasons=reasons,
+                gate_mode="dry_run",
+                entry_dry_run_reasons=entry_dry_run_reasons,
+            )
         logger.warning("[方向闸门] %s 拦截 %s: %s", label, gates_key, detail)
-        return Evaluation(opportunity=True, gate_reasons=reasons, gate_mode="on")
+        return Evaluation(
+            opportunity=True,
+            gate_reasons=reasons,
+            gate_mode="on",
+            entry_dry_run_reasons=entry_dry_run_reasons,
+        )
 
     def _frame_label(self, frame: Any) -> str:
         return f"{getattr(frame, 'symbol', '?')} {getattr(frame, 'timeframe', '?')}"
@@ -293,11 +344,11 @@ class SignalPipeline:
             start_hour_utc=int(getattr(cfg, "block_session_utc_start_hour", 20)),
             end_hour_utc=int(getattr(cfg, "block_session_utc_end_hour", 4)),
         ):
-            reasons.append(
-                "session_block: 回放 04-12时(UTC+8) 74 笔 -290U"
-                f" (= {int(getattr(cfg, 'block_session_utc_start_hour', 20)):02d}:00"
-                f"-{int(getattr(cfg, 'block_session_utc_end_hour', 4)):02d}:59 UTC)"
+            window = _session_window_label(
+                start_hour_utc=int(getattr(cfg, "block_session_utc_start_hour", 20)),
+                end_hour_utc=int(getattr(cfg, "block_session_utc_end_hour", 4)),
             )
+            reasons.append(f"session_block: 回放 04-12时(UTC+8) 74 笔 -290U (= {window})")
         min_rr = float(getattr(cfg, "min_plan_reward_risk", 0.0) or 0.0)
         if min_rr > 0:
             from pa_agent.util.trade_metrics import compute_risk_reward
@@ -371,6 +422,7 @@ class SignalPipeline:
                 signal.decision,
                 status="gate_blocked",
                 gate_reasons=evaluation.gate_reasons,
+                dry_run_reasons=evaluation.entry_dry_run_reasons,
             )
             notified = self._notify_gate_blocked(signal, evaluation.gate_reasons)
             # 注意：不写 trade_records CSV —— 那是"已执行决策行"的账本，被回放与
@@ -390,6 +442,8 @@ class SignalPipeline:
             signal.decision,
             status=str(getattr(result, "status", "") or "unknown"),
             reason=str(getattr(result, "reason", "") or ""),
+            # dry_run 入口门控放行的单确实下了, 但复盘必须能看出它本是哪一批被拦的。
+            dry_run_reasons=evaluation.entry_dry_run_reasons,
         )
         notified = self._notify_signal(signal, result)
         return DispatchResult(

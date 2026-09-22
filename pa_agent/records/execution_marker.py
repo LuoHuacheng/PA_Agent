@@ -19,6 +19,10 @@ from typing import Any
 #: stage2_decision 内的 execution 键名。
 EXECUTION_KEY = "execution"
 
+#: 入口门控 dry_run 下"本会拦"的原因键名。与 gate_reasons 分开存: 前者是
+#: "真的没下", 后者是"本会拦但放行了"; 混在一个键里, 回测就分不出闸门到底拦掉了什么。
+DRY_RUN_KEY = "gate_dry_run"
+
 #: 只有在场工作的状态才算"有效方案"。其余取值（gate_blocked / rejected /
 #: skipped / dry_run / failed / unknown）都不构成在场挂单。
 ACTIVE_STATUSES = frozenset({"submitted", "pending"})
@@ -30,6 +34,7 @@ def mark_execution(
     status: str,
     gate_reasons: tuple[str, ...] | list[str] = (),
     reason: str = "",
+    dry_run_reasons: tuple[str, ...] | list[str] = (),
 ) -> dict[str, Any]:
     """把执行结果原地写进 *decision*（即记录的 stage2_decision）并返回 marker。
 
@@ -43,6 +48,9 @@ def mark_execution(
     reasons = [str(r) for r in gate_reasons if str(r)]
     if reasons:
         marker["gate_reasons"] = reasons
+    dry = [str(r) for r in dry_run_reasons if str(r)]
+    if dry:
+        marker[DRY_RUN_KEY] = dry
     text = str(reason or "").strip()
     if text:
         marker["reason"] = text
@@ -79,6 +87,20 @@ def gate_reasons(record: Any) -> list[str]:
     if not isinstance(marker, dict):
         return []
     reasons = marker.get("gate_reasons")
+    if not isinstance(reasons, list):
+        return []
+    return [str(r) for r in reasons]
+
+
+def dry_run_reasons(record: Any) -> list[str]:
+    """入口门控 dry_run 的"本会拦"原因列表；没有该标记时为空。"""
+    s2 = decision_of(record)
+    if s2 is None:
+        return []
+    marker = s2.get(EXECUTION_KEY)
+    if not isinstance(marker, dict):
+        return []
+    reasons = marker.get(DRY_RUN_KEY)
     if not isinstance(reasons, list):
         return []
     return [str(r) for r in reasons]
