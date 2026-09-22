@@ -39,6 +39,10 @@ rb=$(.venv/bin/python tools/expectancy_report.py --gate-since --loss-bound 2 $dd
 gate=$(.venv/bin/python scripts/verify_gate.py 2>&1 | tail -1 | tr '\t' ' ')
 rbk=$(.venv/bin/python tools/expectancy_report.py --rollback-check $dd 2>&1 | tail -1 | tr '\t' ' ')
 orders=$(ls records/orders/ 2>/dev/null | wc -l | tr -d ' ')
+# 用量分桶: 入口门控禁掉的时段内跳过阶段二后, 窗口内"调用/轮"应从 ~2.0 降到 ~1.0。
+# 工具只读日志与 pending 记录, 失败不影响日检(留空即可)。
+usage=$(.venv/bin/python tools/usage_by_window.py --days 2 --tsv logs/usage_by_window.tsv --oneline 2>/dev/null)
+if [ -z "$usage" ]; then usage="(无数据)"; fi
 
 service="no"
 if [ -f config/monitoring.pid ]; then
@@ -58,6 +62,8 @@ echo "4) 回滚检查: $rbk"
 echo "5) 闸门    : $gate"
 echo "6) 账本条目: $orders  (必须 > 0)   服务存活: $service"
 echo "7) 样本回填: $backfill   <- outcomes.csv 自动补新(前几行判定读它)"
+echo "8) 用量分桶: $usage"
+echo "    ↑ 窗口内调用/轮; 跳过阶段二生效后应 ~1.0, 未生效 ~2.0 (详见 logs/usage_by_window.tsv)"
 tail -2 logs/daily_check.tsv
 if [ -n "$refill_failed" ]; then
   echo "!! 样本回填失败: outcomes.csv 停增, 前几行判定会一直报旧数;"
