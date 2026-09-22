@@ -6,7 +6,9 @@
     "thinking": true,
     "reasoning_effort": "high",
     "max_output_tokens": 384000,
-    "context_window": 128000
+    "context_window": 128000,
+    "transport_retry_max": 2,
+    "transport_retry_backoff_seconds": 5.0
   },
   "general": {
     "analysis_bar_count": 100,
@@ -40,7 +42,10 @@
     "experience_max_entries": 0,
     "experience_max_chars_per_entry": 400,
     "stage1_inject_pattern_briefs": true,
-    "stage1_kline_rows_limit": 0
+    "stage1_kline_rows_limit": 0,
+    "gate_feedback_enabled": true,
+    "gate_feedback_hours": 4.0,
+    "gate_feedback_max_chars": 400
   },
   "validation": {
     "normalization_mode": "strict",
@@ -277,6 +282,7 @@
     "light_mode_enabled": false,
     "light_mode_max_quiet_bars": 3,
     "light_mode_skip_blocked_session": false,
+    "shutdown_timeout_seconds": 90.0,
     "htf_context_enabled": false,
     "htf_timeframes": [
       "1h",

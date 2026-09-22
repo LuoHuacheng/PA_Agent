@@ -44,6 +44,8 @@
 | `reasoning_effort` | `low`, `medium`, `high`, `max` | `high` | `medium` | — |
 | `max_output_tokens` | int（≥1, ≤384000） | `384000` | `32000` | 单次请求的输出预算 (thinking + content 合计)。默认沿用客户端全局上限 384000；若网关按渠道夹断 max_tokens (实测 a6api 夹到 4096)，把这里调到 模型真实输出上限，避免"思考吃满额度、正文 JSON 为空"。 |
 | `context_window` | int | `2000000` | `1048576` | 仅用于 UI 上下文占用百分比与告警阈值；不参与请求体。请填模型真实窗口。 |
+| `transport_retry_max` | int（≥0, ≤5） | `2` | `2` | 传输层（网络/超时）失败的重试次数与退避秒数。只在**本轮尚未向 UI 吐出任何 token** 时重试: 已经 stream 过的调用重放会把同一段内容再推一遍。 2026-09-22 现场 —— 本地网关抖动窗口内 4/50 轮分析以 "peer closed connection without sending complete message body" 直接报废; 单次尝试等于把一次 5 秒抖动放大成整轮信号丢失。0 = 关闭重试(旧行为)。 |
+| `transport_retry_backoff_seconds` | float（≥0.0, ≤60.0） | `5.0` | `5.0` | — |
 
 ### general — 通用设置
 
@@ -84,6 +86,9 @@
 | `experience_max_chars_per_entry` | int（≥100, ≤4000） | `400` | `400` | — |
 | `stage1_inject_pattern_briefs` | bool | true | true | Inject pattern判定表 + 速查 brief into Stage 1 user prompt (reduces missed tags). |
 | `stage1_kline_rows_limit` | int（≥0, ≤60） | `0` | `40` | 阶段一 K 线表最多渲染的最近 K 行数; 0 = 不裁剪(默认, 全量). 裁剪时 更早的 K 线以十根滚轴概览补充 (Phase C A/B 实验开关). |
+| `gate_feedback_enabled` | bool | true | true | 把最近被入口门控拦下的同品种方案回灌进阶段一/阶段二。解决 2026-09-22 现场: BTCUSDT 连续三轮重推同一个被 short_block 硬拦的做空方案, 模型看不到 拦截原因。窗口内无拦截时该块为空, 不占 token。 |
+| `gate_feedback_hours` | float（≥0.0, ≤72.0） | `4.0` | `4.0` | — |
+| `gate_feedback_max_chars` | int（≥100, ≤4000） | `400` | `400` | — |
 
 ### validation — 校验与重试
 
@@ -121,6 +126,7 @@
 | `light_mode_enabled` | bool | false | true | C3 轻量模式: 无结构事件连续安静达 N 根时跳过阶段二(默认关, monitor only). |
 | `light_mode_max_quiet_bars` | int（≥1, ≤24） | `3` | `3` | — |
 | `light_mode_skip_blocked_session` | bool | false | true | 入口门控已禁的时段内强制跳过阶段二: 那段时间的单必被拦, 阶段二产出没有下单 价值; 只留阶段一(结构否定离场与诊断记录都靠它)。与 binance_usdm_testnet 的 block_session_* 同源, 闸门一放开这条自动失效 —— 放行期跳过会白丢机会。 |
+| `shutdown_timeout_seconds` | float（≥2.0, ≤600.0） | `90.0` | `90.0` | SIGTERM/SIGINT 后允许在途分析收尾的上限（秒）。单轮分析要 1-3 分钟，旧的 硬编码 2s + cancel_futures 等于每重启一次就废掉正在跑的那轮信号 (2026-09-22)。超时才强制结束进程；代价是重启可能等这么久。 |
 | `htf_context_enabled` | bool | false | true | D1 HTF 背景摘要: 每根 K 线收盘额外拉取高周期程序特征(默认关). |
 | `htf_timeframes` | list[str] | ["1h", "4h"] | ["1h", "4h"] | — |
 | `htf_max_summary_chars` | int（≥100, ≤2000） | `400` | `400` | — |
@@ -233,7 +239,7 @@
 | `block_session_entry` | bool | false | true | 禁低流动性时段自动开仓: 回放 45 天该时段 74 笔亏 -290U(美盘尾段+亚盘早段 低流动性); 与 trending_tr 仅 51% 交集, 独立有效 — 组合后模型流从 -0.40R/笔 收到 ≈0.00R (shadow_replay --matrix 2026-09-13)。 2026-09-19 起窗口用 UTC 定义, 不再依赖机器本地时区; 默认 20:00-03:59 UTC 与原 04:00-11:59(UTC+8) 是同一段墙钟时间, 既有证据继续成立。 2026-09-19 45 天矩阵复跑: 禁该窗口在 gtx/off 下净/风险 +0.09(全部 -0.12), 仍是现行组合(禁空+禁trending_tr+禁该窗口)里贡献最大的一档。 |
 | `block_session_utc_start_hour` | int（≥0, ≤23） | `20` | `20` | 低流动性窗口(UTC 小时, 跨零点时 start > end)。 |
 | `block_session_utc_end_hour` | int（≥0, ≤24） | `4` | `4` | — |
-| `entry_gates_mode` | `on`, `dry_run` | `on` | —（未配置） | 入口门控模式: on = 命中即拦(现行行为); dry_run = 命中只记录/计数/日志, 照常下单。 默认必须是 on —— direction_gates_mode 的默认是 dry_run(先观察), 但入口门控的 5 个 block_* 已在实盘拦了很多天, 照抄那个默认就是一次无人察觉的行为变更。 dry_run 的用途是"放行同时留痕": 入口门控命中即 return 会短路掉方向闸门, 想测出方向闸门的真实命中率, 只能先让它被放行(2026-09-22)。 |
+| `entry_gates_mode` | `on`, `dry_run` | `on` | `on` | 入口门控模式: on = 命中即拦(现行行为); dry_run = 命中只记录/计数/日志, 照常下单。 默认必须是 on —— direction_gates_mode 的默认是 dry_run(先观察), 但入口门控的 5 个 block_* 已在实盘拦了很多天, 照抄那个默认就是一次无人察觉的行为变更。 dry_run 的用途是"放行同时留痕": 入口门控命中即 return 会短路掉方向闸门, 想测出方向闸门的真实命中率, 只能先让它被放行(2026-09-22)。 |
 | `breakout_order_enabled` | bool | false | true | --- 突破单(STOP_MARKET)自动执行 (2026-09-19 新增, 默认关) --- 动机: 单边行情里模型选对了入场方式却拿不到货。decision_nodes 的周期→方法 映射里 trending_tr → "11.2 突破单", 但执行层此前只认市价单/限价单, 突破单 一律 rejected 丢人工队列; 模型退而求其次写限价单, 45 天回放成交率仅 31.2% (245/786), 单边行情下大量挂单在现价下方被价格走掉。 触发价取 decision.entry_price —— 归一化层已保证它是依据 K 极值 ±1 tick 且 严格越过极值, 这里只做跳动的再对齐(多单向上取整)。 默认 False: 样本只有 45 天/2 条历史突破单, 先落地代码, 由操作者决定何时开。 |
 | `breakout_size_scale` | float（≥0.1, ≤1.0） | `0.5` | `0.5` | 突破单名义仓位缩放(触发即市价, 有滑点), 灰度期先半仓。 |
 | `min_plan_reward_risk` | float（≥0.0, ≤20.0） | `0.0` | `1.5` | 计划盈亏比下限: 低于该值的方案在入口直接拦(0 = 关闭)。require_trader_equation 用的是模型自报的 estimated_win_rate, 一个负边际的计划照样能算过, 只能做粗筛; 45 天回放(2026-09-17, min_stop_atr=1.5 / 超时 30)显示 RR>=1.5 只留 36% 成交 却砍掉 85% 的净亏 (-138.40U -> -20.74U), 比置信度门槛有效得多 (trade_conf>=55 反而 -22U)。价格缺失/方向矛盾一律按不合格处理。 |

@@ -32,6 +32,13 @@ class AIProviderSettings(BaseModel):
     max_output_tokens: int = Field(default=384_000, ge=1, le=384_000)
     #: 仅用于 UI 上下文占用百分比与告警阈值；不参与请求体。请填模型真实窗口。
     context_window: int = 2_000_000
+    #: 传输层（网络/超时）失败的重试次数与退避秒数。只在**本轮尚未向 UI 吐出任何
+    #: token** 时重试: 已经 stream 过的调用重放会把同一段内容再推一遍。
+    #: 2026-09-22 现场 —— 本地网关抖动窗口内 4/50 轮分析以
+    #: "peer closed connection without sending complete message body" 直接报废;
+    #: 单次尝试等于把一次 5 秒抖动放大成整轮信号丢失。0 = 关闭重试(旧行为)。
+    transport_retry_max: int = Field(default=2, ge=0, le=5)
+    transport_retry_backoff_seconds: float = Field(default=5.0, ge=0.0, le=60.0)
 
 
 class PromptSettings(BaseModel):
@@ -48,6 +55,12 @@ class PromptSettings(BaseModel):
     #: 阶段一 K 线表最多渲染的最近 K 行数; 0 = 不裁剪(默认, 全量). 裁剪时
     #: 更早的 K 线以十根滚轴概览补充 (Phase C A/B 实验开关).
     stage1_kline_rows_limit: int = Field(default=0, ge=0, le=60)
+    #: 把最近被入口门控拦下的同品种方案回灌进阶段一/阶段二。解决 2026-09-22
+    #: 现场: BTCUSDT 连续三轮重推同一个被 short_block 硬拦的做空方案, 模型看不到
+    #: 拦截原因。窗口内无拦截时该块为空, 不占 token。
+    gate_feedback_enabled: bool = True
+    gate_feedback_hours: float = Field(default=4.0, ge=0.0, le=72.0)
+    gate_feedback_max_chars: int = Field(default=400, ge=100, le=4000)
 
 
 class ValidationSettings(BaseModel):
@@ -479,6 +492,10 @@ class MonitoringSettings(BaseModel):
     #: 价值; 只留阶段一(结构否定离场与诊断记录都靠它)。与 binance_usdm_testnet 的
     #: block_session_* 同源, 闸门一放开这条自动失效 —— 放行期跳过会白丢机会。
     light_mode_skip_blocked_session: bool = False
+    #: SIGTERM/SIGINT 后允许在途分析收尾的上限（秒）。单轮分析要 1-3 分钟，旧的
+    #: 硬编码 2s + cancel_futures 等于每重启一次就废掉正在跑的那轮信号
+    #: (2026-09-22)。超时才强制结束进程；代价是重启可能等这么久。
+    shutdown_timeout_seconds: float = Field(default=90.0, ge=2.0, le=600.0)
     #: D1 HTF 背景摘要: 每根 K 线收盘额外拉取高周期程序特征(默认关).
     htf_context_enabled: bool = False
     htf_timeframes: list[str] = Field(default_factory=lambda: ["1h", "4h"])
