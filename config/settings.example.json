@@ -276,6 +276,7 @@
     "poll_retry_seconds": 5,
     "light_mode_enabled": false,
     "light_mode_max_quiet_bars": 3,
+    "light_mode_skip_blocked_session": false,
     "htf_context_enabled": false,
     "htf_timeframes": [
       "1h",

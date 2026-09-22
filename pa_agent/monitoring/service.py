@@ -971,6 +971,7 @@ class MultiSymbolMonitor:
         def _judge(stage1_json: dict) -> str:
             from pa_agent.monitoring.light_gate import (
                 record_has_active_plan,
+                session_blocked_skip_reason,
                 stage1_of_record,
                 structure_event_detected,
             )
@@ -978,6 +979,14 @@ class MultiSymbolMonitor:
             if record_has_active_plan(previous_record):
                 self._light_quiet[key] = 0
                 return ""
+            # 入口门控禁掉的时段: 阶段二产出必被拦, 跳过它只省调用, 不损失下单机会。
+            # 放在 active_plan 之后(在场计划仍需维护)、结构事件之前(窗内结构事件也不
+            # 构成下单理由)。闸门放开时 session_blocked_skip_reason 自己返回空串。
+            if bool(getattr(self._cfg, "light_mode_skip_blocked_session", False)):
+                window_reason = session_blocked_skip_reason(self._binance_cfg)
+                if window_reason:
+                    self._light_quiet[key] = 0
+                    return window_reason
             if structure_event_detected(stage1_of_record(previous_record), stage1_json):
                 self._light_quiet[key] = 0
                 return ""

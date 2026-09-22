@@ -73,3 +73,23 @@ def record_has_active_plan(record: Any) -> bool:
     if str(inner.get("order_type") or "") not in _ACTIVE_ORDER_TYPES:
         return False
     return plan_is_working(record)
+
+def session_blocked_skip_reason(cfg: Any, *, now_hour: int | None = None) -> str:
+    """入口门控已禁时段内的阶段二跳过理由; 不适用时空串。
+
+    只有"闸门确实开着 + 当前落在窗口内"才给理由。闸门一放开(放行实验)本函数立刻
+    返回空串, 否则放行期会白丢 stage2 的下单机会 —— 这个耦合是刻意的: 省调用永远
+    不能以错过真实入场为代价。窗口与判据都取自 binance 段的 block_session_*。
+    """
+    if not getattr(cfg, "block_session_entry", False):
+        return ""
+    from pa_agent.trading.signal_pipeline import _session_blocked_now
+
+    blocked = _session_blocked_now(
+        now_hour,
+        start_hour_utc=int(getattr(cfg, "block_session_utc_start_hour", 20)),
+        end_hour_utc=int(getattr(cfg, "block_session_utc_end_hour", 4)),
+    )
+    if not blocked:
+        return ""
+    return "session_blocked_window: 入口门控已禁该时段, 跳过阶段二"

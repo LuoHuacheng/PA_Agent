@@ -475,6 +475,10 @@ class MonitoringSettings(BaseModel):
     #: C3 轻量模式: 无结构事件连续安静达 N 根时跳过阶段二(默认关, monitor only).
     light_mode_enabled: bool = False
     light_mode_max_quiet_bars: int = Field(default=3, ge=1, le=24)
+    #: 入口门控已禁的时段内强制跳过阶段二: 那段时间的单必被拦, 阶段二产出没有下单
+    #: 价值; 只留阶段一(结构否定离场与诊断记录都靠它)。与 binance_usdm_testnet 的
+    #: block_session_* 同源, 闸门一放开这条自动失效 —— 放行期跳过会白丢机会。
+    light_mode_skip_blocked_session: bool = False
     #: D1 HTF 背景摘要: 每根 K 线收盘额外拉取高周期程序特征(默认关).
     htf_context_enabled: bool = False
     htf_timeframes: list[str] = Field(default_factory=lambda: ["1h", "4h"])
