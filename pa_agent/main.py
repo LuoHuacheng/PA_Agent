@@ -1,4 +1,10 @@
-"""Application entry point for PA Agent."""
+"""Application entry point — 无图形界面分支 (no-gui)。
+
+本分支由 scripts/gen_no_gui_branch.sh 生成: pa_agent.gui 在这个分支上不存在,
+启动直接进入无头监控。GUI 入口保留在主干分支的 pa_agent/main.py;
+本分支永不 merge 回主干。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -6,63 +12,20 @@ import sys
 
 logger = logging.getLogger(__name__)
 
+_HELP = "用法: pa-agent   # 无头分支: 前台启动监控, 等同 pa-monitor start --foreground"
+
 
 def main(argv: list[str] | None = None) -> int:
-    # Early diagnostics before Qt / heavy imports: crash dumps + file logging.
-    from pa_agent.util.crash_diagnostics import enable_crash_diagnostics, log_startup_diagnostics
-    from pa_agent.util.logging import configure_logging
-
-    enable_crash_diagnostics()
-    configure_logging()
-    log_startup_diagnostics()
+    # run_monitor() 自带 bootstrap / 配置校验 / PID 文件锁 / SIGINT+SIGTERM 优雅退出,
+    # 这里不重写一遍未测的循环。
+    from pa_agent.monitoring.cli import run_monitor
 
     argv = list(sys.argv if argv is None else argv)
-    # Imported here (not at module top) so importing pa_agent.main never pulls
-    # PyQt6 in: GUI launches need the optional "gui" extra, headless ones do not.
-    from PyQt6.QtWidgets import QApplication
-
-    app = QApplication(argv)
-    app.setApplicationName("PA Agent")
-
-    from pa_agent.gui.theme import apply_theme
-    apply_theme(app)
-
-    logger.info("PA Agent starting up")
-
-    # Bootstrap all components (settings, data source, AI client, etc.)
-    from pa_agent.app_context import AppContext
-    ctx = AppContext.bootstrap()
-
-    # Update logging with the real API key now that settings are loaded
-    if ctx.settings is not None:
-        from pa_agent.util.logging import configure_logging
-        configure_logging(api_key=ctx.settings.provider.api_key)
-        from pa_agent.util.crash_diagnostics import log_startup_diagnostics
-        log_startup_diagnostics()
-
-    monitor = None
-    if ctx.settings is not None and ctx.settings.monitoring.enabled:
-        from pa_agent.config.paths import MONITORING_STATE_PATH
-        from pa_agent.monitoring import MultiSymbolMonitor
-
-        monitor = MultiSymbolMonitor(
-            ctx=ctx,
-            settings=ctx.settings,
-            state_path=MONITORING_STATE_PATH,
-        )
-        monitor.start()
-
-    # Build and show the main window
-    from pa_agent.gui.main_window import MainWindow
-    window = MainWindow(ctx)
-    window.show()
-
-    logger.info("Main window shown")
-    try:
-        return app.exec()
-    finally:
-        if monitor is not None:
-            monitor.stop()
+    if any(arg in {"-h", "--help"} for arg in argv[1:]):
+        print(_HELP)
+        return 0
+    logger.info("PA Agent 以无头模式启动 (no-gui 分支)")
+    return run_monitor()
 
 
 if __name__ == "__main__":  # pragma: no cover
