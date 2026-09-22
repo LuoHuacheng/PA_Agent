@@ -9,6 +9,7 @@ BTC 裸仓 6 分 41 秒、ETH 挂单被遗弃 3 小时。
 这个 autouse fixture 把上述入口一律指向当前测试的 tmp_path, 与
 `tests/unit/test_prod_path_isolation.py` 的断言配套。
 """
+
 from __future__ import annotations
 
 import importlib
@@ -158,9 +159,68 @@ def _suppress_protection_alerts_by_default(monkeypatch):
         from pa_agent.trading import position_manager
     except Exception:
         return
-    monkeypatch.setattr(
-        position_manager, "protection_alerts_enabled", lambda settings: False
-    )
+    monkeypatch.setattr(position_manager, "protection_alerts_enabled", lambda settings: False)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _silence_modal_dialogs():
+    """测试进程里任何模态框都不得阻塞 (2026-09-22 开发弹窗事故).
+
+    `MainWindow.showEvent` 会用 `QTimer.singleShot(0, _on_startup_api_key_check)`
+    触发启动检查; e2e 夹具的 `AppContext.settings` 是 None, 于是每次都弹
+    「需要配置 API Key」模态框, 紧接着再开一个 `SettingsDialog.exec()` ——
+    原生平台表现为"跑 pytest 一直弹窗等你去点", offscreen 平台则永久阻塞
+    (pytest-qt teardown 的 `_process_events` 卡死在 `QMessageBox.information`)。
+
+    这里把模态框压成不阻塞的桩: 消息框一律返回默认按钮, 启动设置弹窗只记一笔。
+    专测弹窗行为的用例自己 monkeypatch 同名属性, 会覆盖本夹具。
+    """
+    try:
+        from PyQt6.QtWidgets import QMessageBox
+
+        from pa_agent.gui.main_window import MainWindow
+    except ImportError:  # 无 Qt 的无头安装: 根本没有弹窗可压
+        yield []
+        return
+
+    calls: list[str] = []
+    _names = ("information", "warning", "critical", "question", "exec")
+    originals = {name: getattr(QMessageBox, name) for name in _names}
+    original_open_settings = MainWindow._open_settings_dialog
+    original_open_ai_settings = MainWindow._open_ai_model_settings_dialog
+
+    def _static_stub(name, result):
+        def _stub(*args, **kwargs):
+            calls.append(name)
+            return result
+
+        return staticmethod(_stub)
+
+    QMessageBox.information = _static_stub("information", QMessageBox.StandardButton.Ok)
+    QMessageBox.warning = _static_stub("warning", QMessageBox.StandardButton.Ok)
+    QMessageBox.critical = _static_stub("critical", QMessageBox.StandardButton.Ok)
+    # question 默认给 No: 没有任何测试该在无人的机器上点"确认".
+    QMessageBox.question = _static_stub("question", QMessageBox.StandardButton.No)
+
+    def _exec_stub(self, *args, **kwargs):
+        calls.append("exec")
+        return 0
+
+    QMessageBox.exec = _exec_stub
+
+    def _open_stub(self, *args, **kwargs):
+        calls.append("settings")
+
+    MainWindow._open_settings_dialog = _open_stub
+    MainWindow._open_ai_model_settings_dialog = _open_stub
+
+    try:
+        yield calls
+    finally:
+        for name, value in originals.items():
+            setattr(QMessageBox, name, value)
+        MainWindow._open_settings_dialog = original_open_settings
+        MainWindow._open_ai_model_settings_dialog = original_open_ai_settings
 
 
 @pytest.fixture(autouse=True)
