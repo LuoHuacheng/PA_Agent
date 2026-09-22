@@ -173,10 +173,12 @@ def _silence_modal_dialogs():
     (pytest-qt teardown 的 `_process_events` 卡死在 `QMessageBox.information`)。
 
     这里把模态框压成不阻塞的桩: 消息框一律返回默认按钮, 启动设置弹窗只记一笔。
+    QDialog.exec 也一并压掉 —— 自定义弹窗 (validation_debug_dialog 的调试框等)
+    同样是模态阻塞, 分析失败时它会弹出来等人点「关闭」。
     专测弹窗行为的用例自己 monkeypatch 同名属性, 会覆盖本夹具。
     """
     try:
-        from PyQt6.QtWidgets import QMessageBox
+        from PyQt6.QtWidgets import QDialog, QMessageBox
 
         from pa_agent.gui.main_window import MainWindow
     except ImportError:  # 无 Qt 的无头安装: 根本没有弹窗可压
@@ -184,8 +186,9 @@ def _silence_modal_dialogs():
         return
 
     calls: list[str] = []
-    _names = ("information", "warning", "critical", "question", "exec")
+    _names = ("information", "warning", "critical", "question")
     originals = {name: getattr(QMessageBox, name) for name in _names}
+    original_dialog_exec = QDialog.exec
     original_open_settings = MainWindow._open_settings_dialog
     original_open_ai_settings = MainWindow._open_ai_model_settings_dialog
 
@@ -206,7 +209,9 @@ def _silence_modal_dialogs():
         calls.append("exec")
         return 0
 
-    QMessageBox.exec = _exec_stub
+    # QMessageBox 继承自 QDialog, 所以这一个补丁同时管住消息框实例与所有自定义
+    # 弹窗 (AI 模型设置、校验调试框...). 返回 0 == 用户点了「拒绝/关闭」.
+    QDialog.exec = _exec_stub
 
     def _open_stub(self, *args, **kwargs):
         calls.append("settings")
@@ -219,6 +224,7 @@ def _silence_modal_dialogs():
     finally:
         for name, value in originals.items():
             setattr(QMessageBox, name, value)
+        QDialog.exec = original_dialog_exec
         MainWindow._open_settings_dialog = original_open_settings
         MainWindow._open_ai_model_settings_dialog = original_open_ai_settings
 
