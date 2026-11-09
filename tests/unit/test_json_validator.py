@@ -74,6 +74,18 @@ def test_strip_fences_includes_repair():
     assert isinstance(obj["decision_trace"], list)
 
 
+def test_strip_fences_keeps_payload_after_prose_with_odd_quotes() -> None:
+    """Prose with an unpaired quote must not trigger mid-string rejoining."""
+    raw = '他说"目标价100，格式如下：\n```json\n{\n  "a": 1\n}\n```'
+    assert json.loads(_strip_fences(raw)) == {"a": 1}
+
+
+def test_strip_fences_repairs_fence_split_inside_string() -> None:
+    """A fence injected mid-word is rejoined into one string."""
+    raw = '{"reasoning": "周期 tr\n```json\n{\nading_range"}'
+    assert json.loads(_strip_fences(raw)) == {"reasoning": "周期 trading_range"}
+
+
 def test_repair_unclosed_string_before_brace_fixes_summary_newline() -> None:
     broken = '{"summary":"unfinished\n}'
     repaired = _repair_unclosed_string_before_brace(broken)

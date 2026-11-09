@@ -112,12 +112,18 @@ _INTRUSIVE_FENCE_RE = re.compile(
 def _repair_fence_inside_string(text: str) -> str:
     """Remove a markdown fence that was injected mid-string by the model.
 
-    Only fires when the text before the fence ends inside an unclosed JSON
-    string (an odd number of unescaped double quotes). In that case the fence
-    and its opening brace are dropped and the two halves are rejoined under a
-    single leading brace.
+    Only fires when the text already starts with an object brace (so we are
+    inside the payload, not in leading prose) AND the text before the fence
+    ends inside an unclosed JSON string (an odd number of unescaped double
+    quotes). In that case the fence and its opening brace are dropped and the
+    two halves are rejoined under a single leading brace.
     """
     t = text.strip()
+    # Prose before a normal fenced block can contain an odd number of quotes
+    # (e.g. 他说"目标价100" left unbalanced). Rejoining there corrupts a payload
+    # the embedded-fence path would have extracted intact.
+    if not t.startswith("{"):
+        return t
     m = _INTRUSIVE_FENCE_RE.search(t)
     if not m:
         return t
@@ -137,6 +143,10 @@ def _repair_fence_inside_string(text: str) -> str:
             quote_count += 1
     if quote_count % 2 == 0:
         return t  # not inside a string; leave it for the normal path
+    if "```" in after:
+        # The fence is closed again, so it is a real nested block (a model
+        # quoting example JSON in a string), not a mid-word injection.
+        return t
     # The fence was injected mid-word, so the string must be rejoined with
     # NO whitespace between the halves ("tr" + "ading_range" -> "trading_range").
     # Only the newline immediately before the fence and the one right after it
