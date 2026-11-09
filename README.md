@@ -2,13 +2,13 @@
 
 ---
 
-面向主观交易者的 **价格行为（Price Action）** AI 辅助决策工具。从 **MT5 / TradingView / yfinance / AkShare** 读取 K 线，将结构化 K 线数据与预计算特征送入大模型做**两阶段分析**（市场诊断 → 交易决策），不是截图识图。默认不连接交易所、不执行下单；可显式开启受限的 Binance U 本位 Futures Testnet 市价自动执行。
+面向主观交易者的 **价格行为（Price Action）** AI 辅助决策工具。从 **MT5 / TradingView** 读取 K 线，将结构化 K 线数据与预计算特征送入大模型做**两阶段分析**（市场诊断 → 交易决策），不是截图识图。默认不连接交易所、不执行下单；可显式开启受限的 Binance U 本位 Futures Testnet 市价自动执行。
 
 ---
 
 ## 主要功能
 
-- 📈 **多数据源**：MT5（Windows）、TradingView（全平台）、yfinance（期货/加密货币）、AkShare（A 股）
+- 📈 **多数据源**：MT5（Windows）、TradingView（全平台）
 - 🧠 **两阶段 AI 分析**：市场诊断 → 策略路由 → 交易决策（限价/突破/市价或不下单）
 - 🔄 **增量分析与持续跟踪**：新增 K 线时复用上次结论；开启 `keep_analysis` 后新 K 线收盘自动触发新一轮分析
 - 🌳 **决策树可视化**：赛博科幻风格可交互流程图，自动播放闸门→策略路径动画
@@ -28,7 +28,7 @@
 | -------- | ---------------------------------------------------------- |
 | 操作系统 | Windows 10 / 11（主支持）、macOS 12+（TradingView 数据源） |
 | Python   | 3.11+                                                      |
-| 数据源   | MT5 / TradingView / yfinance / AkShare **至少配置一种**    |
+| 数据源   | MT5 / TradingView **至少配置一种**                        |
 | 网络     | 可访问所配置的 AI API（DeepSeek 或任意 OpenAI 兼容网关）    |
 
 ---
@@ -51,7 +51,7 @@ python -m pa_agent.main
 >
 > **无头（headless）部署不需要 Qt**：只需 `pip install -e .`（跳过 PyQt6/pyqtgraph），配合下方 `pa-monitor` 使用。
 
-**安装内容**：numpy/pandas（数据处理）+ openai（AI API 客户端）+ **akshare/baostock（A 股数据源）** + json 校验、模型定义等全套依赖；PyQt6（GUI 框架）+ pyqtgraph（K 线图表绘图）属可选 `gui` extra，仅图形界面需要。
+**安装内容**：numpy/pandas（数据处理）+ openai（AI API 客户端）+ json 校验、模型定义等全套依赖；PyQt6（GUI 框架）+ pyqtgraph（K 线图表绘图）属可选 `gui` extra，仅图形界面需要。
 
 > 若需运行测试（pytest）或代码格式化（ruff/black），额外安装：`pip install -e ".[dev,gui]"`（测试会启动真实 GUI 组件）。
 
