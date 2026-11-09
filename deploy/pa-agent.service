@@ -1,0 +1,43 @@
+[Unit]
+Description=PA_Agent 无头监控（TradingView + 两阶段 LLM 分析）
+After=network-online.target
+Wants=network-online.target
+
+# ⚠️ 下面三处路径与 User/Group 是**模板**，按实际部署改：
+#      /opt/pa-agent        克隆目录（= pa_agent/config/paths.py 的 PROJECT_ROOT）
+#      paagent              运行用户（需对克隆目录有写权限：config/logs/records/experience 都写在这里）
+#    改完执行：sudo systemctl daemon-reload
+
+[Service]
+Type=simple
+User=paagent
+Group=paagent
+Environment=HOME=/home/paagent
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/opt/pa-agent/.venv/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=/opt/pa-agent
+
+# 可选：环境变量兜底（TRADINGVIEW_USERNAME/PASSWORD、TELEGRAM_BOT_TOKEN/CHAT_ID、
+# PUSHPLUS_TOKEN、GATEWAY_CONFIG_ENV）。主要配置在 config/settings.json。
+# 前缀 "-" 表示文件不存在时不报错。
+EnvironmentFile=-/opt/pa-agent/.env
+
+# 必须 --foreground：后台模式（pa_agent/monitoring/daemon.py:97 start_new_session=True）
+# 会让父进程立即返回，systemd 会判定主进程退出并反复重启。
+ExecStart=/opt/pa-agent/.venv/bin/pa-monitor start --foreground
+ExecStop=/opt/pa-agent/.venv/bin/pa-monitor stop
+
+Restart=always
+RestartSec=5
+
+# 优雅收尾窗口。pa-monitor 自己按 monitoring.shutdown_timeout_seconds（默认 90s）
+# 等在途分析收尾，watchdog 延迟 = max(4, timeout+5)。这里留到 180s。
+TimeoutStopSec=180
+# mixed：主进程 SIGTERM，子进程（AI 请求线程）留给上面的窗口收尾。
+KillMode=mixed
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
